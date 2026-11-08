@@ -16,7 +16,7 @@ import time
 
 import pytest
 
-from toolnexus import ACPOptions, ACPPermissionTimeoutError, load_acp
+from toolnexus import ACPCancelledError, ACPOptions, ACPPermissionTimeoutError, load_acp
 
 _FIXTURE = os.path.join(os.path.dirname(__file__), "fixtures", "acp_fake_server.py")
 
@@ -201,3 +201,35 @@ def test_close_is_idempotent_and_kills_the_child():
     # Second close must not raise.
     client.close()
     assert client.is_alive() is False
+
+
+# --------------------------------------------------------------------------- #
+# Cancellation: a set cancel event sends the session/cancel notification, the
+# turn raises ACPCancelledError, and the warm session serves the next turn.
+# --------------------------------------------------------------------------- #
+def test_cancel_sends_session_cancel_and_keeps_the_session_warm():
+    client = load_acp(_opts("cancel", permission_timeout=10.0, request_timeout=5.0))
+    try:
+        cancel = threading.Event()
+        seen: list[str] = []
+
+        def emit(ev):
+            if ev.get("type") == "text":
+                seen.append(ev["delta"])
+                cancel.set()
+
+        started = time.monotonic()
+        with pytest.raises(ACPCancelledError):
+            client.generate_stream({"messages": [{"role": "user", "content": "block"}]}, emit, cancel)
+        assert time.monotonic() - started < 5.0
+        assert seen == ["working"]
+        # The fake ends the held turn only on the notification; the next turn proves it saw one.
+        out = client.generate({"messages": [{"role": "user", "content": "again"}]})
+        assert out["content"] == "after-cancel-seen:true"
+
+        pre = threading.Event()
+        pre.set()
+        with pytest.raises(ACPCancelledError):
+            client.generate({"messages": [{"role": "user", "content": "again"}]}, pre)
+    finally:
+        client.close()

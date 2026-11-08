@@ -116,12 +116,15 @@ public class HostEngineAsksTests
     {
         if (!McpProgressTests.NodeOk()) return;
         var fixture = TestFixtures.Fixture("mcp-progress-server.mjs");
+        // "slow" starts only after OnServer has reported "fast" (it waits for this gate file),
+        // so the order is guaranteed by causality, not by a sleep racing node startup.
+        var gate = Path.Combine(Path.GetTempPath(), "tn-fast-gate-" + Guid.NewGuid().ToString("N"));
         var cfg = new Dictionary<string, object?>
         {
             ["mcp"] = new Dictionary<string, object?>
             {
                 ["fast"] = new Dictionary<string, object?> { ["command"] = new List<object?> { "node", fixture }, ["timeout"] = 5000L },
-                ["slow"] = new Dictionary<string, object?> { ["command"] = new List<object?> { "sh", "-c", "sleep 1; exec node '" + fixture + "'" }, ["timeout"] = 5000L },
+                ["slow"] = new Dictionary<string, object?> { ["command"] = new List<object?> { "sh", "-c", "while [ ! -f '" + gate + "' ]; do sleep 0.02; done; exec node '" + fixture + "'" }, ["timeout"] = 10000L },
                 ["bad"] = new Dictionary<string, object?> { ["command"] = new List<object?> { "/nonexistent/toolnexus-no-such-binary" }, ["timeout"] = 2000L },
                 ["off"] = new Dictionary<string, object?> { ["command"] = new List<object?> { "node", fixture }, ["enabled"] = false },
             },
@@ -139,8 +142,10 @@ public class HostEngineAsksTests
                 at[r.Name] = sw.ElapsedMilliseconds;
                 results[r.Name] = r;
                 tk.Register(r.Tools.ToArray());
+                if (r.Name == "fast") File.WriteAllText(gate, "");
             },
         });
+        try { File.Delete(gate); } catch { }
         Assert.Equal(4, order.Count);
         Assert.Equal("connected", results["fast"].Status);
         Assert.NotEmpty(results["fast"].Tools);
@@ -148,7 +153,8 @@ public class HostEngineAsksTests
         Assert.Equal("failed", results["bad"].Status);
         Assert.NotNull(results["bad"].Error);
         Assert.Equal("disabled", results["off"].Status);
-        Assert.True(at["fast"] < at["slow"] && at["slow"] - at["fast"] >= 500, $"fast={at["fast"]} slow={at["slow"]}");
+        Assert.True(order.IndexOf("fast") < order.IndexOf("slow"), string.Join(",", order));
+        Assert.True(at["fast"] <= at["slow"], $"fast={at["fast"]} slow={at["slow"]}");
         Assert.NotNull(tk.Get("fast_slow"));
         Assert.Equal("disabled", src.Status["off"]);
     }
@@ -590,6 +596,9 @@ public class HostBuiltinExtrasTests : IDisposable
     {
         if (!McpProgressTests.NodeOk()) return;
         var fixture = TestFixtures.Fixture("mcp-progress-server.mjs");
+        // "slow" starts only after OnServer has reported "fast" (it waits for this gate file),
+        // so the order is guaranteed by causality, not by a sleep racing node startup.
+        var gate = Path.Combine(Path.GetTempPath(), "tn-fast-gate-" + Guid.NewGuid().ToString("N"));
         var cfg = "{\"mcp\":{\"progress\":{\"command\":\"node\",\"args\":[" + Json.Stringify(fixture) + "],\"timeout\":5000}}}";
         await using var src = await McpSource.LoadAsync(cfg);
         var tools = src.ResourceTools();

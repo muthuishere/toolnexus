@@ -1,0 +1,84 @@
+{
+  "why": "SPEC §8B key-to-host (#155): a preset's key variable is read only when the endpoint is that preset's own host over https. custom, or a baseUrl on another host, sends NO key unless the caller names apiKeyEnv (or sets a header). Every env value here is a fake. captureCases point baseUrl at a local capture server and assert the Authorization header of EVERY request; hostCases call the port's key-resolution helper on an already ${NAME}-expanded URL.",
+  "questions": {
+    "q": {
+      "instructions": "Is the object red?",
+      "type": "noul"
+    }
+  },
+  "captureCases": [
+    {
+      "name": "custom-default-env-not-sent",
+      "backend": "custom",
+      "env": { "TYPESAFE_API_KEY": "fixture-typesafe-key" },
+      "expectAuthorization": null
+    },
+    {
+      "name": "typesafe-baseurl-override-not-sent",
+      "backend": "typesafe",
+      "env": { "TYPESAFE_API_KEY": "fixture-typesafe-key" },
+      "expectAuthorization": null
+    },
+    {
+      "name": "openrouter-baseurl-override-not-sent",
+      "backend": "openrouter",
+      "env": { "OPENROUTER_API_KEY": "fixture-openrouter-key", "TYPESAFE_API_KEY": "fixture-typesafe-key" },
+      "expectAuthorization": null
+    },
+    {
+      "name": "vercel-baseurl-override-not-sent",
+      "backend": "vercel",
+      "env": { "AI_GATEWAY_API_KEY": "fixture-gateway-key" },
+      "expectAuthorization": null
+    },
+    {
+      "name": "cloudflare-baseurl-override-not-sent",
+      "backend": "cloudflare",
+      "env": { "CLOUDFLARE_JEV_API_KEY": "fixture-cloudflare-key" },
+      "expectAuthorization": null
+    },
+    {
+      "name": "custom-explicit-env-sent",
+      "backend": "custom",
+      "apiKeyEnv": "FIXTURE_CALLER_KEY",
+      "env": { "FIXTURE_CALLER_KEY": "fixture-caller-key", "TYPESAFE_API_KEY": "fixture-typesafe-key" },
+      "expectAuthorization": "Bearer fixture-caller-key"
+    },
+    {
+      "name": "typesafe-override-explicit-env-sent",
+      "backend": "typesafe",
+      "apiKeyEnv": "FIXTURE_CALLER_KEY",
+      "env": { "FIXTURE_CALLER_KEY": "fixture-caller-key", "TYPESAFE_API_KEY": "fixture-typesafe-key" },
+      "expectAuthorization": "Bearer fixture-caller-key"
+    },
+    {
+      "name": "custom-explicit-header-wins",
+      "backend": "custom",
+      "headers": { "Authorization": "Bearer fixture-header-key" },
+      "env": { "TYPESAFE_API_KEY": "fixture-typesafe-key" },
+      "expectAuthorization": "Bearer fixture-header-key"
+    }
+  ],
+  "hostCases": [
+    { "backend": "typesafe", "baseUrl": "https://api.typesafe.ai/v1", "expectKeyEnv": "TYPESAFE_API_KEY" },
+    { "backend": "typesafe", "baseUrl": "https://API.TypeSafe.ai/v1", "expectKeyEnv": "TYPESAFE_API_KEY" },
+    { "backend": "typesafe", "baseUrl": "http://api.typesafe.ai/v1", "expectKeyEnv": "" },
+    { "backend": "typesafe", "baseUrl": "https://evil.example/v1", "expectKeyEnv": "" },
+    { "backend": "typesafe", "baseUrl": "https://api.typesafe.ai.evil.example/v1", "expectKeyEnv": "" },
+    { "backend": "typesafe", "baseUrl": "https://api.typesafe.ai@evil.example/v1", "expectKeyEnv": "" },
+    { "backend": "typesafe", "baseUrl": "http://127.0.0.1:8080/v1", "expectKeyEnv": "" },
+    { "backend": "openrouter", "baseUrl": "https://openrouter.ai/api/v1", "expectKeyEnv": "OPENROUTER_API_KEY" },
+    { "backend": "openrouter", "baseUrl": "https://eu.openrouter.ai/api/v1", "expectKeyEnv": "OPENROUTER_API_KEY" },
+    { "backend": "openrouter", "baseUrl": "https://notopenrouter.ai/api/v1", "expectKeyEnv": "" },
+    { "backend": "vercel", "baseUrl": "https://ai-gateway.vercel.sh/typesafe/v1", "expectKeyEnv": "AI_GATEWAY_API_KEY" },
+    { "backend": "vercel", "baseUrl": "https://other.vercel.sh/typesafe/v1", "expectKeyEnv": "" },
+    { "backend": "cloudflare", "baseUrl": "https://api.cloudflare.com/client/v4/accounts/acct123/ai/run", "expectKeyEnv": "CLOUDFLARE_JEV_API_KEY" },
+    { "backend": "cloudflare", "baseUrl": "https://evil.example/client/v4/accounts/acct123/ai/run", "expectKeyEnv": "" },
+    { "backend": "openai", "baseUrl": "https://api.openai.com/v1", "expectKeyEnv": "OPENAI_API_KEY" },
+    { "backend": "openai", "baseUrl": "http://api.openai.com/v1", "expectKeyEnv": "" },
+    { "backend": "openai", "baseUrl": "https://openrouter.ai/api/alpha", "expectKeyEnv": "" },
+    { "backend": "openai", "baseUrl": "https://api.openai.com.evil.example/v1", "expectKeyEnv": "" },
+    { "backend": "custom", "baseUrl": "https://api.typesafe.ai/v1", "expectKeyEnv": "" },
+    { "backend": "custom", "baseUrl": "https://self-hosted.example/v1", "expectKeyEnv": "" }
+  ]
+}

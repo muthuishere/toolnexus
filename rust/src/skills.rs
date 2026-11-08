@@ -72,11 +72,42 @@ pub struct SkillSkip {
     pub detail: String,
 }
 
+/// The published Agent Skills description limit, in Unicode code points.
+/// Exactly this many does not warn (SPEC.md §3, issue #84).
+pub const MAX_SKILL_DESCRIPTION_CHARS: usize = 1024;
+
+/// Why a KEPT skill was flagged (SPEC.md §3, issue #84).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkillWarningReason {
+    /// Description longer than [`MAX_SKILL_DESCRIPTION_CHARS`] code points; never modified.
+    OversizedDescription,
+}
+
+impl SkillWarningReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::OversizedDescription => "oversized-description",
+        }
+    }
+}
+
+/// A skill that loaded but breaks a published limit. A warning, not a skip:
+/// the skill stays, byte-identical.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SkillWarning {
+    pub location: String,
+    pub reason: SkillWarningReason,
+    /// Description length in Unicode code points (not bytes).
+    pub chars: usize,
+}
+
 /// The result of a list-only pass (S3).
 #[derive(Debug, Clone)]
 pub struct SkillInventory {
     pub skills: Vec<SkillInfo>,
     pub skipped: Vec<SkillSkip>,
+    /// Kept skills over a published limit (unfiltered), in discovery order.
+    pub warnings: Vec<SkillWarning>,
 }
 
 /// Options for [`load_skills_with`] / [`list_skills`].
@@ -97,6 +128,8 @@ pub struct SkillSource {
     pub tool: Tool,
     /// Every candidate that did not become a skill (unfiltered).
     pub skipped: Vec<SkillSkip>,
+    /// Exposed skills (after the allowlist) over a published limit, in discovery order.
+    pub warnings: Vec<SkillWarning>,
 }
 
 // ---------------------------------------------------------------------------
@@ -104,9 +137,9 @@ pub struct SkillSource {
 // ---------------------------------------------------------------------------
 
 #[derive(Default)]
-struct Frontmatter {
-    name: String,
-    description: String,
+pub(crate) struct Frontmatter {
+    pub(crate) name: String,
+    pub(crate) description: String,
 }
 
 /// Split `---`-fenced frontmatter: `^---\r?\n(.*?)\r?\n---\r?\n?(.*)$` (dotall).
@@ -150,7 +183,7 @@ fn scalar_string(y: &Yaml) -> Option<String> {
 
 /// Real YAML first; only when it refuses, a guarded line-wise rescue of
 /// `name`/`description` (ADR 0028). Returns (frontmatter, body, malformed, detail).
-fn parse_frontmatter(text: &str) -> (Frontmatter, String, bool, String) {
+pub(crate) fn parse_frontmatter(text: &str) -> (Frontmatter, String, bool, String) {
     let Some((block, body)) = split_frontmatter(text) else {
         return (
             Frontmatter::default(),
@@ -191,6 +224,27 @@ fn parse_frontmatter(text: &str) -> (Frontmatter, String, bool, String) {
         return (fm, body.to_owned(), true, detail);
     }
     (fm, body.to_owned(), false, String::new())
+}
+
+/// A remote (MCP skills extension) skill as data: the same frontmatter parse
+/// as a local `SKILL.md`, so the loaded body is identical. `None` when the
+/// file has no usable name.
+pub(crate) fn skill_def_from_markdown(
+    text: &str,
+    base: String,
+    resources: Vec<String>,
+) -> Option<SkillDef> {
+    let (fm, content, malformed, _) = parse_frontmatter(text);
+    if malformed || fm.name.is_empty() {
+        return None;
+    }
+    Some(SkillDef {
+        name: fm.name,
+        description: fm.description,
+        content,
+        resources,
+        base,
+    })
 }
 
 fn lenient_frontmatter(block: &str) -> Frontmatter {
@@ -447,9 +501,12 @@ fn collect(opts: &LoadSkillsOptions) -> Vec<Candidate> {
     c
 }
 
-fn merge(cands: Vec<Candidate>) -> (BTreeMap<String, SkillInfo>, Vec<SkillSkip>) {
+type Merged = (BTreeMap<String, SkillInfo>, Vec<SkillSkip>, Vec<String>);
+
+fn merge(cands: Vec<Candidate>) -> Merged {
     let mut skills = BTreeMap::new();
     let mut skipped = Vec::new();
+    let mut order = Vec::new();
     for c in cands {
         match c {
             Candidate::Skip(s) => skipped.push(s),
@@ -465,12 +522,37 @@ fn merge(cands: Vec<Candidate>) -> (BTreeMap<String, SkillInfo>, Vec<SkillSkip>)
                         detail: String::new(),
                     });
                 } else {
+                    order.push(info.name.clone());
                     skills.insert(info.name.clone(), info);
                 }
             }
         }
     }
-    (skills, skipped)
+    (skills, skipped, order)
+}
+
+/// Flag every skill in `skills`, walked in discovery `order`, whose description
+/// exceeds the limit; each is also logged on the duplicate-name channel (stderr).
+fn skill_warnings(skills: &BTreeMap<String, SkillInfo>, order: &[String]) -> Vec<SkillWarning> {
+    order
+        .iter()
+        .filter_map(|name| skills.get(name))
+        .filter_map(|info| {
+            let n = info.description.chars().count();
+            if n <= MAX_SKILL_DESCRIPTION_CHARS {
+                return None;
+            }
+            eprintln!(
+                "[toolnexus] skill {:?} ({}) description is {n} characters, over the {MAX_SKILL_DESCRIPTION_CHARS} limit — kept unmodified",
+                info.name, info.location
+            );
+            Some(SkillWarning {
+                location: info.location.clone(),
+                reason: SkillWarningReason::OversizedDescription,
+                chars: n,
+            })
+        })
+        .collect()
 }
 
 fn apply_filter(
@@ -511,20 +593,25 @@ pub fn load_skills<P: AsRef<Path>>(dirs: &[P]) -> SkillSource {
 
 /// List skills plus typed skips, without building a tool (S3). Unfiltered.
 pub fn list_skills(opts: &LoadSkillsOptions) -> SkillInventory {
-    let (skills, skipped) = merge(collect(opts));
+    let (skills, skipped, order) = merge(collect(opts));
+    let warnings = skill_warnings(&skills, &order);
     SkillInventory {
         skills: skills.into_values().collect(),
         skipped,
+        warnings,
     }
 }
 
 /// Discover skills (dirs and/or data) and build the `skill` tool.
 pub fn load_skills_with(opts: LoadSkillsOptions) -> SkillSource {
-    let (merged, skipped) = merge(collect(&opts));
+    let (merged, skipped, order) = merge(collect(&opts));
     let skills = apply_filter(merged, &opts.filter);
+    let warnings = skill_warnings(&skills, &order);
     let shared = Arc::new(skills.clone());
     let limit = opts.sample_limit;
     let tool = Tool {
+        output_schema: None,
+        annotations: None,
         concurrency_safe: None,
         name: "skill".into(),
         description: SKILL_TOOL_DESCRIPTION.into(),
@@ -545,6 +632,7 @@ pub fn load_skills_with(opts: LoadSkillsOptions) -> SkillSource {
         skills,
         tool,
         skipped,
+        warnings,
     }
 }
 

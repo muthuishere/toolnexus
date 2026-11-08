@@ -1,0 +1,147 @@
+{
+  "why": "Cache keys are specified bytes (design.md §6), so a cache persisted by one port is readable by another. modelKey = sha256hex(canon({endpoint,kind:\"model\",model})); decisionKey = sha256hex(canon({assets?,endpoint,kind:\"decision\",model:served,questions,state})). decisionKeyBytes is the canonical JSON hashed. The endpoint is the configured baseUrl, ${ENV} unexpanded. States here use only strings, small integers, booleans and null, which render identically in every port.",
+  "cases": [
+    {
+      "name": "typesafe-alias",
+      "endpoint": "https://api.typesafe.ai/v1",
+      "model": "jev-latest",
+      "served": "jev-1.14.0",
+      "state": "Order 4021 arrived smashed, I want my money back.",
+      "questions": {
+        "department": {
+          "criteria": {
+            "billing": "refunds, charges, payments",
+            "shipping": "delivery, damage in transit",
+            "technical": "product does not work"
+          },
+          "instructions": "Which department should handle this?",
+          "type": "choice"
+        },
+        "is_refund_request": {
+          "instructions": "Is the customer asking for a refund?",
+          "type": "noul"
+        },
+        "urgency": {
+          "criteria": [
+            "routine",
+            "elevated",
+            "urgent"
+          ],
+          "instructions": "How urgent is this?",
+          "type": "score"
+        }
+      },
+      "modelKey": "687335ac34177f75bf6e4460680ae3af9d96919fd5fe5053ce67f8205ffa9e21",
+      "decisionKey": "f3cd5f63e4d2338815acfde7455295dedf8fafc395d120df7abe6e86cb792e08",
+      "decisionKeyBytes": "{\"endpoint\":\"https://api.typesafe.ai/v1\",\"kind\":\"decision\",\"model\":\"jev-1.14.0\",\"questions\":{\"department\":{\"criteria\":{\"billing\":\"refunds, charges, payments\",\"shipping\":\"delivery, damage in transit\",\"technical\":\"product does not work\"},\"instructions\":\"Which department should handle this?\",\"type\":\"choice\"},\"is_refund_request\":{\"instructions\":\"Is the customer asking for a refund?\",\"type\":\"noul\"},\"urgency\":{\"criteria\":[\"routine\",\"elevated\",\"urgent\"],\"instructions\":\"How urgent is this?\",\"type\":\"score\"}},\"state\":\"Order 4021 arrived smashed, I want my money back.\"}"
+    },
+    {
+      "name": "served-differs",
+      "endpoint": "https://api.typesafe.ai/v1",
+      "model": "jev-latest",
+      "served": "jev-1.13.0",
+      "state": "Order 4021 arrived smashed, I want my money back.",
+      "questions": {
+        "department": {
+          "criteria": {
+            "billing": "refunds, charges, payments",
+            "shipping": "delivery, damage in transit",
+            "technical": "product does not work"
+          },
+          "instructions": "Which department should handle this?",
+          "type": "choice"
+        },
+        "is_refund_request": {
+          "instructions": "Is the customer asking for a refund?",
+          "type": "noul"
+        },
+        "urgency": {
+          "criteria": [
+            "routine",
+            "elevated",
+            "urgent"
+          ],
+          "instructions": "How urgent is this?",
+          "type": "score"
+        }
+      },
+      "modelKey": "687335ac34177f75bf6e4460680ae3af9d96919fd5fe5053ce67f8205ffa9e21",
+      "decisionKey": "f081a1157fe7fb63808cc8109b7370565a6d4309a2c656626dccb804b18521e6",
+      "decisionKeyBytes": "{\"endpoint\":\"https://api.typesafe.ai/v1\",\"kind\":\"decision\",\"model\":\"jev-1.13.0\",\"questions\":{\"department\":{\"criteria\":{\"billing\":\"refunds, charges, payments\",\"shipping\":\"delivery, damage in transit\",\"technical\":\"product does not work\"},\"instructions\":\"Which department should handle this?\",\"type\":\"choice\"},\"is_refund_request\":{\"instructions\":\"Is the customer asking for a refund?\",\"type\":\"noul\"},\"urgency\":{\"criteria\":[\"routine\",\"elevated\",\"urgent\"],\"instructions\":\"How urgent is this?\",\"type\":\"score\"}},\"state\":\"Order 4021 arrived smashed, I want my money back.\"}"
+    },
+    {
+      "name": "hardened-text",
+      "endpoint": "https://openrouter.ai/api/v1",
+      "model": "typesafe/jev-1.14",
+      "served": "typesafe/jev-1.14-20261014",
+      "state": {
+        "z": "<b>&'\"",
+        "é": [
+          "2",
+          "10",
+          1,
+          true,
+          null
+        ],
+        "A": {
+          "y": "café"
+        }
+      },
+      "questions": {
+        "kéy": {
+          "instructions": "Is it \"safe\" & <ok>?",
+          "type": "noul",
+          "criteria": {
+            "true": "",
+            "false": ""
+          }
+        }
+      },
+      "modelKey": "19eecdb695fe0f87d5d55f81e4acaa1ae73ef8f6a55e50167e06de5beeb909ba",
+      "decisionKey": "d0d6fec60fa0c8f974c1f27c76c63c39eb5dbb6af0f65b3478177af060d8ca28",
+      "decisionKeyBytes": "{\"endpoint\":\"https://openrouter.ai/api/v1\",\"kind\":\"decision\",\"model\":\"typesafe/jev-1.14-20261014\",\"questions\":{\"kéy\":{\"criteria\":{\"false\":\"\",\"true\":\"\"},\"instructions\":\"Is it \\\"safe\\\" & <ok>?\",\"type\":\"noul\"}},\"state\":{\"A\":{\"y\":\"café\"},\"z\":\"<b>&'\\\"\",\"é\":[\"2\",\"10\",1,true,null]}}"
+    },
+    {
+      "name": "with-assets",
+      "endpoint": "https://api.typesafe.ai/v1",
+      "model": "jev-1.14.0",
+      "served": "jev-1.14.0",
+      "state": {
+        "note": "listing",
+        "photo": "photo"
+      },
+      "questions": {
+        "q": {
+          "instructions": "Is the object red?",
+          "type": "noul"
+        }
+      },
+      "assets": {
+        "photo": {
+          "type": "image",
+          "format": "png",
+          "data_base64": "iVBORw0KGgoAAAANSUhEUgAAASwAAAEsCAIAAAAAAAAA"
+        }
+      },
+      "modelKey": "918b44880776ac966dca0ab434ace88392ab146be9eb1bfc49fecadb409a5a37",
+      "decisionKey": "7368682c54b7e30aa0a11e570844fad479f6b1a78648b3c50dc17a5f2c675f5f",
+      "decisionKeyBytes": "{\"assets\":{\"photo\":{\"data_base64\":\"iVBORw0KGgoAAAANSUhEUgAAASwAAAEsCAIAAAAAAAAA\",\"format\":\"png\",\"type\":\"image\"}},\"endpoint\":\"https://api.typesafe.ai/v1\",\"kind\":\"decision\",\"model\":\"jev-1.14.0\",\"questions\":{\"q\":{\"instructions\":\"Is the object red?\",\"type\":\"noul\"}},\"state\":{\"note\":\"listing\",\"photo\":\"photo\"}}"
+    },
+    {
+      "name": "cloudflare-template",
+      "endpoint": "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/ai/run",
+      "model": "typesafe/jev",
+      "served": "jev-1.13.0",
+      "state": "x",
+      "questions": {
+        "q": {
+          "instructions": "Is the object red?",
+          "type": "noul"
+        }
+      },
+      "modelKey": "2b236f4d22ead56a1e56da81621f955319a0e1dfed571cdbd4516b1ef642d2d3",
+      "decisionKey": "949da6833b21857ea698c190d801d89d0647dba5e2da192a88a30b5c830b6b54",
+      "decisionKeyBytes": "{\"endpoint\":\"https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/ai/run\",\"kind\":\"decision\",\"model\":\"jev-1.13.0\",\"questions\":{\"q\":{\"instructions\":\"Is the object red?\",\"type\":\"noul\"}},\"state\":\"x\"}"
+    }
+  ]
+}

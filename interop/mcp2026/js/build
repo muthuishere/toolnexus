@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# Build the JS port (dist/) the runners import; reuses node_modules and dist when unchanged.
+# Runner sources: js/interop/mcp2026/{server,client}.ts (outside src/, never published).
+set -euo pipefail
+ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"; cd "$ROOT/js"
+if [[ ! -d node_modules || package-lock.json -nt node_modules ]]; then npm ci --no-audit --no-fund; touch node_modules; fi
+if [[ ! -f dist/index.js ]] || [[ -n "$(find src tsconfig.json -newer dist/index.js -print -quit)" ]]; then npm run build; fi

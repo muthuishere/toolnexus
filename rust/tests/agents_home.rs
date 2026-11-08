@@ -172,6 +172,48 @@ async fn home_h3_memory_tool_persists() {
     assert_eq!(read("MEMORY.md"), "- Likes oolong.\n");
 }
 
+/// A memory write keeps an existing file's permission bits (the atomic rename
+/// must not hand MEMORY.md the temp file's mode). POSIX only.
+#[cfg(unix)]
+#[tokio::test]
+async fn home_memory_write_keeps_file_mode() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = write_bootstrap(&[("MEMORY.md", "- a\n")]);
+    let file = dir.join("MEMORY.md");
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o640)).unwrap();
+    let res: ToolResult = memory_tool(&dir)
+        .call(
+            json!({"action": "add", "text": "b"}),
+            ToolContext::default(),
+        )
+        .await;
+    assert!(!res.is_error);
+    let mode = std::fs::metadata(&file).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o640);
+}
+
+/// H3.6 (H3_memoryWriteOver2MBPreservesDisk): the 2 MB cap applies only to
+/// soul composition; a memory write over a >2 MB file keeps every on-disk byte.
+#[tokio::test]
+async fn home_h3_memory_write_over_2mb_preserves_disk() {
+    let orig = "a".repeat(2 * 1024 * 1024 + 100_000);
+    let dir = write_bootstrap(&[("MEMORY.md", orig.as_str())]);
+    let res: ToolResult = memory_tool(&dir)
+        .call(
+            json!({"action": "add", "text": "x"}),
+            ToolContext::default(),
+        )
+        .await;
+    let got = std::fs::read_to_string(dir.join("MEMORY.md")).unwrap();
+    assert!(!res.is_error);
+    assert!(got.starts_with(&orig), "original bytes not preserved");
+    assert!(got.ends_with("\n- x\n"), "entry not appended");
+    assert!(
+        !got.contains("[truncated:"),
+        "truncation notice baked into disk"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn home_h4_frozen_snapshot() {
     let dir = write_bootstrap(&[("USER.md", "The user is new.")]);

@@ -364,12 +364,12 @@ test("#89 a non-string output is an ERROR, never a silent degrade to \"\"", () =
 // ===========================================================================
 
 test("#91 the classifier backend is a PAIRING, and a known mismatch fails at construction", () => {
-  assert.deepEqual(Object.keys(CLASSIFIER_BACKENDS).sort(), ["openrouter", "typesafe"])
+  assert.deepEqual(Object.keys(CLASSIFIER_BACKENDS).sort(), ["cloudflare", "custom", "openai", "openrouter", "typesafe", "vercel"])
   const c = createClassifier({ backend: "openrouter" })
   assert.ok(c, "the preset sets baseUrl + model + apiKeyEnv as a unit")
   assert.throws(
     () => createClassifier({ baseUrl: "https://openrouter.ai/api/v1", model: "jev-latest" }),
-    /is TypeSafe's spelling; on openrouter\.ai use "typesafe\/jev-1\.13"/,
+    /is TypeSafe's spelling; on openrouter\.ai use "typesafe\/jev-1\.14"/,
     "the mixture the issue hit is refused before the wire, not 700ms later as a 400",
   )
   assert.equal(backendMismatch("https://api.typesafe.ai/v1", "jev-latest"), "", "the default pairing is fine")
@@ -451,7 +451,7 @@ test("#92 MUST NOT REGRESS: ClassifierUsage.cost is OPTIONAL — absent is not z
       headers: { "content-type": "application/json" },
     })
   const c = createClassifier({ fetch: noCost, apiKeyEnv: "TN_TEST_UNSET_KEY" })
-  const d = await c.evaluate({}, { q: { kind: "noul", instructions: "is it?" } as any })
+  const d = await c.evaluate({}, { q: { type: "noul", instructions: "is it?" } })
   assert.equal(d.usage.cost, undefined, "a backend that does not say cost must not read as $0.00")
 })
 

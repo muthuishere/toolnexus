@@ -1,0 +1,405 @@
+/* ───────────────────────────────────────────────────────────────
+   Toolnexus docs theme — "Reference"
+   A reference-book voice: Source Serif 4 for display and headings,
+   Source Sans 3 for body text, JetBrains Mono for code. Ink on paper
+   (light) and ink-on-slate (dark), one deep-green accent. Restraint over
+   decoration: hairline rules, small-caps labels, code set like plates.
+   Fonts are self-hosted via @fontsource (see astro.config customCss).
+   ─────────────────────────────────────────────────────────────── */
+
+:root {
+	--sl-font: 'Source Sans 3 Variable', 'Source Sans 3', system-ui, -apple-system,
+		'Segoe UI', Roboto, sans-serif;
+	--sl-font-mono: 'JetBrains Mono Variable', 'JetBrains Mono', ui-monospace, SFMono-Regular,
+		Menlo, Consolas, monospace;
+	--tn-font-display: 'Source Serif 4 Variable', 'Source Serif 4', Georgia, 'Times New Roman',
+		serif;
+	/* Wider content column (the right-hand ToC is disabled site-wide). */
+	--sl-content-width: 60rem;
+	--sl-text-base: 1.0625rem;
+}
+
+/* ── Dark: ink on slate, mint-green accent ── */
+:root {
+	--sl-color-accent-low: #12302a;
+	--sl-color-accent: #5cc49c;
+	--sl-color-accent-high: #c4ecdc;
+
+	--sl-color-white: #f3f6f4;
+	--sl-color-gray-1: #e7ece9;
+	--sl-color-gray-2: #c3ccc7;
+	--sl-color-gray-3: #93a19a;
+	--sl-color-gray-4: #5e6b65;
+	--sl-color-gray-5: #25302c;
+	--sl-color-gray-6: #171e1c;
+	--sl-color-black: #101413;
+
+	--sl-color-bg: #101413;
+	--sl-color-bg-nav: #121816;
+	--sl-color-bg-sidebar: #121816;
+	--sl-color-bg-inline-code: #1a2420;
+	--sl-color-hairline: #25302c;
+	--sl-color-hairline-light: #25302c;
+	--sl-color-hairline-shade: #0b0e0d;
+	--sl-color-text-accent: #6fd1ab;
+
+	--tn-plate: #151c1a;
+	--tn-rule: #33403b;
+	--tn-strong-rule: #4a5a53;
+}
+
+/* ── Light: ink on paper, deep green accent ── */
+:root[data-theme='light'] {
+	--sl-color-accent-low: #dcebe5;
+	--sl-color-accent: #17614a;
+	--sl-color-accent-high: #0e3b2d;
+
+	--sl-color-white: #121513;
+	--sl-color-gray-1: #1a1d1b;
+	--sl-color-gray-2: #343a37;
+	--sl-color-gray-3: #545b57;
+	--sl-color-gray-4: #858c88;
+	--sl-color-gray-5: #e3e6e4;
+	--sl-color-gray-6: #f4f6f5;
+	--sl-color-gray-7: #fafbfa;
+	--sl-color-black: #ffffff;
+
+	--sl-color-bg: #ffffff;
+	--sl-color-bg-nav: #ffffff;
+	--sl-color-bg-sidebar: #fbfcfb;
+	--sl-color-bg-inline-code: #ebf2ef;
+	--sl-color-hairline: #e3e6e4;
+	--sl-color-hairline-light: #eef0ef;
+	--sl-color-hairline-shade: #d3d8d5;
+	--sl-color-text-accent: #17614a;
+
+	--tn-plate: #f4f6f5;
+	--tn-rule: #d3d8d5;
+	--tn-strong-rule: #1a1d1b;
+}
+
+/* ── Type: serif display, sans text ── */
+.site-title {
+	font-family: var(--tn-font-display);
+	font-weight: 600;
+	letter-spacing: -0.01em;
+	color: var(--sl-color-white);
+}
+.sl-markdown-content :is(h1, h2, h3),
+.content-panel h1 {
+	font-family: var(--tn-font-display);
+	font-weight: 600;
+	letter-spacing: -0.01em;
+	color: var(--sl-color-white);
+}
+.content-panel h1 {
+	font-size: clamp(2rem, 3.6vw, 2.75rem);
+	line-height: 1.1;
+}
+
+/* Section rules: every h2 opens a new "section" with a hairline above it. */
+.sl-markdown-content :is(h2, .sl-heading-wrapper.level-h2) {
+	margin-top: 3rem;
+	padding-top: 1.25rem;
+	border-top: 1px solid var(--tn-rule);
+}
+.sl-markdown-content .sl-heading-wrapper.level-h2 h2 {
+	margin-top: 0;
+	padding-top: 0;
+	border-top: none;
+}
+.sl-markdown-content h3 {
+	font-size: 1.3rem;
+}
+
+/* Small-caps labels: sidebar group headings and table headers. */
+.sidebar-content .group-label .large,
+.sidebar-content summary .large,
+.sl-markdown-content th {
+	font-variant-caps: all-small-caps;
+	letter-spacing: 0.06em;
+	font-weight: 600;
+}
+.sl-markdown-content th {
+	color: var(--sl-color-gray-3);
+	border-bottom: 1px solid var(--tn-strong-rule);
+}
+
+/* Margin notes: asides read as notes in the margin of a manual — a thin
+   rule on the left, a small-caps title, no tinted box. */
+.starlight-aside {
+	background: transparent;
+	border-inline-start-width: 2px;
+	padding-block: 0.25rem;
+	padding-inline-start: 1.1rem;
+}
+.starlight-aside__title {
+	font-variant-caps: all-small-caps;
+	letter-spacing: 0.08em;
+	font-size: 1rem;
+}
+
+/* Code as plates: a stronger top rule, square corners, quiet paper ground. */
+.expressive-code .frame {
+	border-top: 2px solid var(--tn-strong-rule);
+	box-shadow: none !important;
+}
+.expressive-code .frame .header .title,
+starlight-tabs [role='tab'] {
+	font-variant-caps: all-small-caps;
+	letter-spacing: 0.06em;
+}
+
+/* Active language tab: accent underline, not a box. */
+starlight-tabs [role='tab'][aria-selected='true'] {
+	color: var(--sl-color-text-accent);
+	border-color: var(--sl-color-accent);
+}
+
+/* Links in prose: ink with an accent underline, like a cross-reference. */
+.sl-markdown-content a:not(:where(.not-content *)) {
+	color: var(--sl-color-text-accent);
+	text-underline-offset: 0.2em;
+	text-decoration-thickness: 1px;
+}
+
+/* ── Home hero: a real display moment for the name ── */
+.hero {
+	padding-block: clamp(3rem, 8vw, 6rem) 2.5rem;
+}
+.hero h1,
+.hero #_top {
+	font-family: var(--tn-font-display);
+	font-weight: 600;
+	font-optical-sizing: auto;
+	font-size: clamp(3.5rem, 9vw, 6.5rem);
+	line-height: 0.95;
+	letter-spacing: -0.025em;
+	color: var(--sl-color-white);
+}
+.hero .tagline {
+	font-size: clamp(1.1rem, 1.8vw, 1.3rem);
+	line-height: 1.55;
+	max-width: 46ch;
+	color: var(--sl-color-gray-2);
+}
+.hero .sl-link-button {
+	border-radius: 4px;
+}
+
+/* The eight-language strip: one row of a manual's index, each port set in
+   mono with its registry beneath in small caps. */
+.tn-langs {
+	display: grid;
+	grid-template-columns: repeat(8, minmax(0, 1fr));
+	margin: 0 0 2.5rem;
+	padding: 0;
+	list-style: none;
+	border-top: 2px solid var(--tn-strong-rule);
+	border-bottom: 1px solid var(--tn-rule);
+}
+.sl-markdown-content .tn-langs li {
+	margin: 0;
+	padding: 0.75rem 0.5rem 0.7rem;
+	border-inline-start: 1px solid var(--tn-rule);
+}
+.sl-markdown-content .tn-langs li:first-child {
+	border-inline-start: none;
+}
+.tn-langs a {
+	display: block;
+	text-decoration: none;
+	color: inherit;
+}
+.tn-langs .tn-lang {
+	display: block;
+	font-family: var(--sl-font-mono);
+	font-size: 0.9rem;
+	color: var(--sl-color-white);
+}
+.tn-langs .tn-reg {
+	display: block;
+	font-variant-caps: all-small-caps;
+	letter-spacing: 0.06em;
+	font-size: 0.95rem;
+	color: var(--sl-color-gray-3);
+}
+.tn-langs a:hover .tn-lang {
+	color: var(--sl-color-text-accent);
+}
+.tn-langs .tn-reglink {
+	display: inline-flex;
+	align-items: center;
+	gap: 0.35rem;
+	margin-top: 0.15rem;
+}
+.tn-langs .tn-ico {
+	width: 0.85rem;
+	height: 0.85rem;
+	flex: none;
+	background: currentColor;
+	color: var(--sl-color-gray-3);
+	-webkit-mask: var(--ico) center / contain no-repeat;
+	mask: var(--ico) center / contain no-repeat;
+	transition: color 200ms ease-out;
+}
+.tn-langs .tn-reglink:hover .tn-ico,
+.tn-langs .tn-reglink:hover .tn-reg {
+	color: var(--sl-color-text-accent);
+}
+@media (max-width: 50rem) {
+	.tn-langs {
+		grid-template-columns: repeat(4, minmax(0, 1fr));
+	}
+	.sl-markdown-content .tn-langs li:nth-child(5) {
+		border-inline-start: none;
+	}
+	.sl-markdown-content .tn-langs li:nth-child(n + 5) {
+		border-top: 1px solid var(--tn-rule);
+	}
+}
+
+/* ── Video placeholder — where the per-language demos will land ── */
+.tn-video-placeholder {
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	justify-content: center;
+	gap: 0.5rem;
+	aspect-ratio: 16 / 9;
+	width: 100%;
+	margin: 1.5rem 0;
+	border: 1px dashed var(--sl-color-accent);
+	border-radius: 12px;
+	background: linear-gradient(
+		135deg,
+		color-mix(in srgb, var(--sl-color-accent) 8%, var(--sl-color-bg)),
+		var(--sl-color-bg)
+	);
+	color: var(--sl-color-gray-2);
+	text-align: center;
+	padding: 1rem;
+}
+
+.tn-video-placeholder .tn-video-badge {
+	font-size: 0.72rem;
+	font-weight: 600;
+	letter-spacing: 0.08em;
+	text-transform: uppercase;
+	color: var(--sl-color-text-accent);
+}
+
+.tn-video-placeholder .tn-video-play {
+	font-size: 2.2rem;
+	line-height: 1;
+	opacity: 0.7;
+}
+
+.tn-video-placeholder .tn-video-title {
+	font-weight: 600;
+	color: var(--sl-color-white);
+}
+
+.tn-video-placeholder .tn-video-note {
+	font-size: 0.85rem;
+	max-width: 34ch;
+}
+
+/* ── Wide markdown tables — fit more before scrolling, then scroll (never clip) ── */
+.sl-markdown-content table {
+	display: block;
+	width: max-content;
+	max-width: 100%;
+	overflow-x: auto;
+	font-size: 0.85rem; /* fit more columns (comparison/benchmark tables are wide) */
+}
+.sl-markdown-content table :is(th, td) {
+	padding-block: 0.4rem;
+	padding-inline: 0.6rem;
+}
+
+/* ── The launch explainer video ── */
+.tn-video {
+	display: block;
+	width: 100%;
+	aspect-ratio: 16 / 9;
+	margin: 1.5rem 0;
+	border-radius: 2px;
+	border: 1px solid var(--sl-color-hairline);
+	border-top: 2px solid var(--tn-strong-rule);
+	background: #121212;
+}
+
+/* ── Home: the line-art mark and the language connectors ── */
+.hero .tn-hero-mark {
+	width: min(15rem, 60vw);
+	height: auto;
+	fill: var(--sl-color-accent);
+}
+.hero .tn-hero-mark .tn-wire {
+	fill: none;
+	stroke: var(--sl-color-accent);
+	stroke-width: 3;
+	stroke-linecap: round;
+}
+.tn-converge {
+	display: block;
+	width: 100%;
+	height: 3rem;
+	margin: 0 0 -1px;
+	fill: none;
+	stroke: var(--tn-rule);
+	stroke-width: 1;
+}
+.tn-converge path {
+	vector-effect: non-scaling-stroke;
+}
+.tn-converge circle {
+	fill: var(--sl-color-accent);
+	stroke: none;
+}
+.tn-langs a {
+	transition: transform 200ms ease-out;
+}
+.tn-langs .tn-lang {
+	text-decoration: underline transparent;
+	text-underline-offset: 0.25em;
+	transition: text-decoration-color 200ms ease-out, color 200ms ease-out;
+}
+.tn-langs a:hover {
+	transform: translateY(-2px);
+}
+.tn-langs a:hover .tn-lang {
+	text-decoration-color: currentColor;
+}
+
+/* ── One orchestrated load, then still. Everything ends fully visible; transform
+   and opacity only, so nothing shifts layout. No motion when the user asks. ── */
+@keyframes tn-rise {
+	from { opacity: 0; transform: translateY(8px); }
+}
+@keyframes tn-fade {
+	from { opacity: 0; }
+}
+@keyframes tn-draw {
+	from { stroke-dashoffset: 1; }
+	to { stroke-dashoffset: 0; }
+}
+@media (prefers-reduced-motion: no-preference) {
+	.hero h1 { animation: tn-rise 500ms ease-out both; }
+	.hero .tagline { animation: tn-rise 500ms ease-out 90ms both; }
+	.hero .sl-flex.actions, .hero .actions { animation: tn-rise 500ms ease-out 180ms both; }
+	.hero .tn-hero-mark .tn-wire,
+	.tn-converge path {
+		stroke-dasharray: 1;
+		animation: tn-draw 600ms ease-out both;
+	}
+	.hero .tn-hero-mark circle { animation: tn-fade 300ms ease-out both; }
+	.hero .tn-hero-mark .tn-wire:nth-of-type(2) { animation-delay: 80ms; }
+	.hero .tn-hero-mark .tn-wire:nth-of-type(3) { animation-delay: 160ms; }
+	.hero .tn-hero-mark .tn-head { animation: tn-fade 400ms ease-out 420ms both; }
+	.tn-converge path { animation-delay: 300ms; }
+	.tn-converge circle { animation: tn-fade 300ms ease-out 250ms both; }
+	.tn-langs li { animation: tn-fade 400ms ease-out 450ms both; }
+	.sl-markdown-content .expressive-code { animation: tn-fade 400ms ease-out 200ms both; }
+}

@@ -1,6 +1,6 @@
 package io.github.muthuishere.toolnexus;
 
-import com.fasterxml.jackson.core.type.TypeReference;
+import tools.jackson.core.type.TypeReference;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;

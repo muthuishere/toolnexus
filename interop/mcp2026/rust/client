@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+export CARGO_TARGET_DIR="$HOME/.cache/cargo-target-shared"
+exec "$CARGO_TARGET_DIR/debug/examples/interop_mcp2026_client" "$@"

@@ -1,0 +1,15 @@
+[package]
+name = "run_toolnexus_rust"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+toolnexus = { path = "../../rust" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+serde_json = "1"
+
+[profile.release]
+opt-level = 3

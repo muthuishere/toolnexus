@@ -6,34 +6,45 @@
 //! named `sanitize(server)_sanitize(tool)`. One failing server is isolated:
 //! it is marked `failed` and the rest load. Port of `golang/mcp.go`.
 //!
+//! stdio servers on the frozen path run on our own JSON-RPC client
+//! ([`stdio`]); `rmcp` is kept only for remote (streamable HTTP / SSE) servers.
+//!
 //! Each `tools/call` carries a progress token, and its timeout is an IDLE
-//! timeout: a matching `notifications/progress` resets it (rmcp
-//! `reset_timeout_on_progress`). There is no absolute cap.
+//! timeout: a matching `notifications/progress` resets it. There is no
+//! absolute cap.
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
+use rmcp::RoleClient;
+#[cfg(feature = "mcp-http")]
+use rmcp::ServiceExt;
 use rmcp::model::{CallToolRequestParams, ClientRequest, ContentBlock, ServerResult};
 use rmcp::service::{PeerRequestOptions, RunningService};
 #[cfg(feature = "mcp-http")]
 use rmcp::transport::StreamableHttpClientTransport;
-use rmcp::transport::TokioChildProcess;
 #[cfg(feature = "mcp-http")]
 use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
-use rmcp::{RoleClient, ServiceExt};
 use serde_json::{Map, Value, json};
 use tokio::sync::Mutex;
 
 use crate::tool::{ContentPart, Tool, ToolHints, ToolResult, ToolSource, sanitize};
 
+mod direct;
 mod elicit;
+mod oauth;
 mod resources;
 #[cfg(feature = "mcp-http")]
 pub mod sse;
+mod stdio;
+mod wire;
 
+pub use direct::parse_skill_uri;
 pub use elicit::{answer_to_elicit_result, elicitation_to_request};
+pub use oauth::{AuthConfig, MemoryTokenStore, OpenUrlFn, Token, TokenStore};
+pub use wire::PROTOCOL_VERSION;
 
 /// Default per-server timeout (connect, list, and the per-call idle timeout).
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -70,6 +81,12 @@ pub struct ServerConfig {
     /// Per-server allowlist on ORIGINAL tool names (empty ⇒ all; any true ⇒
     /// allowlist; only false ⇒ drop-list).
     pub tools: BTreeMap<String, bool>,
+    /// OAuth (SPEC §2A.1); `None` ⇒ defaults (a 401 still triggers the flow).
+    pub auth: Option<AuthConfig>,
+    /// What this server is for (tool search, §2.8).
+    pub description: Option<String>,
+    /// Expose `search_tools` + `call_tool` instead of every tool (§2.8).
+    pub tool_search: bool,
 }
 
 impl ServerConfig {
@@ -194,6 +211,12 @@ fn decode_servers(v: &Value) -> Result<McpConfig, McpError> {
                         .collect()
                 })
                 .unwrap_or_default(),
+            auth: e
+                .get("auth")
+                .filter(|v| v.is_object())
+                .map(AuthConfig::from_value),
+            description: s("description"),
+            tool_search: b("toolSearch").unwrap_or(false),
             ..Default::default()
         };
         let env = str_map("environment");
@@ -286,8 +309,17 @@ type Client = RunningService<RoleClient, elicit::Bridge>;
 /// One connected server's peer, for [`McpSource::resource_tools`].
 #[derive(Clone)]
 pub(crate) struct ServerConn {
-    pub(crate) peer: Arc<rmcp::Peer<RoleClient>>,
+    pub(crate) conn: Conn,
     pub(crate) timeout: Duration,
+}
+
+/// The client behind one frozen-path server.
+#[derive(Clone)]
+pub(crate) enum Conn {
+    /// A remote server, through the SDK.
+    Sdk(Arc<rmcp::Peer<RoleClient>>),
+    /// A stdio server, on our own client.
+    Stdio(Arc<stdio::StdioClient>),
 }
 
 /// The connected servers and their tools.
@@ -297,7 +329,12 @@ pub struct McpSource {
     pub status: BTreeMap<String, McpStatus>,
     /// Why each failed server failed (diagnostic).
     pub errors: BTreeMap<String, String>,
+    /// Skills served by 2026 servers' skills extension (§2.7); the toolkit
+    /// adds them to the `skill` tool.
+    pub skills: Vec<crate::skills::SkillDef>,
     clients: Mutex<Vec<Client>>,
+    stdio: Vec<Arc<stdio::StdioClient>>,
+    direct: Vec<Arc<direct::DirectServer>>,
     servers: BTreeMap<String, ServerConn>,
 }
 
@@ -315,6 +352,12 @@ impl McpSource {
     pub async fn close(&self) {
         for c in self.clients.lock().await.drain(..) {
             let _ = c.cancel().await;
+        }
+        for s in &self.stdio {
+            s.close().await;
+        }
+        for d in &self.direct {
+            d.close().await;
         }
     }
 
@@ -358,6 +401,13 @@ pub struct McpLoadOptions {
     /// (form → `kind:"input"`, URL → `kind:"authorization"`). `None` ⇒ not
     /// advertised, so a compliant server will not elicit.
     pub wait_for: Option<crate::client::WaitForFn>,
+    /// Where OAuth tokens live (§2A.1a); `None` ⇒ in memory, per load.
+    pub token_store: Option<Arc<dyn TokenStore>>,
+    /// How `auto`-mode OAuth opens the authorization URL; `None` ⇒ the OS opener.
+    pub open_url: Option<OpenUrlFn>,
+    /// Toolkit `disableTools` names; on a `toolSearch` server they are also
+    /// hidden from `search_tools` / `call_tool`.
+    pub disable_tools: Vec<String>,
 }
 
 /// Connect to every enabled server concurrently. Never fails as a whole: a
@@ -373,6 +423,16 @@ pub async fn load_mcp_with(config: &McpConfig, opts: McpLoadOptions) -> McpSourc
         if let Some(cb) = &opts.on_server {
             cb(r);
         }
+    };
+    let ctx = direct::LoadCtx {
+        wait_for: opts.wait_for.clone(),
+        store: opts
+            .token_store
+            .clone()
+            .unwrap_or_else(|| MemoryTokenStore::new() as Arc<dyn TokenStore>),
+        open_url: opts.open_url.clone(),
+        http: reqwest::Client::new(),
+        disabled: opts.disable_tools.iter().cloned().collect(),
     };
     let mut set = tokio::task::JoinSet::new();
     let mut status = BTreeMap::new();
@@ -391,12 +451,20 @@ pub async fn load_mcp_with(config: &McpConfig, opts: McpLoadOptions) -> McpSourc
         let bridge = elicit::Bridge {
             wait_for: opts.wait_for.clone(),
         };
+        let ctx = ctx.clone();
         set.spawn(async move {
-            let r =
-                tokio::time::timeout(cfg.timeout(), connect_and_list(&name, &cfg, bridge)).await;
-            let r = r.unwrap_or_else(|_| {
-                Err(format!("timed out after {}ms", cfg.timeout().as_millis()))
-            });
+            let r = match direct::probe(&name, &cfg, &ctx).await {
+                Ok(direct::Probe::Direct(c)) => Ok(Loaded::Direct(c)),
+                Ok(direct::Probe::Fallback { bearer, stdio }) => tokio::time::timeout(
+                    cfg.timeout(),
+                    connect_and_list(&name, &cfg, bridge, bearer, stdio),
+                )
+                .await
+                .unwrap_or_else(|_| {
+                    Err(format!("timed out after {}ms", cfg.timeout().as_millis()))
+                }),
+                Err(e) => Err(e),
+            };
             (name, cfg, r)
         });
     }
@@ -404,23 +472,63 @@ pub async fn load_mcp_with(config: &McpConfig, opts: McpLoadOptions) -> McpSourc
     let mut errors = BTreeMap::new();
     let mut clients = Vec::new();
     let mut servers = BTreeMap::new();
+    let mut direct_servers = Vec::new();
+    let mut stdio_clients = Vec::new();
+    let mut skills = Vec::new();
     while let Some(joined) = set.join_next().await {
         let Ok((name, cfg, r)) = joined else { continue };
         match r {
-            Ok((client, defs)) => {
+            Ok(Loaded::Direct(c)) => {
+                direct_servers.push(c.server);
+                skills.extend(c.skills);
+                status.insert(name.clone(), McpStatus::Connected);
+                report(McpServerResult {
+                    name: name.clone(),
+                    status: McpStatus::Connected,
+                    tools: c.tools.clone(),
+                    error: None,
+                });
+                by_server.insert(name, c.tools);
+            }
+            Ok(Loaded::Sdk(client, defs)) => {
                 let peer = Arc::new(client.peer().clone());
-                let tools: Vec<Tool> = apply_tools_filter(&name, defs, &cfg.tools)
-                    .into_iter()
-                    .map(|def| convert_tool(&name, def, peer.clone(), cfg.timeout()))
-                    .collect();
+                let tools: Vec<Tool> =
+                    apply_tools_filter(&name, defs, &cfg.tools, |d| d.name.as_ref())
+                        .into_iter()
+                        .map(|def| convert_tool(&name, def, peer.clone(), cfg.timeout()))
+                        .collect();
                 clients.push(client);
                 servers.insert(
                     name.clone(),
                     ServerConn {
-                        peer,
+                        conn: Conn::Sdk(peer),
                         timeout: cfg.timeout(),
                     },
                 );
+                status.insert(name.clone(), McpStatus::Connected);
+                report(McpServerResult {
+                    name: name.clone(),
+                    status: McpStatus::Connected,
+                    tools: tools.clone(),
+                    error: None,
+                });
+                by_server.insert(name, tools);
+            }
+            Ok(Loaded::Stdio(client, defs)) => {
+                let tools: Vec<Tool> = apply_tools_filter(&name, defs, &cfg.tools, |d| {
+                    d.get("name").and_then(Value::as_str).unwrap_or("")
+                })
+                .into_iter()
+                .map(|def| stdio_tool(&name, &def, client.clone(), cfg.timeout()))
+                .collect();
+                servers.insert(
+                    name.clone(),
+                    ServerConn {
+                        conn: Conn::Stdio(client.clone()),
+                        timeout: cfg.timeout(),
+                    },
+                );
+                stdio_clients.push(client);
                 status.insert(name.clone(), McpStatus::Connected);
                 report(McpServerResult {
                     name: name.clone(),
@@ -447,69 +555,81 @@ pub async fn load_mcp_with(config: &McpConfig, opts: McpLoadOptions) -> McpSourc
         tools: by_server.into_values().flatten().collect(),
         status,
         errors,
+        skills,
         clients: Mutex::new(clients),
+        stdio: stdio_clients,
+        direct: direct_servers,
         servers,
     }
+}
+
+enum Loaded {
+    Direct(direct::Connected),
+    #[cfg_attr(not(feature = "mcp-http"), allow(dead_code))]
+    Sdk(Client, Vec<rmcp::model::Tool>),
+    Stdio(Arc<stdio::StdioClient>, Vec<Value>),
 }
 
 async fn connect_and_list(
     name: &str,
     cfg: &ServerConfig,
     bridge: elicit::Bridge,
-) -> Result<(Client, Vec<rmcp::model::Tool>), String> {
-    let client = if cfg.is_remote() {
+    bearer: String,
+    handoff: Option<Box<direct::StdioHandoff>>,
+) -> Result<Loaded, String> {
+    if cfg.is_remote() {
+        #[cfg(not(feature = "mcp-http"))]
+        let _ = (bridge, bearer);
         #[cfg(not(feature = "mcp-http"))]
         return Err(format!(
             "remote server {name:?}: built without the `mcp-http` feature"
         ));
         #[cfg(feature = "mcp-http")]
         {
-            connect_remote(cfg, bridge).await?
+            let client = connect_remote(cfg, bridge, &bearer).await?;
+            let defs = client
+                .list_all_tools()
+                .await
+                .map_err(|e| format!("list tools failed: {e}"))?;
+            return Ok(Loaded::Sdk(client, defs));
         }
+    }
+    let client = if let Some(h) = handoff {
+        // SPEC §2.2a: the probe child answered discover; continue on it
+        stdio::StdioClient::from_handoff(*h, bridge.wait_for).await?
     } else {
-        let Some((prog, args)) = cfg.command.split_first() else {
+        if cfg.command.is_empty() {
             return Err(format!("local server {name:?} has no command"));
-        };
-        let mut cmd = tokio::process::Command::new(prog);
-        cmd.args(args).envs(cfg.env.iter());
-        if let Some(cwd) = &cfg.cwd {
-            cmd.current_dir(cwd);
         }
-        let mut wrap = process_wrap::tokio::CommandWrap::from(cmd);
-        #[cfg(unix)]
-        wrap.wrap(process_wrap::tokio::ProcessGroup::leader());
-        #[cfg(windows)]
-        wrap.wrap(process_wrap::tokio::JobObject);
-        let transport = TokioChildProcess::builder(wrap)
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .map(|(t, _)| t)
-            .map_err(|e| format!("start {prog:?}: {e}"))?;
-        bridge.serve(transport).await.map_err(|e| e.to_string())?
+        stdio::StdioClient::spawn(&cfg.command, &cfg.env, cfg.cwd.as_deref(), bridge.wait_for)
+            .await?
     };
-    let defs = client
-        .list_all_tools()
-        .await
-        .map_err(|e| format!("list tools failed: {e}"))?;
-    Ok((client, defs))
+    match client.list_all("tools/list", "tools").await {
+        Ok(defs) => Ok(Loaded::Stdio(client, defs)),
+        Err(e) => {
+            client.close().await;
+            Err(format!("list tools failed: {e}"))
+        }
+    }
 }
 
-fn apply_tools_filter(
+fn apply_tools_filter<T>(
     server: &str,
-    defs: Vec<rmcp::model::Tool>,
+    defs: Vec<T>,
     filter: &BTreeMap<String, bool>,
-) -> Vec<rmcp::model::Tool> {
+    name: impl Fn(&T) -> &str,
+) -> Vec<T> {
     if filter.is_empty() {
         return defs;
     }
     let has_true = filter.values().any(|v| *v);
     for k in filter.keys() {
-        if !defs.iter().any(|d| d.name == k.as_str()) {
+        if !defs.iter().any(|d| name(d) == k.as_str()) {
             eprintln!("[toolnexus] MCP server {server:?} tools filter name {k:?} matched no tool");
         }
     }
     defs.into_iter()
-        .filter(|d| match filter.get(d.name.as_ref()) {
+        .filter(|d| match filter.get(name(d)) {
             Some(v) if has_true => *v,
             None if has_true => false,
             Some(v) => *v,
@@ -519,9 +639,20 @@ fn apply_tools_filter(
 }
 
 #[cfg(feature = "mcp-http")]
-async fn connect_remote(cfg: &ServerConfig, bridge: elicit::Bridge) -> Result<Client, String> {
+async fn connect_remote(
+    cfg: &ServerConfig,
+    bridge: elicit::Bridge,
+    bearer: &str,
+) -> Result<Client, String> {
     let url = cfg.url.clone().unwrap_or_default();
     let mut hm = http::HeaderMap::new();
+    // OAuth on the frozen path (§2A.1a): rmcp takes headers only at connect,
+    // so the token obtained during discovery is sent as a static header.
+    if !bearer.is_empty() {
+        let v = http::HeaderValue::try_from(format!("Bearer {bearer}"))
+            .map_err(|_| "invalid bearer token".to_owned())?;
+        hm.insert(http::header::AUTHORIZATION, v);
+    }
     for (k, v) in expand_env_headers(&cfg.headers) {
         let (Ok(k), Ok(v)) = (
             http::HeaderName::try_from(k.as_str()),
@@ -554,7 +685,11 @@ async fn connect_remote(cfg: &ServerConfig, bridge: elicit::Bridge) -> Result<Cl
 /// Absent fields follow the MCP spec defaults (readOnly false, destructive
 /// true, openWorld true); read-only implies not destructive.
 fn mcp_hints(def: &rmcp::model::Tool) -> Option<ToolHints> {
-    let v = serde_json::to_value(def).ok()?;
+    hints_of(&serde_json::to_value(def).ok()?)
+}
+
+/// [`mcp_hints`] over a wire-shaped tool definition.
+fn hints_of(v: &Value) -> Option<ToolHints> {
     let a = v.get("annotations")?;
     let get = |k: &str| a.get(k).and_then(Value::as_bool);
     let (ro, de, ow) = (
@@ -576,8 +711,7 @@ fn mcp_hints(def: &rmcp::model::Tool) -> Option<ToolHints> {
 /// The tool's input schema, normalized like every port: `type: object`,
 /// `properties` (default `{}`), `required` and `$defs` when present,
 /// `additionalProperties: false`.
-fn build_input_schema(def: &rmcp::model::Tool) -> Value {
-    let input = &def.input_schema;
+fn build_input_schema(input: &Map<String, Value>) -> Value {
     let mut s = Map::new();
     if let Some(d) = input
         .get("$defs")
@@ -613,10 +747,12 @@ fn convert_tool(
     let original = def.name.to_string();
     let server = server.to_owned();
     Tool {
+        output_schema: None,
+        annotations: None,
         concurrency_safe: None,
         name: format!("{}_{}", sanitize(&server), sanitize(&original)),
         description: def.description.as_deref().unwrap_or("").to_owned(),
-        input_schema: build_input_schema(&def),
+        input_schema: build_input_schema(&def.input_schema),
         source: ToolSource::Mcp,
         hints: mcp_hints(&def),
         execute: Arc::new(move |args, ctx| {
@@ -654,6 +790,70 @@ fn convert_tool(
                         timeout.as_millis()
                     ))
                     .with_metadata(meta),
+                    Err(e) => ToolResult::error(e.to_string()).with_metadata(meta),
+                }
+            })
+        }),
+    }
+}
+
+/// A frozen-path stdio tool on our own client.
+fn stdio_tool(
+    server: &str,
+    def: &Value,
+    client: Arc<stdio::StdioClient>,
+    timeout: Duration,
+) -> Tool {
+    let original = def
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_owned();
+    let empty = Map::new();
+    let input = def
+        .get("inputSchema")
+        .and_then(Value::as_object)
+        .unwrap_or(&empty);
+    let server = server.to_owned();
+    // the metadata every result carries, built once
+    let mut meta = Map::new();
+    meta.insert("server".into(), json!(server));
+    Tool {
+        output_schema: None,
+        annotations: None,
+        concurrency_safe: None,
+        name: format!("{}_{}", sanitize(&server), sanitize(&original)),
+        description: def
+            .get("description")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_owned(),
+        input_schema: build_input_schema(input),
+        source: ToolSource::Mcp,
+        hints: hints_of(def),
+        execute: Arc::new(move |args, ctx| {
+            let (client, original, meta) = (client.clone(), original.clone(), meta.clone());
+            Box::pin(async move {
+                let args = match args {
+                    Value::Object(m) => Value::Object(m),
+                    _ => json!({}),
+                };
+                let r = client
+                    .call_tool(&original, args, timeout, &ctx.cancel)
+                    .await;
+                match r {
+                    Ok(mut r) => {
+                        let is_error = r.get("isError").and_then(Value::as_bool).unwrap_or(false);
+                        let structured = r
+                            .get_mut("structuredContent")
+                            .map(Value::take)
+                            .filter(|v| !v.is_null());
+                        let content = match r.get_mut("content").map(Value::take) {
+                            Some(Value::Array(a)) => a,
+                            _ => Vec::new(),
+                        };
+                        map_wire_result(is_error, structured, &content).with_metadata(meta)
+                    }
                     Err(e) => ToolResult::error(e.to_string()).with_metadata(meta),
                 }
             })

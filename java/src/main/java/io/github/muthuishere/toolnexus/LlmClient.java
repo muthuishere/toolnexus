@@ -29,7 +29,21 @@ import java.util.stream.Stream;
  * a {@link Toolkit}. Mirrors the JS reference ({@code js/src/client.ts}).
  */
 public final class LlmClient {
-    private static final HttpClient HTTP = HttpClient.newHttpClient();
+    /**
+     * Shared default LLM transport. {@code executor(Runnable::run)} completes the response
+     * future on the client's selector thread instead of hopping to the default cached pool:
+     * {@link #llmSend} blocks in {@code send()} and every body handler used here only buffers
+     * or enqueues, so nothing user-supplied ever runs on that thread. It removes one thread
+     * hand-off per LLM round-trip (~0.15 ms on loopback). A host that supplies
+     * {@code opts.httpClient} keeps its own client unchanged.
+     *
+     * <p>Built lazily (holder idiom): constructing a JDK {@code HttpClient} initialises the default
+     * {@code SSLContext} — ~100 ms of class loading on a cold JVM — which a client that never sends
+     * (or always sends through {@code opts.httpClient}) should not pay at {@code create()}.
+     */
+    private static final class DefaultHttp {
+        static final HttpClient CLIENT = HttpClient.newBuilder().executor(Runnable::run).build();
+    }
 
     /**
      * The default retryable set: {@code 429} plus the 5xx worth another try — and
@@ -95,6 +109,10 @@ public final class LlmClient {
         public Map<String, String> headers;
         public String systemPrompt;
         public Integer maxTurns;       // default 10
+        /** SPEC §8 "Stop-reason recovery" (default false): answer a malformed tool call with a
+         * corrective message (once), a truncated reply (length/max_tokens) with a continue message
+         * (up to 3 times, text joined) and an empty answer with a nudge (once). Off ⇒ unchanged. */
+        public boolean stopRecovery;
         /** Cap on concurrency-safe tool calls of one response running at once (SPEC §8 "Tool
          * scheduling"). null ⇒ env {@code TOOLNEXUS_MAX_TOOL_CONCURRENCY} when a positive
          * integer, else 10. Unsafe calls (anything not read-only) always run alone. */
@@ -162,6 +180,16 @@ public final class LlmClient {
          * a {@code FAIL} surfaces the error immediately, skipping remaining retries. There is no
          * "suspend" tier — a failure is never a §10 {@code Pending}. Aborts (timeout/cancel) bypass it. */
         public Function<ErrorInfo, Tier> onError; // optional; null = default classifier
+        /** SPEC §7F.1: on a context-overflow provider error, compact via this hook (the
+         * {@code beforeLLM} signature, typically a {@code Compaction.compactor} with a tighter
+         * budget) and re-send the same turn, guarded by the rapid-refill breaker. Null ⇒ an
+         * overflow surfaces as {@link ProviderException}, byte-identical to before. */
+        public Function<BeforeLLMEvent, LLMOverride> compactOnOverflow;
+        /** §8 Resilience: opt-in model fallback chain on overload. When a model call's retry
+         * budget is exhausted and the final status is 503 or 529, the same request is re-sent
+         * with the next model here (fresh budget). Empty/absent = unchanged behaviour. Disabled
+         * at runtime by env {@code TOOLNEXUS_DISABLE_MODEL_FALLBACK=1|true}. */
+        public List<String> fallbackModels; // optional; null/empty = no fallback
         /** §1B: reject a content part larger than this many <b>decoded</b> bytes (not the base64
          * string, which is +33%) at request assembly. Null ⇒ unlimited. The edge constructors
          * enforce the same limit process-wide via {@link ContentPart#setMaxPartBytes(long)};
@@ -186,6 +214,7 @@ public final class LlmClient {
         public Options headers(Map<String, String> v) { this.headers = v; return this; }
         public Options systemPrompt(String v) { this.systemPrompt = v; return this; }
         public Options maxTurns(int v) { this.maxTurns = v; return this; }
+        public Options stopRecovery(boolean v) { this.stopRecovery = v; return this; }
         public Options maxToolConcurrency(int v) { this.maxToolConcurrency = v; return this; }
         public Options hooks(Hooks v) { this.hooks = v; return this; }
         public Options retries(int v) { this.retries = v; return this; }
@@ -199,6 +228,8 @@ public final class LlmClient {
         public Options bodyTransform(Function<Map<String, Object>, Map<String, Object>> v) { this.bodyTransform = v; return this; }
         public Options httpClient(HttpClient v) { this.httpClient = v; return this; }
         public Options onError(Function<ErrorInfo, Tier> v) { this.onError = v; return this; }
+        public Options compactOnOverflow(Function<BeforeLLMEvent, LLMOverride> v) { this.compactOnOverflow = v; return this; }
+        public Options fallbackModels(List<String> v) { this.fallbackModels = v; return this; }
         public Options maxPartBytes(long v) { this.maxPartBytes = v; return this; }
         public Options onUnsupportedPart(String v) { this.onUnsupportedPart = v; return this; }
     }
@@ -245,11 +276,20 @@ public final class LlmClient {
         }
 
         /** §8B: one {@link Classifier#evaluate} call. {@code status} is {@code "ok"} or
-         * {@code "error"}; {@code error} is null on success. NOT folded into the Prometheus
+         * {@code "error"}; {@code error} is null on success. {@code questions} is the count asked,
+         * {@code questionsHash} the sha256 hex of {@link Classifier#canonicalRequest} (empty when
+         * the questions could not be encoded), {@code cached} marks an answer served from
+         * {@link Classifier.Options#cache} with no request sent (L1). NOT folded into the Prometheus
          * registry, so {@link LlmClient#metrics()} text stays byte-identical. */
         record ClassifierEvaluate(String model, String status, long ms,
-                                  long promptTokens, long completionTokens, String error)
+                                  long promptTokens, long completionTokens, String error,
+                                  int questions, String questionsHash, boolean cached)
                 implements MetricEvent {
+            /** The pre-L1 shape: no question count, no hash, not cached. */
+            public ClassifierEvaluate(String model, String status, long ms,
+                                      long promptTokens, long completionTokens, String error) {
+                this(model, status, ms, promptTokens, completionTokens, error, 0, "", false);
+            }
             @Override public String event() { return "classifier.evaluate"; }
         }
 
@@ -281,8 +321,18 @@ public final class LlmClient {
         void save(String id, List<Object> messages);
     }
 
+    /**
+     * A {@link ConversationStore} that can enumerate its conversations — what
+     * {@link TranscriptSearch#transcriptSearchTool} requires (SPEC §7E). Both shipped stores
+     * implement it.
+     */
+    public interface ListableConversationStore extends ConversationStore {
+        /** Every stored conversation, newest first (ties by id ascending). */
+        List<ConversationInfo> list();
+    }
+
     /** Default conversation provider — keeps transcripts in memory for the client's lifetime. */
-    public static final class InMemoryConversationStore implements ConversationStore {
+    public static final class InMemoryConversationStore implements ListableConversationStore {
         private final Map<String, List<Object>> map = new ConcurrentHashMap<>();
         private final Map<String, java.time.Instant> updated = new ConcurrentHashMap<>();
 
@@ -299,6 +349,7 @@ public final class LlmClient {
         }
 
         /** Every stored conversation, newest first (ties by id ascending). */
+        @Override
         public synchronized List<ConversationInfo> list() {
             List<ConversationInfo> out = new ArrayList<>();
             for (Map.Entry<String, java.time.Instant> e : updated.entrySet()) {
@@ -331,7 +382,7 @@ public final class LlmClient {
      * OS allows). Same-id saves are serialized in-process; across processes the last rename wins.
      * Ids must match {@code ^[A-Za-z0-9._-]{1,128}$} and not be {@code .}/{@code ..}.
      */
-    public static final class FileConversationStore implements ConversationStore {
+    public static final class FileConversationStore implements ListableConversationStore {
         private static final java.util.regex.Pattern ID = java.util.regex.Pattern.compile("^[A-Za-z0-9._-]{1,128}$");
         private final java.nio.file.Path root;
         private final Sync sync;
@@ -474,6 +525,7 @@ public final class LlmClient {
         }
 
         /** Every {@code <id>.json} with a valid id, newest mtime first (ties by id). Bodies are not parsed. */
+        @Override
         public List<ConversationInfo> list() {
             List<ConversationInfo> out = new ArrayList<>();
             if (!java.nio.file.Files.isDirectory(root)) return out;
@@ -611,6 +663,67 @@ public final class LlmClient {
         }
     }
 
+    /**
+     * SPEC §7F.1: true iff {@code status} is 400 or 413 AND the lowercased body carries one of the
+     * pinned context-overflow markers (OpenAI, Anthropic, OpenAI-compatible gateways).
+     */
+    public static boolean isContextOverflow(int status, String body) {
+        if (status != 400 && status != 413) return false;
+        String b = body == null ? "" : body.toLowerCase(java.util.Locale.ROOT);
+        for (String m : OVERFLOW_MARKERS) if (b.contains(m)) return true;
+        return false;
+    }
+
+    private static final List<String> OVERFLOW_MARKERS = List.of(
+            "context_length_exceeded", "maximum context length", "prompt is too long",
+            "prompt_too_long", "request_too_large", "context window");
+
+    /**
+     * SPEC §7F.1: reactive compaction gave up — the hook made no progress, or three compactions
+     * in a rapid chain each overflowed again within fewer than two successful LLM calls.
+     */
+    public static final class ContextOverflowError extends RuntimeException {
+        /** Reactive compactions in the chain that failed (3 from the breaker). */
+        public final int compactions;
+        /** Status of the last provider error. */
+        public final int status;
+        /** Redacted body of the last provider error. */
+        public final String body;
+
+        ContextOverflowError(int compactions, int status, String body) {
+            super("context overflow: " + compactions + " reactive compaction(s) did not make the prompt fit");
+            this.compactions = compactions;
+            this.status = status;
+            this.body = body == null ? "" : body;
+        }
+    }
+
+    /** Per-run breaker state for reactive compaction (SPEC §7F.1). */
+    private final class Overflow {
+        int okSince;
+        int streak;
+        boolean retrying;
+        String model;
+
+        /** The compacted transcript to re-send the same turn with; rethrows {@code e} otherwise. */
+        List<Object> react(RuntimeException e, List<Object> messages, List<Map<String, Object>> tools,
+                           String turnModel, int turn) {
+            if (opts.compactOnOverflow == null || !(e instanceof ProviderException pe)
+                    || !isContextOverflow(pe.status, pe.body)) throw e;
+            if (!(streak > 0 && okSince < 2)) streak = 0;
+            if (streak == 3) throw new ContextOverflowError(3, pe.status, pe.body);
+            LLMOverride ov = opts.compactOnOverflow.apply(new BeforeLLMEvent(messages, tools, turnModel, turn));
+            if (ov == null || ov.messages() == null || ov.messages().size() >= messages.size()) {
+                throw new ContextOverflowError(streak, pe.status, pe.body);
+            }
+            streak++;
+            okSince = 0;
+            retrying = true;
+            model = turnModel;
+            return new ArrayList<>(ov.messages());
+        }
+    }
+
     /** Build a {@link ProviderException} from a response, applying {@link #safeErrorBody}. */
     private static ProviderException providerError(int status, String rawBody, String retryAfter) {
         // A5: the typed field carries the FULL redacted body; only the message is capped.
@@ -703,6 +816,19 @@ public final class LlmClient {
         }
     }
 
+    /**
+     * Event passed to {@link Hooks#afterRound} (SPEC §8, #192): fired after a round's tool results
+     * ({@code isFinal=false}, text ""), or when the model answered with no tool call and a turn
+     * remains ({@code isFinal=true}, text = the answer). {@code messages} is the working transcript.
+     */
+    public record AfterRoundEvent(int turn, boolean isFinal, String text, List<Object> messages) {}
+
+    /** Return value of {@link Hooks#afterRound}: each non-empty string becomes a user message;
+     *  a non-empty injection on a final round continues the loop. */
+    public record RoundInjection(List<String> inject) {
+        public static RoundInjection of(String... inject) { return new RoundInjection(List.of(inject)); }
+    }
+
     /** Event passed to {@link Hooks#afterTool}: the call plus the result it produced. */
     public record AfterToolEvent(String name, Map<String, Object> args, ToolResult result,
                                  String id, int turn) {}
@@ -729,11 +855,14 @@ public final class LlmClient {
         public Consumer<AfterLLMEvent> afterLLM;                  // observe only
         public Function<BeforeToolEvent, ToolOverride> beforeTool; // may return null
         public Function<AfterToolEvent, ToolOverride> afterTool;   // may return null
+        /** §8 round boundary (#192): may return null; non-empty inject is appended as user messages. */
+        public Function<AfterRoundEvent, RoundInjection> afterRound;
 
         public Hooks beforeLLM(Function<BeforeLLMEvent, LLMOverride> v) { this.beforeLLM = v; return this; }
         public Hooks afterLLM(Consumer<AfterLLMEvent> v) { this.afterLLM = v; return this; }
         public Hooks beforeTool(Function<BeforeToolEvent, ToolOverride> v) { this.beforeTool = v; return this; }
         public Hooks afterTool(Function<AfterToolEvent, ToolOverride> v) { this.afterTool = v; return this; }
+        public Hooks afterRound(Function<AfterRoundEvent, RoundInjection> v) { this.afterRound = v; return this; }
     }
 
     /** Carries the (possibly rewritten) args and the final result of a {@link #runTool} call. */
@@ -1073,7 +1202,15 @@ public final class LlmClient {
      *   <li>{@code TOOL_CALL} — a tool about to run ({@code id}, {@code name}, {@code args} set).</li>
      *   <li>{@code TOOL_RESULT} — after it ran ({@code id}, {@code name}, {@code output},
      *       {@code isError}, {@code metadata} set).</li>
+     *   <li>{@code THOUGHT} — a model's reasoning delta reported by an in-process/ACP model
+     *       ({@code delta}, {@code via} set). Never part of the answer or {@link RunResult#text}.</li>
+     *   <li>{@code TOOL_CALL_ARGS} — an ACP agent reported a call's input after the call began
+     *       ({@code id}, {@code name}, {@code args}, {@code via} set; SPEC §8C, issue #188).</li>
      *   <li>{@code USAGE} — token usage so far ({@code usage} set).</li>
+     *   <li>{@code RETRY} — the LLM request failed retryably and the loop is about to wait
+     *       {@link RetryInfo#delayMs} and try again ({@code retry} set). Streaming only.</li>
+     *   <li>{@code FALLBACK} — only with {@code fallbackModels}: switching model after overload
+     *       ({@link #from()}, {@link #to()}).</li>
      *   <li>{@code DONE} — terminal event carrying the final {@link RunResult} ({@code result} set).</li>
      * </ul>
      */
@@ -1081,8 +1218,43 @@ public final class LlmClient {
                               Map<String, Object> args, String output, boolean isError,
                               Usage usage, RunResult result, Request request,
                               List<Map<String, Object>> parts, Map<String, Object> metadata,
-                              String via) {
-        public enum Kind { TEXT, TOOL_CALL, TOOL_RESULT, USAGE, PENDING, DONE }
+                              String via, RetryInfo retry) {
+        public enum Kind { TEXT, TOOL_CALL, TOOL_RESULT, USAGE, PENDING, DONE, THOUGHT, TOOL_CALL_ARGS, RETRY, FALLBACK }
+
+        /**
+         * Payload of a {@link Kind#RETRY} event (§8 "Retry event"): {@code attempt} is the 1-based
+         * retry about to happen, {@code max} the configured {@code retries}, {@code delayMs} the exact
+         * wait about to be slept, {@code status} the HTTP status (null on a network error), and
+         * {@code reason} {@code "HTTP <status>"} or {@code "network"}.
+         */
+        public record RetryInfo(int attempt, int max, long delayMs, Integer status, String reason) {}
+
+        /** Without {@code retry} (every event that is not a {@link Kind#RETRY}). */
+        public StreamEvent(Kind type, String delta, String id, String name,
+                           Map<String, Object> args, String output, boolean isError,
+                           Usage usage, RunResult result, Request request,
+                           List<Map<String, Object>> parts, Map<String, Object> metadata, String via) {
+            this(type, delta, id, name, args, output, isError, usage, result, request, parts, metadata, via, null);
+        }
+
+        static StreamEvent retry(int attempt, int max, long delayMs, Integer status) {
+            return new StreamEvent(Kind.RETRY, null, null, null, null, null, false, null, null, null, null, null,
+                    null, new RetryInfo(attempt, max, delayMs, status, status == null ? "network" : "HTTP " + status));
+        }
+
+        /** {@code FALLBACK}: the model being switched away from (else null). */
+        public String from() { return type == Kind.FALLBACK && metadata != null ? (String) metadata.get("from") : null; }
+        /** {@code FALLBACK}: the model being switched to (else null). */
+        public String to() { return type == Kind.FALLBACK && metadata != null ? (String) metadata.get("to") : null; }
+
+        /** §8 Resilience: the call is switching from model {@code from} to {@code to} after overload. */
+        static StreamEvent fallback(String from, String to) {
+            Map<String, Object> m = new LinkedHashMap<>();
+            m.put("from", from);
+            m.put("to", to);
+            return new StreamEvent(Kind.FALLBACK, null, null, null, null, null, false, null, null, null, null,
+                    java.util.Collections.unmodifiableMap(m));
+        }
 
         /** Without {@code via} (every event that is not a tool-tiers {@code call_tool} call). */
         public StreamEvent(Kind type, String delta, String id, String name,
@@ -1098,13 +1270,29 @@ public final class LlmClient {
                     isError, usage, result, request, parts, metadata, "call_tool");
         }
 
-        static StreamEvent text(String delta) {
+        /** A copy carrying {@code via} (e.g. {@code "acp"} for events an ACP agent reported). */
+        public StreamEvent withVia(String v) {
+            return new StreamEvent(type, delta, id, name, args, output, isError, usage, result, request, parts,
+                    metadata, v);
+        }
+
+        /** A reasoning delta from a streaming in-process model; passed to the consumer, never answer text. */
+        public static StreamEvent thought(String delta, String via) {
+            return new StreamEvent(Kind.THOUGHT, delta, null, null, null, null, false, null, null, null, null, null, via);
+        }
+
+        /** A call's input, reported by an ACP agent's {@code tool_call_update} after the call began. */
+        public static StreamEvent toolCallArgs(String id, String name, Map<String, Object> args, String via) {
+            return new StreamEvent(Kind.TOOL_CALL_ARGS, null, id, name, args, null, false, null, null, null, null, null, via);
+        }
+
+        public static StreamEvent text(String delta) {
             return new StreamEvent(Kind.TEXT, delta, null, null, null, null, false, null, null, null, null, null);
         }
-        static StreamEvent toolCall(String id, String name, Map<String, Object> args) {
+        public static StreamEvent toolCall(String id, String name, Map<String, Object> args) {
             return new StreamEvent(Kind.TOOL_CALL, null, id, name, args, null, false, null, null, null, null, null);
         }
-        static StreamEvent toolResult(String id, String name, String output, boolean isError) {
+        public static StreamEvent toolResult(String id, String name, String output, boolean isError) {
             return toolResult(id, name, output, isError, null);
         }
         /** §9: parts are rendered as {@code {type, mimeType, bytes}} — a part's {@code data}
@@ -1175,14 +1363,14 @@ public final class LlmClient {
     /** Conversation provider for {@link #ask} — from {@code opts.store}, else in-memory. */
     private final ConversationStore store;
     /** §8 Gap 2: HTTP client for LLM requests — from {@code opts.httpClient}, else the shared default. */
-    private final HttpClient http;
+    private final HttpClient http; // null ⇒ the lazily-built shared default (see DefaultHttp)
     /** Cumulative Prometheus registry fed by the same events {@code onMetric} sees. */
     private final MetricsRegistry registry = new MetricsRegistry();
 
     private LlmClient(Options opts) {
         this.opts = opts;
         this.store = opts.store != null ? opts.store : new InMemoryConversationStore();
-        this.http = opts.httpClient != null ? opts.httpClient : HTTP;
+        this.http = opts.httpClient;
     }
 
     /**
@@ -1578,7 +1766,9 @@ public final class LlmClient {
         headers.put("Content-Type", "application/json");
         if (opts.headers != null) headers.putAll(opts.headers);
 
-        Map<String, Object> data = llmCallJson(url, headers, body, newDeadline(), "openai");
+        String[] served = {turnModel};
+        Map<String, Object> data = llmCallJson(url, headers, body, newDeadline(), "openai", served);
+        turnModel = served[0];
         translateAfterLLM(data, turnModel);
 
         Translate.Result out = new Translate.Result();
@@ -1652,7 +1842,9 @@ public final class LlmClient {
         headers.put("Content-Type", "application/json");
         if (opts.headers != null) headers.putAll(opts.headers);
 
-        Map<String, Object> data = llmCallJson(endpoint, headers, body, newDeadline(), "anthropic");
+        String[] served = {turnModel};
+        Map<String, Object> data = llmCallJson(endpoint, headers, body, newDeadline(), "anthropic", served);
+        turnModel = served[0];
         translateAfterLLM(data, turnModel);
 
         Translate.Result out = new Translate.Result();
@@ -2050,7 +2242,7 @@ public final class LlmClient {
     @SuppressWarnings("unchecked")
     public static List<ModelInfo> listModels(Options opts) {
         String key = resolveKey(opts, System::getenv);
-        HttpClient http = opts.httpClient != null ? opts.httpClient : HTTP;
+        HttpClient http = opts.httpClient != null ? opts.httpClient : DefaultHttp.CLIENT;
         String base = opts.baseUrl == null ? "" : opts.baseUrl.replaceAll("/+$", "");
         List<ModelInfo> out = new ArrayList<>();
         if ("anthropic".equals(opts.style)) {
@@ -2213,6 +2405,21 @@ public final class LlmClient {
         return u.wrapped() ? ev.viaCallTool(u.name(), null) : ev;
     }
 
+    /** §8 afterRound: fire the hook, append injections as user messages; true when any appended.
+     *  A final round fires only when a turn remains. */
+    private boolean roundEnd(List<Object> messages, int turn, boolean fin, String text) {
+        if (opts.hooks == null || opts.hooks.afterRound == null) return false;
+        if (fin && turn + 1 >= maxTurns()) return false;
+        RoundInjection out = opts.hooks.afterRound.apply(new AfterRoundEvent(turn, fin, text, messages));
+        boolean added = false;
+        if (out != null && out.inject() != null) {
+            for (String m : out.inject()) {
+                if (m != null && !m.isEmpty()) { messages.add(msg("user", m)); added = true; }
+            }
+        }
+        return added;
+    }
+
     private int maxTurns() {
         return opts.maxTurns != null ? opts.maxTurns : 10;
     }
@@ -2278,16 +2485,21 @@ public final class LlmClient {
         int turns = 0;
         long runStart = System.currentTimeMillis();
         String[] lastModel = {opts.model}; // §8: the model of the last model call (reported)
+        StopRecovery rec = new StopRecovery(opts.stopRecovery);
         // §8A: tool message -> the synthetic user message spliced in after it on the wire only.
         java.util.IdentityHashMap<Object, Object> relocated = new java.util.IdentityHashMap<>();
 
         // One virtual-thread executor for the whole run; tool calls in a turn run on it.
         ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
         try {
+            Overflow overflow = new Overflow();
             for (int turn = 0; turn < maxTurns(); turn++) {
                 turns++;
                 String turnModel = opts.model;
-                if (opts.hooks != null && opts.hooks.beforeLLM != null) {
+                if (overflow.retrying) {
+                    overflow.retrying = false;
+                    turnModel = overflow.model;
+                } else if (opts.hooks != null && opts.hooks.beforeLLM != null) {
                     LLMOverride ov = opts.hooks.beforeLLM.apply(
                             new BeforeLLMEvent(messages, tools, opts.model, turn));
                     if (ov != null && ov.messages() != null) messages = ov.messages();
@@ -2311,7 +2523,21 @@ public final class LlmClient {
                 headers.put("Content-Type", "application/json");
                 if (opts.headers != null) headers.putAll(opts.headers);
 
-                Map<String, Object> data = llmCallJson(url, headers, body, deadline, "openai");
+                String[] served = {turnModel};
+                Map<String, Object> data;
+                try {
+                    data = llmCallJson(url, headers, body, deadline, "openai", served);
+                } catch (RuntimeException e) {
+                    turnModel = served[0];
+                    lastModel[0] = turnModel;
+                    messages = overflow.react(e, messages, tools, turnModel, turn);
+                    turn--;
+                    turns--;
+                    continue;
+                }
+                turnModel = served[0];
+                lastModel[0] = turnModel;
+                overflow.okSince++;
                 addUsage(usage, (Map<String, Object>) data.get("usage"), "openai");
                 if (opts.hooks != null && opts.hooks.afterLLM != null) {
                     opts.hooks.afterLLM.accept(new AfterLLMEvent(data, turnModel, turn));
@@ -2321,11 +2547,26 @@ public final class LlmClient {
                         (Map<String, Object>) ((Map<String, Object>) choices.get(0)).get("message");
                 messages.add(message);
                 List<Object> calls = (List<Object>) message.get("tool_calls");
+                boolean malformed = false;
+                if (calls != null) for (Object c : calls) {
+                    Map<String, Object> fn = (Map<String, Object>) ((Map<String, Object>) c).get("function");
+                    if (fn != null && fn.get("arguments") != null) malformed |= StopRecovery.malformedArgs(String.valueOf(fn.get("arguments")));
+                }
+                Object msgContent = message.get("content");
+                String msgText = msgContent == null ? "" : String.valueOf(msgContent);
+                String nudge = rec.decide(turn == maxTurns() - 1, calls != null && !calls.isEmpty(), malformed,
+                        "length".equals(((Map<String, Object>) choices.get(0)).get("finish_reason")), msgText);
+                if (nudge != null) {
+                    if (rec.dropped) messages.remove(messages.size() - 1);
+                    messages.add(msg("user", nudge));
+                    continue;
+                }
                 if (calls == null || calls.isEmpty()) {
-                    Object content = message.get("content");
-                    return endRun(lastModel[0], runStart, content == null ? "" : String.valueOf(content),
+                    if (roundEnd(messages, turn, true, rec.carry + msgText)) { rec.carry = ""; continue; }
+                    return endRun(lastModel[0], runStart, rec.carry + msgText,
                             messages, toolCalls, turns, usage);
                 }
+                rec.carry = "";
 
                 // Execute all tool calls in this turn concurrently (true parallel tool calling).
                 int n = calls.size();
@@ -2384,6 +2625,7 @@ public final class LlmClient {
                 if (!relocatedBlocks.isEmpty()) {
                     relocated.put(toolMsgs[n - 1], syntheticUserMessage(relocatedBlocks));
                 }
+                roundEnd(messages, turn, false, "");
             }
             return incompleteRun(lastModel[0], runStart, lastAssistantText(messages), messages, toolCalls, turns, usage);
         } catch (RuntimeException e) {
@@ -2416,14 +2658,19 @@ public final class LlmClient {
         int turns = 0;
         long runStart = System.currentTimeMillis();
         String[] lastModel = {opts.model}; // §8: the model of the last model call (reported)
+        StopRecovery rec = new StopRecovery(opts.stopRecovery);
 
         // One virtual-thread executor for the whole run; tool calls in a turn run on it.
         ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
         try {
+            Overflow overflow = new Overflow();
             for (int turn = 0; turn < maxTurns(); turn++) {
                 turns++;
                 String turnModel = opts.model;
-                if (opts.hooks != null && opts.hooks.beforeLLM != null) {
+                if (overflow.retrying) {
+                    overflow.retrying = false;
+                    turnModel = overflow.model;
+                } else if (opts.hooks != null && opts.hooks.beforeLLM != null) {
                     LLMOverride ov = opts.hooks.beforeLLM.apply(
                             new BeforeLLMEvent(messages, tools, opts.model, turn));
                     if (ov != null && ov.messages() != null) messages = ov.messages();
@@ -2446,7 +2693,21 @@ public final class LlmClient {
                 headers.put("Content-Type", "application/json");
                 if (opts.headers != null) headers.putAll(opts.headers);
 
-                Map<String, Object> data = llmCallJson(endpoint, headers, body, deadline, "anthropic");
+                String[] served = {turnModel};
+                Map<String, Object> data;
+                try {
+                    data = llmCallJson(endpoint, headers, body, deadline, "anthropic", served);
+                } catch (RuntimeException e) {
+                    turnModel = served[0];
+                    lastModel[0] = turnModel;
+                    messages = overflow.react(e, messages, tools, turnModel, turn);
+                    turn--;
+                    turns--;
+                    continue;
+                }
+                turnModel = served[0];
+                lastModel[0] = turnModel;
+                overflow.okSince++;
                 addUsage(usage, (Map<String, Object>) data.get("usage"), "anthropic");
                 if (opts.hooks != null && opts.hooks.afterLLM != null) {
                     opts.hooks.afterLLM.accept(new AfterLLMEvent(data, turnModel, turn));
@@ -2459,18 +2720,33 @@ public final class LlmClient {
                 messages.add(assistant);
 
                 List<Map<String, Object>> uses = new ArrayList<>();
+                boolean malformed = false;
+                StringBuilder text = new StringBuilder();
                 for (Object b : content) {
                     Map<String, Object> block = (Map<String, Object>) b;
-                    if ("tool_use".equals(block.get("type"))) uses.add(block);
+                    if ("tool_use".equals(block.get("type"))) {
+                        Object in = block.get("input");
+                        if (in != null && !(in instanceof Map)) {
+                            // §8: input that is not an object is malformed; if it runs, it runs as {}.
+                            malformed = true;
+                            block.put("input", new LinkedHashMap<String, Object>());
+                        }
+                        uses.add(block);
+                    }
+                    if ("text".equals(block.get("type"))) text.append(String.valueOf(block.get("text")));
+                }
+                String nudge = rec.decide(turn == maxTurns() - 1, !uses.isEmpty(), malformed,
+                        "max_tokens".equals(data.get("stop_reason")), text.toString());
+                if (nudge != null) {
+                    if (rec.dropped) messages.remove(messages.size() - 1);
+                    messages.add(msg("user", nudge));
+                    continue;
                 }
                 if (uses.isEmpty()) {
-                    StringBuilder text = new StringBuilder();
-                    for (Object b : content) {
-                        Map<String, Object> block = (Map<String, Object>) b;
-                        if ("text".equals(block.get("type"))) text.append(String.valueOf(block.get("text")));
-                    }
-                    return endRun(lastModel[0], runStart, text.toString(), messages, toolCalls, turns, usage);
+                    if (roundEnd(messages, turn, true, rec.carry + text)) { rec.carry = ""; continue; }
+                    return endRun(lastModel[0], runStart, rec.carry + text, messages, toolCalls, turns, usage);
                 }
+                rec.carry = "";
 
                 // Execute all tool_use blocks in this turn concurrently (true parallel tool calling).
                 int n = uses.size();
@@ -2529,6 +2805,7 @@ public final class LlmClient {
                 if (halted != null) {
                     return pendingRun(lastModel[0], runStart, halted, messages, toolCalls, turns, usage);
                 }
+                roundEnd(messages, turn, false, "");
             }
             return incompleteRun(lastModel[0], runStart, "", messages, toolCalls, turns, usage);
         } catch (RuntimeException e) {
@@ -2562,15 +2839,24 @@ public final class LlmClient {
         int turns = 0;
         long runStart = System.currentTimeMillis();
         String[] lastModel = {opts.model}; // §8: the model of the last model call (reported)
+        StopRecovery rec = new StopRecovery(opts.stopRecovery);
         // §8A: tool message -> the synthetic user message spliced in after it on the wire only.
         java.util.IdentityHashMap<Object, Object> relocated = new java.util.IdentityHashMap<>();
 
+        // An in-process streaming model's non-text events (thought, ACP tool narration) reach the
+        // consumer through this side channel — never the wire, so the loop never executes them.
+        // The shim reads it on this thread, inside http.send.
+        InProcess.STREAM_SIDE.set(onEvent);
         ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
         try {
+            Overflow overflow = new Overflow();
             for (int turn = 0; turn < maxTurns(); turn++) {
                 turns++;
                 String turnModel = opts.model;
-                if (opts.hooks != null && opts.hooks.beforeLLM != null) {
+                if (overflow.retrying) {
+                    overflow.retrying = false;
+                    turnModel = overflow.model;
+                } else if (opts.hooks != null && opts.hooks.beforeLLM != null) {
                     LLMOverride ov = opts.hooks.beforeLLM.apply(new BeforeLLMEvent(messages, tools, opts.model, turn));
                     if (ov != null && ov.messages() != null) messages = ov.messages();
                     if (ov != null && ov.tools() != null) tools = ov.tools();
@@ -2602,11 +2888,19 @@ public final class LlmClient {
                 StringBuilder content = new StringBuilder();
                 // index -> accumulated tool call (id/name/args assembled across deltas).
                 Map<Integer, String[]> acc = new LinkedHashMap<>(); // [id, name, args]
+                String[] finish = {""};
                 List<Integer> order = new ArrayList<>();
                 try {
                     // The JDK HttpClient streams the SSE response as lines — ideal for SSE.
-                    HttpResponse<Stream<String>> res =
-                            llmSend(url, headers, body, deadline, HttpResponse.BodyHandlers.ofLines());
+                    String[] served = {turnModel};
+                    HttpResponse<Stream<String>> res;
+                    try {
+                        res = llmSend(url, headers, body, deadline, HttpResponse.BodyHandlers.ofLines(),
+                                onEvent, served, (from, to) -> onEvent.accept(StreamEvent.fallback(from, to)));
+                    } finally {
+                        turnModel = served[0];
+                        lastModel[0] = turnModel;
+                    }
                     if (res.statusCode() < 200 || res.statusCode() >= 300) {
                         String b = res.body() == null ? "" : res.body().collect(Collectors.joining("\n"));
                         throw providerError(res.statusCode(), b,
@@ -2622,6 +2916,7 @@ public final class LlmClient {
                             addUsage(usage, (Map<String, Object>) j.get("usage"), "openai");
                             List<Object> choices = (List<Object>) j.get("choices");
                             if (choices == null || choices.isEmpty()) continue;
+                            if (((Map<String, Object>) choices.get(0)).get("finish_reason") instanceof String fr && !fr.isEmpty()) finish[0] = fr;
                             Map<String, Object> delta = (Map<String, Object>) ((Map<String, Object>) choices.get(0)).get("delta");
                             if (delta == null) continue;
                             Object dc = delta.get("content");
@@ -2648,8 +2943,12 @@ public final class LlmClient {
                     }
                 } catch (RuntimeException e) {
                     emit(new MetricEvent.Llm(turnModel, "error", System.currentTimeMillis() - t0, 0, 0));
-                    throw e;
+                    messages = overflow.react(e, messages, tools, turnModel, turn);
+                    turn--;
+                    turns--;
+                    continue;
                 }
+                overflow.okSince++;
                 emit(new MetricEvent.Llm(turnModel, "ok", System.currentTimeMillis() - t0,
                         usage.promptTokens - beforeP, usage.completionTokens - beforeC));
                 if (opts.hooks != null && opts.hooks.afterLLM != null) {
@@ -2659,14 +2958,25 @@ public final class LlmClient {
                     opts.hooks.afterLLM.accept(new AfterLLMEvent(resp, turnModel, turn));
                 }
 
+                boolean malformed = false;
+                for (int index : order) malformed |= StopRecovery.malformedArgs(acc.get(index)[2]);
+                String nudge = rec.decide(turn == maxTurns() - 1, !order.isEmpty(), malformed,
+                        "length".equals(finish[0]), content.toString());
+                if (nudge != null) {
+                    if (!rec.dropped) messages.add(msg("assistant", content.toString())); // only a truncated text reply is kept
+                    messages.add(msg("user", nudge));
+                    continue;
+                }
                 if (order.isEmpty()) {
                     messages.add(msg("assistant", content.toString()));
+                    if (roundEnd(messages, turn, true, rec.carry + content)) { rec.carry = ""; continue; }
                     onEvent.accept(StreamEvent.usage(copyUsage(usage)));
-                    RunResult done = endRun(lastModel[0], runStart, content.toString(), messages, toolCalls, turns, usage);
+                    RunResult done = endRun(lastModel[0], runStart, rec.carry + content, messages, toolCalls, turns, usage);
                     onEvent.accept(StreamEvent.done(done));
                     return done;
                 }
 
+                rec.carry = "";
                 // Append the assistant message carrying the assembled tool_calls.
                 List<Object> assembledCalls = new ArrayList<>();
                 for (int index : order) {
@@ -2738,6 +3048,7 @@ public final class LlmClient {
                     onEvent.accept(StreamEvent.done(done));
                     return done;
                 }
+                roundEnd(messages, turn, false, "");
             }
             RunResult done = incompleteRun(lastModel[0], runStart, lastAssistantText(messages), messages, toolCalls, turns, usage);
             onEvent.accept(StreamEvent.done(done));
@@ -2748,6 +3059,7 @@ public final class LlmClient {
             throw e;
         } finally {
             executor.shutdown();
+            InProcess.STREAM_SIDE.remove();
         }
     }
 
@@ -2771,13 +3083,18 @@ public final class LlmClient {
         int turns = 0;
         long runStart = System.currentTimeMillis();
         String[] lastModel = {opts.model}; // §8: the model of the last model call (reported)
+        StopRecovery rec = new StopRecovery(opts.stopRecovery);
 
         ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
         try {
+            Overflow overflow = new Overflow();
             for (int turn = 0; turn < maxTurns(); turn++) {
                 turns++;
                 String turnModel = opts.model;
-                if (opts.hooks != null && opts.hooks.beforeLLM != null) {
+                if (overflow.retrying) {
+                    overflow.retrying = false;
+                    turnModel = overflow.model;
+                } else if (opts.hooks != null && opts.hooks.beforeLLM != null) {
                     LLMOverride ov = opts.hooks.beforeLLM.apply(new BeforeLLMEvent(messages, tools, opts.model, turn));
                     if (ov != null && ov.messages() != null) messages = ov.messages();
                     if (ov != null && ov.tools() != null) tools = ov.tools();
@@ -2807,8 +3124,15 @@ public final class LlmClient {
                 List<Integer> order = new ArrayList<>();
                 String[] stopReason = {""};
                 try {
-                    HttpResponse<Stream<String>> res =
-                            llmSend(endpoint, headers, body, deadline, HttpResponse.BodyHandlers.ofLines());
+                    String[] served = {turnModel};
+                    HttpResponse<Stream<String>> res;
+                    try {
+                        res = llmSend(endpoint, headers, body, deadline, HttpResponse.BodyHandlers.ofLines(),
+                                onEvent, served, (from, to) -> onEvent.accept(StreamEvent.fallback(from, to)));
+                    } finally {
+                        turnModel = served[0];
+                        lastModel[0] = turnModel;
+                    }
                     if (res.statusCode() < 200 || res.statusCode() >= 300) {
                         String b = res.body() == null ? "" : res.body().collect(Collectors.joining("\n"));
                         throw providerError(res.statusCode(), b,
@@ -2858,8 +3182,12 @@ public final class LlmClient {
                     }
                 } catch (RuntimeException e) {
                     emit(new MetricEvent.Llm(turnModel, "error", System.currentTimeMillis() - t0, 0, 0));
-                    throw e;
+                    messages = overflow.react(e, messages, tools, turnModel, turn);
+                    turn--;
+                    turns--;
+                    continue;
                 }
+                overflow.okSince++;
                 emit(new MetricEvent.Llm(turnModel, "ok", System.currentTimeMillis() - t0,
                         usage.promptTokens - beforeP, usage.completionTokens - beforeC));
                 if (opts.hooks != null && opts.hooks.afterLLM != null) {
@@ -2871,9 +3199,11 @@ public final class LlmClient {
                 // Build the assistant content blocks from what we assembled.
                 List<Object> content = new ArrayList<>();
                 List<Map<String, Object>> uses = new ArrayList<>();
+                boolean malformed = false;
                 for (int index : order) {
                     Map<String, Object> b = blocks.get(index);
                     if ("tool_use".equals(b.get("type"))) {
+                        malformed |= StopRecovery.malformedArgs(b.get("json").toString());
                         Map<String, Object> tu = new LinkedHashMap<>();
                         tu.put("type", "tool_use");
                         tu.put("id", b.get("id"));
@@ -2894,18 +3224,27 @@ public final class LlmClient {
                 assistant.put("content", content);
                 messages.add(assistant);
 
+                StringBuilder text = new StringBuilder();
+                for (Object b : content) {
+                    Map<String, Object> blk = (Map<String, Object>) b;
+                    if ("text".equals(blk.get("type"))) text.append(String.valueOf(blk.get("text")));
+                }
+                String nudge = rec.decide(turn == maxTurns() - 1, !uses.isEmpty(), malformed,
+                        "max_tokens".equals(stopReason[0]), text.toString());
+                if (nudge != null) {
+                    if (rec.dropped) messages.remove(messages.size() - 1);
+                    messages.add(msg("user", nudge));
+                    continue;
+                }
                 if (!"tool_use".equals(stopReason[0]) || uses.isEmpty()) {
-                    StringBuilder text = new StringBuilder();
-                    for (Object b : content) {
-                        Map<String, Object> blk = (Map<String, Object>) b;
-                        if ("text".equals(blk.get("type"))) text.append(String.valueOf(blk.get("text")));
-                    }
+                    if (roundEnd(messages, turn, true, rec.carry + text)) { rec.carry = ""; continue; }
                     onEvent.accept(StreamEvent.usage(copyUsage(usage)));
-                    RunResult done = endRun(lastModel[0], runStart, text.toString(), messages, toolCalls, turns, usage);
+                    RunResult done = endRun(lastModel[0], runStart, rec.carry + text, messages, toolCalls, turns, usage);
                     onEvent.accept(StreamEvent.done(done));
                     return done;
                 }
 
+                rec.carry = "";
                 int n = uses.size();
                 for (Map<String, Object> u : uses) {
                     onEvent.accept(callEvent(String.valueOf(u.get("id")), String.valueOf(u.get("name")),
@@ -2962,6 +3301,7 @@ public final class LlmClient {
                     onEvent.accept(StreamEvent.done(done));
                     return done;
                 }
+                roundEnd(messages, turn, false, "");
             }
             RunResult done = incompleteRun(lastModel[0], runStart, "", messages, toolCalls, turns, usage);
             onEvent.accept(StreamEvent.done(done));
@@ -3201,6 +3541,82 @@ public final class LlmClient {
     private <T> HttpResponse<T> llmSend(String url, Map<String, String> headers,
                                         Map<String, Object> body, Deadline deadline,
                                         HttpResponse.BodyHandler<T> handler) {
+        return llmSend(url, headers, body, deadline, handler, (Consumer<StreamEvent>) null);
+    }
+
+    /** As above; {@code onRetry} (streaming only, nullable) receives a {@link StreamEvent.Kind#RETRY}
+     * event immediately before each retry wait. */
+    private <T> HttpResponse<T> llmSend(String url, Map<String, String> headers,
+                                        Map<String, Object> body, Deadline deadline,
+                                        HttpResponse.BodyHandler<T> handler, Consumer<StreamEvent> onRetry) {
+        return llmSend(url, headers, body, deadline, handler, onRetry, null, null);
+    }
+
+    private <T> HttpResponse<T> llmSend(String url, Map<String, String> headers,
+                                        Map<String, Object> body, Deadline deadline,
+                                        HttpResponse.BodyHandler<T> handler, String[] served,
+                                        java.util.function.BiConsumer<String, String> onFallback) {
+        return llmSend(url, headers, body, deadline, handler, null, served, onFallback);
+    }
+
+    /** Environment reader; package-private so tests can simulate the kill switch. */
+    static Function<String, String> envLookup = System::getenv;
+
+    /** §8 Resilience: TOOLNEXUS_DISABLE_MODEL_FALLBACK = 1/true (case-insensitive) kills the chain. */
+    private static boolean fallbackDisabled() {
+        String v = envLookup.apply("TOOLNEXUS_DISABLE_MODEL_FALLBACK");
+        return v != null && (v.equals("1") || v.equalsIgnoreCase("true"));
+    }
+
+    /** {@code [turnModel, ...fallbackModels]}, skipping empty entries and duplicates. */
+    private List<String> modelChain(String turnModel) {
+        List<String> chain = new ArrayList<>();
+        chain.add(turnModel);
+        if (opts.fallbackModels == null || opts.fallbackModels.isEmpty() || fallbackDisabled()) return chain;
+        for (String m : opts.fallbackModels) {
+            if (m == null || m.isEmpty() || chain.contains(m)) continue;
+            chain.add(m);
+        }
+        return chain;
+    }
+
+    /**
+     * §8 Resilience fallback chain around the retry helper. {@code served[0]} receives the model
+     * that produced the returned response (or the last one tried). {@code onFallback} (stream only)
+     * is told {@code (from, to)} before each switch. A switch happens only when the budget was
+     * exhausted (no {@code onError} FAIL) and the final status is 503 or 529.
+     */
+    private <T> HttpResponse<T> llmSend(String url, Map<String, String> headers,
+                                        Map<String, Object> body, Deadline deadline,
+                                        HttpResponse.BodyHandler<T> handler, Consumer<StreamEvent> onRetry,
+                                        String[] served,
+                                        java.util.function.BiConsumer<String, String> onFallback) {
+        String turnModel = body.get("model") == null ? null : String.valueOf(body.get("model"));
+        List<String> chain = turnModel == null ? List.of() : modelChain(turnModel);
+        if (served != null) served[0] = turnModel;
+        if (chain.size() <= 1) return llmSendOnce(url, headers, body, deadline, handler, null, onRetry);
+        Map<String, Object> b = body;
+        for (int i = 0; ; i++) {
+            if (i > 0) {
+                b = new LinkedHashMap<>(body);
+                b.put("model", chain.get(i));
+            }
+            if (served != null) served[0] = chain.get(i);
+            boolean[] failed = {false};
+            HttpResponse<T> res = llmSendOnce(url, headers, b, deadline, handler, failed, onRetry);
+            int st = res.statusCode();
+            if (i == chain.size() - 1 || failed[0] || (st != 503 && st != 529)) return res;
+            if (res.body() instanceof AutoCloseable c) {
+                try { c.close(); } catch (Exception ignored) { /* best effort */ }
+            }
+            if (onFallback != null) onFallback.accept(chain.get(i), chain.get(i + 1));
+        }
+    }
+
+    private <T> HttpResponse<T> llmSendOnce(String url, Map<String, String> headers,
+                                            Map<String, Object> body, Deadline deadline,
+                                            HttpResponse.BodyHandler<T> handler, boolean[] failed,
+                                            Consumer<StreamEvent> onRetry) {
         int retries = retries();
         long base = retryBaseMs();
         RuntimeException lastErr = null;
@@ -3208,15 +3624,21 @@ public final class LlmClient {
             deadline.check();
             HttpRequest req = buildRequest(url, headers, body, deadline);
             try {
-                HttpResponse<T> res = http.send(req, handler);
+                HttpResponse<T> res = (http != null ? http : DefaultHttp.CLIENT).send(req, handler);
                 int status = res.statusCode();
                 if (status >= 200 && status < 300) return res;
                 // §8 Resilience: classify EVERY non-2xx (the host may retry a normally-terminal
                 // status, or fail a retryable one). A RETRY is still bounded by the budget below.
                 boolean retryable = isRetryableStatus(status, opts.retryableStatuses);
+                // x-should-retry: a server-sent true/false overrides the default classification.
+                String xsr = res.headers().firstValue("x-should-retry").map(String::trim).orElse("");
+                if (xsr.equalsIgnoreCase("true")) retryable = true;
+                else if (xsr.equalsIgnoreCase("false")) retryable = false;
                 Tier tier = classify(new ErrorInfo(null, status, attempt, retryable));
+                if (tier == Tier.FAIL && failed != null) failed[0] = true;
                 if (tier == Tier.FAIL || attempt == retries) return res; // caller handles non-2xx
                 long wait = retryAfterMs(res).orElse((long) (base * Math.pow(2, attempt) + Math.random() * 100));
+                if (onRetry != null) onRetry.accept(StreamEvent.retry(attempt + 1, retries, wait, status));
                 sleep(wait, deadline);
             } catch (HttpTimeoutException e) {
                 throw new TimeoutException(timeoutMessage(deadline.timeoutMs)); // not retried
@@ -3225,7 +3647,9 @@ public final class LlmClient {
                 // §8 Resilience: a network throw is retryable=true by default; the host may FAIL it.
                 Tier tier = classify(new ErrorInfo(e, 0, attempt, true));
                 if (tier == Tier.FAIL || attempt == retries) throw lastErr;
-                sleep((long) (base * Math.pow(2, attempt) + Math.random() * 100), deadline);
+                long wait = (long) (base * Math.pow(2, attempt) + Math.random() * 100);
+                if (onRetry != null) onRetry.accept(StreamEvent.retry(attempt + 1, retries, wait, null));
+                sleep(wait, deadline);
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
                 // §7D: classify by TOKEN STATE, not by the interrupt itself — an external cancel is
@@ -3288,29 +3712,27 @@ public final class LlmClient {
      */
     @SuppressWarnings("unchecked")
     private Map<String, Object> llmCallJson(String url, Map<String, String> headers,
-                                            Map<String, Object> body, Deadline deadline, String style) {
-        String turnModel = String.valueOf(body.get("model"));
+                                            Map<String, Object> body, Deadline deadline, String style,
+                                            String[] served) {
+        String[] model = {String.valueOf(body.get("model"))};
         long t0 = System.currentTimeMillis();
         try {
-            Map<String, Object> data = postJson(url, headers, body, deadline);
+            HttpResponse<String> res = llmSend(url, headers, body, deadline,
+                    HttpResponse.BodyHandlers.ofString(), model, null);
+            if (served != null) served[0] = model[0];
+            if (res.statusCode() < 200 || res.statusCode() >= 300) {
+                throw providerError(res.statusCode(), res.body(),
+                        res.headers().firstValue("retry-after").orElse(null));
+            }
+            Map<String, Object> data = Json.toMap(res.body());
             long[] tok = perCall((Map<String, Object>) data.get("usage"), style);
-            emit(new MetricEvent.Llm(turnModel, "ok", System.currentTimeMillis() - t0, tok[0], tok[1]));
+            emit(new MetricEvent.Llm(model[0], "ok", System.currentTimeMillis() - t0, tok[0], tok[1]));
             return data;
         } catch (RuntimeException e) {
-            emit(new MetricEvent.Llm(turnModel, "error", System.currentTimeMillis() - t0, 0, 0));
+            if (served != null && model[0] != null) served[0] = model[0];
+            emit(new MetricEvent.Llm(model[0], "error", System.currentTimeMillis() - t0, 0, 0));
             throw e;
         }
-    }
-
-    /** Send and parse a JSON object response, retrying transient failures + enforcing the deadline. */
-    private Map<String, Object> postJson(String url, Map<String, String> headers,
-                                         Map<String, Object> body, Deadline deadline) {
-        HttpResponse<String> res = llmSend(url, headers, body, deadline, HttpResponse.BodyHandlers.ofString());
-        if (res.statusCode() < 200 || res.statusCode() >= 300) {
-            throw providerError(res.statusCode(), res.body(),
-                    res.headers().firstValue("retry-after").orElse(null));
-        }
-        return Json.toMap(res.body());
     }
 
     @SuppressWarnings("unchecked")

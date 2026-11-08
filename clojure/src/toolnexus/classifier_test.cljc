@@ -23,7 +23,8 @@
             [koine.text :as ktext]
             [koine.time :as ktime]
             [toolnexus.classifier :as jev]
-            [toolnexus.client :as client]))
+            [toolnexus.client :as client]
+            [toolnexus.judge :as j]))
 
 ;; ---------------------------------------------------------------------------
 ;; sha256, portable
@@ -124,7 +125,9 @@
         "two blocks, so the schedule and the chaining are exercised")
     (is (= "9eaaf0526050195381750506ba54042d6cf31ec94bd3b2dfc29cff6b8d5b4dc0"
            (sha256-hex "café — 日本語"))
-        "non-ASCII goes through UTF-8, not UTF-16 code units")))
+        "non-ASCII goes through UTF-8, not UTF-16 code units")
+    (doseq [s ["" "abc" "café — 日本語" (str/join (repeat 3 "abcdbcdecdefdefgefghfghighijhijk"))]]
+      (is (= (sha256-hex s) (jev/sha256-hex s)) "the library's digest (cache keys, questions hash)"))))
 
 ;; ---------------------------------------------------------------------------
 ;; the shared fixtures
@@ -149,7 +152,8 @@
       (= t "noul")   (if (contains? q "criteria") (jev/noul-question i crit) (jev/noul-question i))
       (= t "choice") (jev/choice-question i crit)
       (= t "score")  (jev/score-question i crit)
-      :else          (throw (ex-info (str "fixture: unknown question type " (pr-str t)) {})))))
+      ;; Any other type is the open union's raw question (§8B).
+      :else          (if (contains? q "criteria") (jev/raw-question t i crit) (jev/raw-question t i)))))
 
 (defn- ->questions [request]
   (reduce (fn [m e] (assoc m (str (key e)) (->question (val e))))
@@ -674,3 +678,395 @@
     (is (true?  (cal "{\"model\":\"m\",\"answers\":{},\"calibrated\":null}"))  "null => true")
     (is (true?  (cal "{\"model\":\"m\",\"answers\":{},\"calibrated\":true}")))
     (is (false? (cal "{\"model\":\"m\",\"answers\":{},\"calibrated\":false}")))))
+
+;; ===========================================================================
+;; add-classifier-backends — examples/judge/backends/*.json, every file
+;; ===========================================================================
+
+(def ^:private noul-reply
+  "{\"model\":\"jev-1.14.0\",\"answers\":{\"q\":{\"type\":\"noul\",\"noul\":0.91}},\"usage\":{\"input_tokens\":3,\"output_tokens\":1}}")
+
+(defn- fake-http
+  "A hermetic System One endpoint: records every call, answers with `(reply n
+  body)` => [status body]."
+  [reply]
+  (let [calls (atom [])]
+    {:calls calls
+     :http  (fn [url headers body]
+              (let [n (count (swap! calls conj {:url url :headers headers :body body}))
+                    [st b] (reply n body)]
+                {:status st :body b}))}))
+
+(defn- fixture-state
+  "`{\"$image\":{mimeType,data}}` => an image content part, `{\"$text\":s}` => a
+  text part; everything else as is."
+  [v]
+  (cond
+    (and (map? v) (map? (get v "$image")))
+    {:type "image" :mimeType (get-in v ["$image" "mimeType"]) :data (get-in v ["$image" "data"])}
+    (and (map? v) (string? (get v "$text"))) {:type "text" :text (get v "$text")}
+    (map? v)        (reduce (fn [m e] (assoc m (key e) (fixture-state (val e)))) {} v)
+    (sequential? v) (mapv fixture-state v)
+    :else v))
+
+(defn- thrown-message [f]
+  (try (f) nil (catch Throwable e (ex-message e))))
+
+(deftest backend-presets-match-the-fixture
+  (let [f (fixture "backends/presets")]
+    (is (= (set (keys (get f "backends"))) (set (keys jev/backends))))
+    (is (= ["typesafe" "openrouter" "cloudflare" "vercel" "openai" "custom"] jev/backend-names))
+    (doseq [[nm want] (get f "backends")]
+      (testing nm
+        (let [row (get jev/backends nm)]
+          (is (= (get want "baseUrl") (:base-url row)))
+          (is (= (get want "model") (:model row)))
+          (is (= (get want "apiKeyEnv") (:api-key-env row)))
+          (is (= (get want "wire") (:wire row)))
+          (is (= (get want "imagesHeader") (:images-header row)))
+          (if (nil? (get want "supportsImages"))
+            (is (nil? (:supports row)))
+            (doseq [[m img] (get want "supportsImages")]
+              (is (= img (:images ((:supports row) m))) m))))))
+    (is (= (get f "unknownBackendError")
+           (thrown-message #(jev/create-classifier {:backend "nope"}))))
+    (is (= (get f "customError")
+           (thrown-message #(jev/create-classifier {:backend "custom" :base-url "http://x"}))))
+    (is (= (get f "customError")
+           (thrown-message #(jev/create-classifier {:backend "custom" :supports {:images true}}))))
+    (is (some? (jev/create-classifier {:backend "custom" :base-url "http://x" :supports {:images false}})))
+    (is (some? (jev/create-classifier {:backend "custom" :style "static" :decisions []}))
+        "the custom-backend declarations apply to the wire style only")
+    (testing "openrouter's default is jev-1.14 and the pairing message names it"
+      (is (= "typesafe/jev-1.14" (:model (jev/create-classifier {:backend "openrouter"}))))
+      (is (str/includes? (thrown-message #(jev/create-classifier {:base-url "https://openrouter.ai/api/v1"}))
+                         "use \"typesafe/jev-1.14\"")))
+    (testing "an explicit option still wins over the preset"
+      (is (= "mine" (:model (jev/create-classifier {:backend "vercel" :model "mine"})))))))
+
+(deftest images-fixture
+  (let [f  (fixture "backends/images")
+        qs (->questions f)]
+    (doseq [cs (get f "cases")]
+      (testing (get cs "name")
+        (let [backend (get cs "backend")
+              want    (get cs "expect")
+              {:keys [calls http]} (fake-http (fn [_ _]
+                                                [200 (if (= "cloudflare" backend)
+                                                       (str "{\"success\":true,\"result\":" noul-reply "}")
+                                                       noul-reply)]))
+              c   (jev/create-classifier
+                   (cond-> {:backend backend :http-client http :retries 0}
+                     (get cs "model")    (assoc :model (get cs "model"))
+                     (get cs "supports") (assoc :supports {:images (get-in cs ["supports" "images"])})))
+              err (try (jev/evaluate c (fixture-state (get cs "state")) qs) nil
+                       (catch Throwable e e))]
+          (cond
+            (get want "unsupported")
+            (do (is (some? err))
+                (is (jev/unsupported? err))
+                (is (= (get want "error") (ex-message err)))
+                (is (= "images" (:feature (ex-data err)))))
+
+            (get want "errorPrefix")
+            (do (is (some? err))
+                (is (not (jev/unsupported? err)) "a limit is the caller's input, not a backend gap")
+                (is (str/starts-with? (str (ex-message err)) (get want "errorPrefix"))
+                    (str (ex-message err))))
+
+            :else
+            (let [call (first @calls)]
+              (is (nil? err) (str (when err (ex-message err))))
+              (is (= (get want "body") (:body call)))
+              (is (= (boolean (get want "imagesHeader"))
+                     (= "true" (get (:headers call) "typesafe-danger-zone-images"))))
+              (when-let [u (get want "url")]
+                (is (= u (get-in jev/backends ["cloudflare" :base-url])))
+                (is (= (env/expand u) (:url call)) "no /systemone suffix; ${NAME} expanded"))))
+          (when (or (get want "unsupported") (get want "errorPrefix"))
+            (is (empty? @calls) "nothing is sent")))))))
+
+(deftest image-header-loses-to-host-headers-and-other-styles-get-parts-verbatim
+  (let [img {:type "image" :mimeType "image/png" :data "iVBORw0KGgoAAAANSUhEUgAAASwAAAEsCAIAAAAAAAAA"}
+        {:keys [calls http]} (fake-http (fn [_ _] [200 noul-reply]))
+        c (jev/create-classifier {:http-client http :headers {"TypeSafe-Danger-Zone-Images" "false"}})]
+    (jev/evaluate c {"photo" img} {"q" (jev/noul-question "?")})
+    (is (= "false" (get (:headers (first @calls)) "typesafe-danger-zone-images"))))
+  (let [seen (atom nil)
+        c    (jev/create-classifier {:style "custom" :backend "vercel"
+                                     :evaluate (fn [st _] (reset! seen st)
+                                                 {:model "m" :answers {"q" {:type "noul" :noul 0.5}}})})
+        img  {:type "image" :mimeType "image/gif" :url "http://x/y.gif"}]
+    (jev/evaluate c {"photo" img} {"q" (jev/noul-question "?")})
+    (is (= {"photo" img} @seen) "custom style: no lifting, no unsupported, no limits"))
+  (testing "a URL-only image and an audio part are errors before the network"
+    (let [{:keys [calls http]} (fake-http (fn [_ _] [200 noul-reply]))
+          c (jev/create-classifier {:http-client http})]
+      (is (str/includes? (thrown-message #(jev/evaluate c {"p" {:type "image" :mimeType "image/png" :url "http://x"}}
+                                                        {"q" (jev/noul-question "?")}))
+                         "inline data"))
+      (is (= "classifier: state: audio parts are not supported"
+             (thrown-message #(jev/evaluate c {"p" {:type "audio" :mimeType "audio/wav" :data "AAAA"}}
+                                            {"q" (jev/noul-question "?")}))))
+      (is (empty? @calls)))))
+
+(deftest image-size-reads-png-and-jpeg-headers
+  (let [png  (codec/decode-bytes "iVBORw0KGgoAAAANSUhEUgAAASwAAAEsCAIAAAAAAAAA")
+        jpeg (codec/decode-bytes "/9j/4AAQSkZJRgABAQAAAQABAAD/xAAEAAD/wAALCAEsAZABAREA/9k=")]
+    (is (= [300 300] (jev/image-size "png" png)))
+    (is (= [400 300] (jev/image-size "jpeg" jpeg)) "SOF0 after an APP0 and a DHT (C4 is skipped)")
+    (is (nil? (jev/image-size "png" jpeg)))
+    (is (nil? (jev/image-size "jpeg" png)))))
+
+(deftest cloudflare-replies-fixture
+  (let [f  (fixture "backends/cloudflare-replies")
+        qs (->questions f)]
+    (doseq [cs (get f "cases")]
+      (testing (get cs "name")
+        (let [{:keys [http]} (fake-http (fn [_ _] [200 (json/write-str (get cs "reply"))]))
+              c    (jev/create-classifier {:backend "cloudflare" :http-client http :retries 0})
+              want (get cs "expect")]
+          (if-let [e (get want "error")]
+            (let [m (thrown-message #(jev/evaluate c "x" qs))]
+              (is (= e m))
+              (is (not (str/includes? (str m) "0123abcd")) "the envelope's errors are never echoed"))
+            (let [d (jev/evaluate c "x" qs)]
+              (is (= (get want "model") (:model d)))
+              (is (== (get want "noul") (:noul (jev/noul d "q")))))))))))
+
+(deftest openai-decisions-fixture
+  ;; #157: the Decisions wire — request bytes, reply normalisation, the errors
+  ;; that fire before any request, and the key-to-host rule.
+  (let [f  (fixture "backends/openai-decisions")
+        qs (->questions f)]
+    (doseq [cs (get f "requestCases")]
+      (testing (get cs "name")
+        (let [{:keys [calls http]} (fake-http (fn [_ _] [500 "{}"]))
+              c (jev/create-classifier (cond-> {:backend "openai" :http-client http :retries 0
+                                                :base-url "http://127.0.0.1:9/v1"
+                                                :get-env (constantly nil)}
+                                         (get cs "model") (assoc :model (get cs "model"))))]
+          (try (jev/evaluate c (fixture-state (get cs "state")) qs) (catch Throwable _ nil))
+          (let [call (first @calls)]
+            (is (= (get-in cs ["expect" "body"]) (:body call)))
+            (is (= "http://127.0.0.1:9/v1/decisions" (:url call)))
+            (is (not (contains? (:headers call) "typesafe-danger-zone-images")))))))
+    (doseq [cs (get f "replyCases")]
+      (testing (get cs "name")
+        (let [want (get cs "expect")
+              body (json/write-str (get cs "reply"))
+              {:keys [http]} (fake-http (fn [_ _] [200 body]))
+              c (jev/create-classifier {:backend "openai" :http-client http :retries 0})]
+          (if-let [e (get want "error")]
+            (is (= e (thrown-message #(jev/evaluate c "x" qs))))
+            (let [d (jev/evaluate c "x" qs)]
+              (is (= (get want "normalized") (jev/decisions-reply body qs)))
+              (is (= (get want "model") (:model d)))
+              (is (false? (:calibrated d)))
+              (doseq [[k v] (get want "noul")] (is (== v (:noul (jev/noul d k)))))
+              (doseq [[k v] (get want "choice")] (is (= v (:choice (get-in d [:answers k])))))
+              (doseq [[k v] (get want "score")] (is (== v (:score (get-in d [:answers k]))))))))))
+    (doseq [cs (get f "errorCases")]
+      (testing (get cs "name")
+        (let [{:keys [calls http]} (fake-http (fn [_ _] [200 "{}"]))
+              c   (jev/create-classifier {:backend "openai" :http-client http :retries 0})
+              err (try (jev/evaluate c "x" (->questions cs)) nil (catch Throwable e e))]
+          (is (= (get-in cs ["expect" "error"]) (some-> err ex-message)))
+          (is (= (boolean (get-in cs ["expect" "unsupported"])) (boolean (and err (jev/unsupported? err)))))
+          (is (empty? @calls) "nothing is sent"))))
+    (doseq [cs (get f "captureCases")]
+      (testing (get cs "name")
+        (let [envm (get cs "env")
+              {:keys [calls http]} (fake-http (fn [_ _] [500 "{}"]))
+              c (jev/create-classifier (cond-> {:backend "openai" :http-client http :retries 0
+                                                :base-url "http://127.0.0.1:9/v1"
+                                                :get-env (fn [k] (get envm k))}
+                                         (get cs "apiKeyEnv") (assoc :api-key-env (get cs "apiKeyEnv"))))]
+          (try (jev/evaluate c "x" qs) (catch Throwable _ nil))
+          (is (= (get cs "expectAuthorization") (get (:headers (first @calls)) "authorization"))))))))
+
+(deftest key-routing-fixture
+  ;; #155: an env-default key goes only to the preset's own host. The suite cannot
+  ;; set an env var in-process, so each case's `env` is served through the
+  ;; classifier's :get-env seam; every request's Authorization is asserted.
+  (let [f  (fixture "backends/key-routing")
+        qs (->questions f)]
+    (doseq [cs (get f "captureCases")]
+      (testing (get cs "name")
+        (let [backend (get cs "backend")
+              envm    (get cs "env")
+              {:keys [calls http]} (fake-http (fn [_ _]
+                                                [200 (if (= "cloudflare" backend)
+                                                       (str "{\"success\":true,\"result\":" noul-reply "}")
+                                                       noul-reply)]))
+              c   (jev/create-classifier
+                   (cond-> {:backend backend :http-client http :retries 0
+                            :base-url "http://127.0.0.1:9/v1"
+                            :get-env (fn [k] (get envm k))}
+                     (= "custom" backend)  (assoc :supports {:images false})
+                     (get cs "apiKeyEnv")  (assoc :api-key-env (get cs "apiKeyEnv"))
+                     (get cs "headers")    (assoc :headers (get cs "headers"))))]
+          (jev/evaluate c "x" qs)
+          (is (seq @calls))
+          (doseq [call @calls]
+            (is (= (get cs "expectAuthorization") (get (:headers call) "authorization")))))))
+    (doseq [cs (get f "hostCases")]
+      (is (= (get cs "expectKeyEnv") (jev/key-env-for-backend (get cs "backend") (get cs "baseUrl")))
+          (str (get cs "backend") " " (get cs "baseUrl"))))))
+
+(deftest cache-keys-fixture
+  (doseq [cs (get (fixture "backends/cache-keys") "cases")]
+    (testing (get cs "name")
+      (is (= (get cs "modelKey") (jev/model-cache-key (get cs "endpoint") (get cs "model"))))
+      (is (= (get cs "decisionKey")
+             (jev/decision-cache-key (get cs "endpoint") (get cs "served") (get cs "state")
+                                     (get cs "assets") (->questions cs))))
+      (is (= (get cs "decisionKey") (jev/sha256-hex (get cs "decisionKeyBytes")))
+          "the fixture's own bytes hash to its key"))))
+
+(deftest validate-cases-fixture
+  (doseq [cs (get (fixture "backends/validate-cases") "cases")]
+    (testing (get cs "name")
+      (let [d   (jev/parse-decision (get cs "response"))
+            err (jev/validate-decision (->questions cs) d)]
+        (is (= (get cs "valid") (nil? err)) (str (when err (ex-message err))))
+        (when err
+          (is (str/starts-with? (ex-message err) "classifier: invalid decision: "))
+          (is (str/includes? (ex-message err) (str "\"" (get cs "key") "\""))
+              (ex-message err)))))))
+
+(deftest thresholds-fixture
+  (let [f (fixture "backends/thresholds-cases")
+        d (get f "default")]
+    (is (= {:yes (get d "yes") :no (get d "no") :min-confidence (get d "minConfidence")}
+           jev/default-thresholds))
+    (doseq [cs (get f "cases")]
+      (testing (get cs "name")
+        (let [a  (get-in (jev/parse-decision {"answers" {"a" (get cs "answer")}}) [:answers "a"])
+              th (when-let [t (get cs "thresholds")]
+                   {:yes (get t "yes") :no (get t "no") :min-confidence (get t "minConfidence")})
+              b  (get (j/band-answers {:answers {"a" a}} nil) "a")]
+          (is (= (get cs "band") (jev/threshold-band a th)))
+          (is (= (get cs "bandsBand")
+                 (cond (:band b) (:band b) (:sure b) "yes" :else "uncertain"))
+              "the default Bands are unchanged"))))))
+
+(deftest state-builder-and-cache
+  (let [{:keys [calls http]} (fake-http (fn [_ _] [200 noul-reply]))
+        events (atom [])
+        c  (jev/create-classifier {:http-client http :cache (jev/memory-cache 3600000 100)
+                                   :on-metric (fn [ev] (swap! events conj ev))})
+        q  (j/noul "q" "Is the object red?")
+        d1 (jev/evaluate-state (jev/state c "a red mug") q)
+        d2 (jev/evaluate-state (jev/state c "a red mug") q)]
+    (is (not (:cached d1)))
+    (is (true? (:cached d2)))
+    (is (= 1 (count @calls)) "a hit sends nothing")
+    (is (== 0.91 (:noul (jev/noul d2 "q"))))
+    (let [ev (second @events)]
+      (is (true? (:cached ev)))
+      (is (= 1 (:questions ev)))
+      (is (= 64 (count (:questions_hash ev)))))
+    (is (false? (:cached (first @events))))
+    (jev/evaluate-state (jev/state c "a blue mug") q)
+    (is (= 2 (count @calls)) "a different state misses")
+    (is (= "duplicate question name \"q\""
+           (thrown-message #(jev/evaluate-state (jev/state c "x") q q))))
+    (is (= 2 (count @calls)))))
+
+(deftest invalid-replies-are-never-cached
+  (let [bad "{\"model\":\"m\",\"answers\":{\"q\":{\"type\":\"noul\",\"noul\":1.5}}}"
+        {:keys [calls http]} (fake-http (fn [_ _] [200 bad]))
+        events (atom [])
+        c (jev/create-classifier {:http-client http :cache (jev/memory-cache)
+                                  :on-metric (fn [ev] (swap! events conj ev))})]
+    (dotimes [_ 2]
+      (is (== 1.5 (:noul (jev/noul (jev/evaluate c "s" {"q" (jev/noul-question "x")}) "q")))
+          "plain evaluate: returned as before"))
+    (is (= 2 (count @calls)) "and never cached")
+    (let [m (thrown-message #(jev/evaluate-state (jev/state c "s") (j/noul "q" "x")))]
+      (is (str/starts-with? (str m) "classifier: invalid decision: answer \"q\""))
+      (is (= "error" (:status (last @events)))))))
+
+(deftest cache-follows-the-served-model
+  (let [served (atom "jev-1.13.0")
+        {:keys [calls http]} (fake-http (fn [_ _] [200 (str "{\"model\":\"" @served
+                                                             "\",\"answers\":{\"q\":{\"type\":\"noul\",\"noul\":0.5}}}")]))
+        cache (jev/memory-cache)
+        c (jev/create-classifier {:http-client http :cache cache :base-url "http://fake/v1"})
+        q (j/noul "q" "x")]
+    (jev/evaluate-state (jev/state c "s") q)
+    (is (= "jev-1.13.0" ((:get cache) (jev/model-cache-key "http://fake/v1" jev/default-model))))
+    (reset! served "jev-1.14.0")
+    (jev/evaluate-state (jev/state c "other") q)
+    (let [d (jev/evaluate-state (jev/state c "s") q)]
+      (is (not (:cached d)) "the alias moved: the old answer is no longer found")
+      (is (= 3 (count @calls)))
+      (is (= "jev-1.14.0" (:model d))))))
+
+(deftest memory-cache-ttl-and-max
+  (let [c (jev/memory-cache 0 2)]
+    ((:set c) "a" "1") ((:set c) "b" "2") ((:set c) "c" "3")
+    (is (nil? ((:get c) "a")) "oldest-inserted goes first")
+    (is (= "3" ((:get c) "c"))))
+  (let [c (jev/memory-cache 1 0)]
+    ((:set c) "a" "1")
+    (ktime/sleep! 5)
+    (is (nil? ((:get c) "a")) "expired")))
+
+(deftest states-batch-is-per-item
+  (let [{:keys [http]} (fake-http (fn [_ body] (if (str/includes? body "\"state\":\"bad\"")
+                                                 [400 "{\"error\":\"nope\"}"]
+                                                 [200 noul-reply])))
+        c  (jev/create-classifier {:http-client http :retries 0})
+        rs (jev/evaluate-states (jev/states c ["a" "bad" "c"]) (j/noul "q" "Is the object red?"))]
+    (is (= 3 (count rs)))
+    (is (= "jev-1.14.0" (:model (:decision (first rs)))))
+    (is (some? (:error (second rs))))
+    (is (nil? (:decision (second rs))))
+    (is (some? (:decision (nth rs 2))))
+    (is (= [] (jev/evaluate-states (jev/states c []) (j/noul "q" "x"))))
+    (is (thrown? Throwable (jev/evaluate-states (jev/states c ["a"]) (j/noul "q" "x") (j/noul "q" "y"))))))
+
+(deftest raw-question-and-answer
+  (let [{:keys [calls http]} (fake-http (fn [_ _] [200 "{\"model\":\"jev-1.14.0\",\"answers\":{\"spot\":{\"type\":\"box\",\"box\":[1,2,3,4]}}}"]))
+        c (jev/create-classifier {:http-client http})
+        d (jev/evaluate-state (jev/state c "s") (j/raw "spot" "box" "Where is the mug?"))]
+    (is (= "{\"model\":\"jev-latest\",\"questions\":{\"spot\":{\"instructions\":\"Where is the mug?\",\"type\":\"box\"}},\"state\":\"s\"}"
+           (:body (first @calls))))
+    (let [a (jev/raw-answer d "spot")]
+      (is (= "box" (:type a)))
+      (is (= [1 2 3 4] (get-in a [:value "box"]))))
+    (is (= "uncertain" (jev/threshold-band (jev/raw-answer d "spot"))))
+    (is (thrown? Throwable (jev/evaluate c "s" {"x" (jev/raw-question "" "y")}))
+        "an empty raw type fails before the request")))
+
+(deftest chunk-questions-splits-in-ascii-order
+  (let [qs {"c" (jev/noul-question "c") "a" (jev/noul-question "a") "b" (jev/noul-question "b")}
+        ch (jev/chunk-questions qs 2)]
+    (is (= [["a" "b"] ["c"]] (mapv (comp vec sort keys) ch)))
+    (is (thrown? Throwable (jev/chunk-questions qs 0)))))
+
+(deftest metric-hash-matches-the-fixture
+  (let [f  (fixture "base")
+        r  (get f "request")
+        ev (atom nil)
+        c  (jev/create-classifier {:style "custom" :model (get r "model")
+                                   :evaluate (fn [_ _] {:model "m" :answers {}})
+                                   :on-metric (fn [e] (reset! ev e))})]
+    (jev/evaluate c (get r "state") (->questions r))
+    (is (= (get f "canonicalSha256") (:questions_hash @ev)))
+    (is (= 3 (:questions @ev)))
+    (is (false? (:cached @ev)))))
+
+(deftest cloudflare-error-keeps-the-account-template
+  ;; The suite cannot set an env var in-process on either host, so an always-set
+  ;; one stands in for the account id: HOME.
+  (let [{:keys [calls http]} (fake-http (fn [_ _] [500 "boom"]))
+        home (env/get-env "HOME")
+        c    (jev/create-classifier {:backend "cloudflare" :http-client http :retries 0
+                                     :base-url "http://fake/accounts/${HOME}/ai/run"})
+        m    (thrown-message #(jev/evaluate c "x" {"q" (jev/noul-question "y")}))]
+    (is (= (str "http://fake/accounts/" home "/ai/run") (:url (first @calls))) "expanded at call time")
+    (is (str/includes? (str m) "${HOME}"))
+    (is (not (str/includes? (str m) (str "/accounts/" home "/"))))))

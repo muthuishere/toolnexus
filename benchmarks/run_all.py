@@ -35,6 +35,7 @@ MOCK_URL = os.environ.get("MOCK_URL", "http://127.0.0.1:8900")
 RUNS = os.environ.get("BENCH_RUNS", "25")
 WARMUP = os.environ.get("BENCH_WARMUP", "5")
 TIME = "/usr/bin/time"
+SKIP_REASONS: dict[str, str] = {}
 
 
 def mock_up():
@@ -56,7 +57,13 @@ def run_target(name, cmd, env_extra=None, cwd=None):
     if env_extra:
         env.update(env_extra)
     full = [TIME, "-l", *cmd]
-    p = subprocess.run(full, env=env, cwd=cwd, capture_output=True, text=True, timeout=600)
+    try:
+        p = subprocess.run(full, env=env, cwd=cwd, capture_output=True, text=True,
+                           timeout=600, stdin=subprocess.DEVNULL)
+    except subprocess.TimeoutExpired:
+        SKIP_REASONS[name] = "timed out after 600 s"
+        print(f"  !! {name}: timed out")
+        return None
     out = p.stdout
     # extract the JSON result line
     line = None
@@ -67,8 +74,10 @@ def run_target(name, cmd, env_extra=None, cwd=None):
         elif s.startswith('{"framework"') or ('"framework"' in s and s.startswith("{")):
             line = s
     if line is None:
-        print(f"  !! {name}: no JSON result. stderr tail:\n" +
-              "\n".join(p.stderr.splitlines()[-8:]))
+        tail = [l for l in p.stderr.splitlines()
+                if not re.match(r"\s+\d+\s+[a-z ]+$", l) and "real" not in l[:12]][-6:]
+        SKIP_REASONS[name] = f"exit {p.returncode}: " + " | ".join(t.strip() for t in tail)
+        print(f"  !! {name}: no JSON result. stderr tail:\n" + "\n".join(tail))
         return None
     data = json.loads(line)
     rss = parse_rss_bytes(p.stderr)  # macOS: bytes
@@ -105,6 +114,10 @@ def run_target(name, cmd, env_extra=None, cwd=None):
             "final_ok": bool(data["final_ok"]),
         }
 
+    # A runner that discovered zero tools can still echo the mock's final text
+    # (the mock does not check tool execution), so it is not a valid result.
+    if not data.get("tool_count"):
+        agg["final_ok"] = False
     row = {
         "name": name,
         "framework": data["framework"],
@@ -125,7 +138,7 @@ def run_target(name, cmd, env_extra=None, cwd=None):
 def targets():
     t = []
     if os.environ.get("TN_PY"):
-        for cfg in ("mcp", "full"):
+        for cfg in ("mcp", "full", "native"):
             t.append((f"toolnexus-python-{cfg}",
                       [os.environ["TN_PY"], f"{REPO}/benchmarks/run_toolnexus.py",
                        "--config", cfg, "--runs", RUNS, "--warmup", WARMUP], None))
@@ -150,6 +163,12 @@ def targets():
         t.append(("openai-agents",
                   [os.environ["OPENAI_AGENTS_PY"], f"{REPO}/benchmarks/run_openai_agents.py",
                    "--runs", RUNS, "--warmup", WARMUP], None))
+    for envv, nm, script in (("AGNO_PY", "agno", "run_agno.py"),
+                             ("SMOLAGENTS_PY", "smolagents", "run_smolagents.py"),
+                             ("MSAF_PY", "ms-agent-framework-py", "run_ms_agent_framework.py")):
+        if os.environ.get(envv):
+            t.append((nm, [os.environ[envv], f"{REPO}/benchmarks/{script}",
+                           "--runs", RUNS, "--warmup", WARMUP], None))
     if os.environ.get("GO_BIN"):
         # `mcp` is registered again as of this run: the stdio-MCP bug that forced
         # the July table to publish a native-only Go row is fixed, so the Go row
@@ -159,18 +178,23 @@ def targets():
                       [os.environ["GO_BIN"], "-config", cfg,
                        "-runs", RUNS, "-warmup", WARMUP], None))
     if os.environ.get("JAVA_APP"):
-        for cfg in ("mcp", "full"):
+        for cfg in ("mcp", "full", "native"):
             t.append((f"toolnexus-java-{cfg}",
                       [os.environ["JAVA_APP"], "-config", cfg, "-runs", RUNS, "-warmup", WARMUP], None))
     if os.environ.get("SPRING_JAR"):
         t.append(("spring-ai-java",
                   ["java", "-jar", os.environ["SPRING_JAR"]],
                   {"BENCH_RUNS": RUNS, "BENCH_WARMUP": WARMUP}))
+        # MCP tools + spring-ai-agent-utils SkillsTool over examples/skills —
+        # the Spring analogue of toolnexus's `full` config.
+        t.append(("spring-ai-java-skills",
+                  ["java", "-jar", os.environ["SPRING_JAR"]],
+                  {"BENCH_RUNS": RUNS, "BENCH_WARMUP": WARMUP, "BENCH_CONFIG": "skills"}))
     if os.environ.get("LC4J_APP"):
         t.append(("langchain4j-mcp",
                   [os.environ["LC4J_APP"], "-config", "mcp", "-runs", RUNS, "-warmup", WARMUP], None))
     if os.environ.get("TN_CSHARP_DLL"):
-        for cfg in ("mcp", "full"):
+        for cfg in ("mcp", "full", "native"):
             t.append((f"toolnexus-csharp-{cfg}",
                       ["dotnet", os.environ["TN_CSHARP_DLL"], "-config", cfg,
                        "-runs", RUNS, "-warmup", WARMUP], None))
@@ -202,11 +226,37 @@ def targets():
         for cfg in ("mcp", "native"):
             t.append((f"mastra-{cfg}",
                       [node, f"{REPO}/benchmarks/run_mastra.mjs", "--config", cfg], None))
+    if os.environ.get("OPENAI_AGENTS_JS_DIR"):
+        t.append(("openai-agents-js-mcp", [node, f"{REPO}/benchmarks/run_openai_agents_js.mjs"],
+                  {"BENCH_RUNS": RUNS, "BENCH_WARMUP": WARMUP}))
+    if os.environ.get("LANGGRAPHJS_DIR"):
+        t.append(("langgraphjs-mcp", [node, f"{REPO}/benchmarks/run_langgraphjs.mjs"],
+                  {"BENCH_RUNS": RUNS, "BENCH_WARMUP": WARMUP}))
     # ---- Go competitors ----
     if os.environ.get("EINO_BIN"):
         t.append(("eino-go-mcp", [os.environ["EINO_BIN"]], None))
     if os.environ.get("LANGCHAINGO_BIN"):
         t.append(("langchaingo-go-native", [os.environ["LANGCHAINGO_BIN"]], None))
+    # ADK Go / ADK Java ship no OpenAI model: ADK Go uses a ~110-line in-runner
+    # model.LLM adapter, ADK Java its own LangChain4j bridge. Both connect MCP
+    # lazily, so their init_ms excludes the MCP connect.
+    for envv, nm in (("ADK_GO_BIN", "adk-go-mcp"), ("GENKIT_GO_BIN", "genkit-go-mcp"),
+                     ("KOOG_APP", "koog-mcp"), ("ADK_JAVA_APP", "adk-java-mcp")):
+        if os.environ.get(envv):
+            t.append((nm, [os.environ[envv], "-runs", RUNS, "-warmup", WARMUP], None))
+    if os.environ.get("MSAF_DLL"):
+        t.append(("ms-agent-framework-csharp-mcp",
+                  ["dotnet", os.environ["MSAF_DLL"], "-runs", RUNS, "-warmup", WARMUP], None))
+    # ---- Rust (binaries in $CARGO_TARGET_DIR/release) ----
+    if os.environ.get("TN_RUST_BIN"):
+        for cfg in ("mcp", "full", "native"):
+            t.append((f"toolnexus-rust-{cfg}",
+                      [os.environ["TN_RUST_BIN"], "-config", cfg, "-runs", RUNS, "-warmup", WARMUP], None))
+    # swiftide builds a fresh Agent per request (it keeps history) inside the timed span.
+    for envv, nm in (("RIG_BIN", "rig-mcp"), ("SWIFTIDE_BIN", "swiftide-mcp"),
+                     ("AUTOAGENTS_BIN", "autoagents-mcp")):
+        if os.environ.get(envv):
+            t.append((nm, [os.environ[envv], "-runs", RUNS, "-warmup", WARMUP], None))
     # ---- Elixir ----
     if os.environ.get("ELIXIR_DIR"):
         for cfg in ("mcp", "native"):
@@ -274,6 +324,7 @@ def main():
         json.dump({"runs": int(RUNS), "warmup": int(WARMUP),
                    "generated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
                    "skipped": skipped,
+                   "skip_reasons": SKIP_REASONS,
                    "results": results}, f, indent=2)
     print("\nwrote", outp)
 

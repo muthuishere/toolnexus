@@ -860,8 +860,16 @@ defmodule Toolnexus.ClassifierTest do
 
   # ------------------------------------------------------------ decoding
 
-  test "an unknown or untagged answer type is an error, naming the key" do
-    assert {:error, msg} = Classifier.decode_decision(~s({"answers":{"q":{"type":"vibe"}}}))
+  test "an unknown answer type decodes as a raw answer; an untagged one is an error" do
+    # The union is OPEN (§8B, add-classifier-backends): an unmodelled type is a RawAnswer.
+    assert {:ok, d} = Classifier.decode_decision(~s({"answers":{"q":{"type":"vibe"}}}))
+
+    assert d.answers["q"] == %Toolnexus.Classifier.RawAnswer{
+             type: "vibe",
+             value: %{"type" => "vibe"}
+           }
+
+    assert {:error, msg} = Classifier.decode_decision(~s({"answers":{"q":{"type":7}}}))
     assert msg =~ ~s("q")
     assert msg =~ "unknown type"
 

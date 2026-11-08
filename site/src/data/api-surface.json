@@ -824,6 +824,24 @@
 			}
 		},
 		{
+			"id": "serve/mcp-handler",
+			"group": "serve",
+			"member": "mcp-handler",
+			"title": "mcpHandler — an embeddable MCP server with per-request hooks",
+			"spec": "§7C.1",
+			"summary": "Mount a streamable-HTTP MCP server on your own router, with auth, per-identity tools and a confirm gate.",
+			"symbols": {
+				"javascript": "Toolkit.mcpHandler",
+				"python": "Toolkit.mcp_handler",
+				"golang": "Toolkit.MCPHandler",
+				"java": "Toolkit.mcpHandler",
+				"csharp": "Toolkit.McpHandler",
+				"elixir": "Toolnexus.mcp_handler",
+				"clojure": "toolnexus.mcp-handler/mcp-handler",
+				"rust": "Toolkit.mcp_handler"
+			}
+		},
+		{
 			"id": "runtime/agent",
 			"group": "runtime",
 			"member": "agent",
@@ -969,10 +987,9 @@
 				"java": "A2A.agentFromDir",
 				"csharp": "Home.FromDir",
 				"elixir": "Toolnexus.Agents.Home.from_dir",
-				"clojure": null,
+				"clojure": "toolnexus.agents.home/from-dir",
 				"rust": "from_dir"
-			},
-			"parityNote": "from-dir composes a persona into an AgentDef, so it needs the §7D runtime this port does not ship yet. compose-soul and memory-tool — the two halves it would combine — ARE shipped: compose the soul yourself and pass it as :system-prompt."
+			}
 		},
 		{
 			"id": "persona/memory-tool",
@@ -990,6 +1007,42 @@
 				"elixir": "Toolnexus.Agents.Home.memory_tool",
 				"clojure": "toolnexus.agents.home/memory-tool",
 				"rust": "memory_tool"
+			}
+		},
+		{
+			"id": "persona/dreamer",
+			"group": "persona",
+			"member": "dreamer",
+			"title": "dreamer — memory that gets better while it sleeps",
+			"spec": "§7E",
+			"summary": "The built-in dreamer preset: an agent that verifies a persona's memory against its transcripts on a schedule.",
+			"symbols": {
+				"javascript": "dreamer",
+				"python": "dreamer",
+				"golang": "Dreamer",
+				"java": "Agents.dreamer",
+				"csharp": "Home.Dreamer",
+				"elixir": "Toolnexus.Agents.Home.dreamer",
+				"clojure": "toolnexus.agents.home/dreamer",
+				"rust": "dreamer"
+			}
+		},
+		{
+			"id": "persona/transcript-search-tool",
+			"group": "persona",
+			"member": "transcript-search-tool",
+			"title": "transcriptSearchTool — search past conversations",
+			"spec": "§7E",
+			"summary": "A read-only tool that searches past conversation transcripts — the ground truth for memory.",
+			"symbols": {
+				"javascript": "transcriptSearchTool",
+				"python": "transcript_search_tool",
+				"golang": "TranscriptSearchTool",
+				"java": "TranscriptSearch.transcriptSearchTool",
+				"csharp": "TranscriptSearch.Tool",
+				"elixir": "Toolnexus.TranscriptSearch.tool",
+				"clojure": "toolnexus.transcript-search/transcript-search-tool",
+				"rust": "transcript_search_tool"
 			}
 		},
 		{

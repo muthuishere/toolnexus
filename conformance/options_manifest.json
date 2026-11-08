@@ -150,6 +150,13 @@
         "tier": "full"
       },
       {
+        "name": "fallbackModels",
+        "aliases": [
+          "fallbackmodels"
+        ],
+        "tier": "full"
+      },
+      {
         "name": "apiKeyEnv",
         "aliases": [
           "apikeyenv"
@@ -174,6 +181,20 @@
         "name": "maxToolConcurrency",
         "aliases": [
           "maxtoolconcurrency"
+        ],
+        "tier": "full"
+      },
+      {
+        "name": "stopRecovery",
+        "aliases": [
+          "stoprecovery"
+        ],
+        "tier": "full"
+      },
+      {
+        "name": "compactOnOverflow",
+        "aliases": [
+          "compactonoverflow"
         ],
         "tier": "full"
       }
@@ -282,6 +303,20 @@
         "name": "media",
         "aliases": [
           "media"
+        ],
+        "tier": "full"
+      },
+      {
+        "name": "tokenStore",
+        "aliases": [
+          "tokenstore"
+        ],
+        "tier": "full"
+      },
+      {
+        "name": "openUrl",
+        "aliases": [
+          "openurl"
         ],
         "tier": "full"
       }
@@ -424,6 +459,103 @@
           "evaluate"
         ],
         "tier": "core"
+      }
+    ]
+  },
+  "acpOptions": {
+    "_doc": "SPEC §8C ACPOptions passthrough fields (ADR 0041).",
+    "files": {
+      "js": "js/src/acp.ts",
+      "python": "python/src/toolnexus/acp.py",
+      "go": "golang/acp.go",
+      "java": "java/src/main/java/io/github/muthuishere/toolnexus/acp/AcpClient.java",
+      "csharp": "csharp/src/Toolnexus/Acp/AcpClient.cs",
+      "elixir": "elixir/lib/toolnexus/acp.ex",
+      "clojure": "clojure/src/toolnexus/acp.cljc",
+      "rust": "rust/src/acp.rs"
+    },
+    "options": [
+      {
+        "name": "mcpServers",
+        "aliases": [
+          "mcpServers",
+          "mcp_servers"
+        ],
+        "tier": "core"
+      },
+      {
+        "name": "sessionMeta",
+        "aliases": [
+          "sessionMeta",
+          "session_meta"
+        ],
+        "tier": "core"
+      },
+      {
+        "name": "clientCapsMeta",
+        "aliases": [
+          "clientCapsMeta",
+          "client_caps_meta"
+        ],
+        "tier": "core"
+      },
+      {
+        "name": "model",
+        "aliases": [
+          "model"
+        ],
+        "tier": "core"
+      }
+    ]
+  },
+  "personaOptions": {
+    "_doc": "SPEC §7E memory hierarchy + dreaming (OpenSpec add-memory-hierarchy). fromDir options (memoryIndexCap, notes, dream) plus the dreamer() preset and transcriptSearchTool, which the agent-home file wires into the dreamer. Per-port spellings: memory_index_cap (python/elixir/rust), memory-index-cap (clojure), MemoryIndexCap (go/csharp).",
+    "files": {
+      "js": "js/src/agents/home.ts",
+      "python": "python/src/toolnexus/agents/surface.py",
+      "go": "golang/agents/home.go",
+      "java": "java/src/main/java/io/github/muthuishere/toolnexus/agents/Agents.java",
+      "csharp": "csharp/src/Toolnexus/Agents/Home.cs",
+      "elixir": "elixir/lib/toolnexus/agents/home.ex",
+      "clojure": "clojure/src/toolnexus/agents/home.cljc",
+      "rust": "rust/src/agents/home.rs"
+    },
+    "options": [
+      {
+        "name": "memoryIndexCap",
+        "aliases": [
+          "memoryindexcap"
+        ],
+        "tier": "full"
+      },
+      {
+        "name": "notes",
+        "aliases": [
+          "notes"
+        ],
+        "tier": "full"
+      },
+      {
+        "name": "transcriptSearchTool",
+        "aliases": [
+          "transcriptsearchtool",
+          "transcriptsearch"
+        ],
+        "tier": "full"
+      },
+      {
+        "name": "dreamer",
+        "aliases": [
+          "dreamer"
+        ],
+        "tier": "full"
+      },
+      {
+        "name": "dream",
+        "aliases": [
+          "dream"
+        ],
+        "tier": "full"
       }
     ]
   },

@@ -895,6 +895,8 @@ impl Media {
         let me = self.clone();
         let verb: &'static str = &spec.verb;
         Tool {
+            output_schema: None,
+            annotations: None,
             name: spec.tool.clone(),
             description: spec.description.clone(),
             input_schema: json!({"type": "object", "properties": props, "required": required}),

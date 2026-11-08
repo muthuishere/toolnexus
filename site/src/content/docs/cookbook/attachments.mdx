@@ -7,7 +7,7 @@ import { Tabs, TabItem, Aside } from '@astrojs/starlight/components';
 
 <Aside type="tip" title="Why you need this">
 Half the useful questions are about something you can *see*: a screenshot of a broken
-page, a scanned invoice, a chart. Until now toolnexus could not carry one — and worse,
+page, a scanned invoice, a chart. Until now Toolnexus could not carry one — and worse,
 an MCP tool that **returned** an image had it silently dropped, so a screenshot tool
 handed you the empty string with no error and no log line. Both directions work now:
 you attach content going in, tools return content coming out, and every provider style
@@ -382,9 +382,9 @@ model cheerfully described colours it had never seen.
 
 **Switching to `style: "anthropic"` does not help** — OpenRouter's Anthropic-compatible
 `/v1/messages` drops it the same way (measured +4 on both `x-api-key` and `Authorization: Bearer`,
-with a hand-written native `source{}` block and no toolnexus in the path). The route is the
+with a hand-written native `source{}` block and no Toolnexus in the path). The route is the
 problem, not the block shape; to send images to an Anthropic model, point `baseUrl` at
-`api.anthropic.com` directly. Nothing in toolnexus can fix this; the block we
+`api.anthropic.com` directly. Nothing in Toolnexus can fix this; the block we
 emit is the documented one. It is also why our live check proves image arrival by
 **prompt-token delta** rather than by reading the answer: a model asked to name colours will
 name colours it never received, which is exactly how a dropped image hides.

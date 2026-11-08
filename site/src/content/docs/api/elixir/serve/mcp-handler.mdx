@@ -1,0 +1,186 @@
+---
+title: "Toolnexus.McpHandler"
+description: "An embeddable MCP server: a Plug you mount on your own listener, with per-request hooks. — Elixir."
+sidebar:
+  label: "serve / mcp-handler"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Elixir</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7C.1</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/elixir/lib/toolnexus/mcp_handler.ex">elixir/lib/toolnexus/mcp_handler.ex</a>
+</p>
+
+```elixir
+@spec Toolnexus.mcp_handler(Toolnexus.Toolkit.t() | nil, keyword() | map()) :: Toolnexus.McpHandler.t()
+def mcp_handler(toolkit, cfg \\ [])
+
+# A Plug: mount it on Bandit, Plug.Router or Phoenix.
+Bandit.start_link(plug: {Toolnexus.McpHandler, handler}, port: 4000)
+
+@spec Toolnexus.McpHandler.notify_tools_changed(Toolnexus.McpHandler.t()) :: :ok
+# Request accessors — work on the hook ctx AND the tool's %Toolnexus.Context{}:
+Toolnexus.McpHandler.identity(ctx)      # what :authenticate returned
+Toolnexus.McpHandler.request(ctx)       # the Plug.Conn
+Toolnexus.McpHandler.session_id(ctx)    # Mcp-Session-Id (nil when stateless)
+Toolnexus.McpHandler.request_meta(ctx)  # the JSON-RPC params._meta
+```
+
+`Toolkit.serve(tk, addr, mcp: …)` owns a listener and exposes one static tool list.
+`Toolnexus.mcp_handler/2` is what a host mounts on **its own** router, behind its own TLS, CORS and
+OAuth. Every policy is a hook; toolnexus has no notion of tenant, user, role or storage — the host
+decides those inside the hooks. The transport is streamable HTTP (protocol `2025-06-18`, opt-in
+`2025-11-25`), implemented by hand over JSON-RPC; the public API uses toolnexus's own types only.
+
+## When to use it
+
+- **Multi-tenant MCP gateway** — `authenticate` turns a bearer token into an identity, and
+  `list_tools` resolves the tool list per request, so each tenant sees (and can call) only its tools.
+  A name outside that list answers `-32602 "tool not found: <name>"` and is never executed.
+- **Gate dangerous tools** — `before_call` returns `:allow`, `{:deny, msg}` or `{:confirm, msg}`.
+  Confirm asks the client over `elicitation/create` on the same POST's SSE stream when it declared
+  elicitation; otherwise the caller gets your shaped `Decision.result` (e.g. "re-call with a nonce").
+- **Tools that change at runtime** — call `notify_tools_changed/1`; clients holding a GET stream
+  receive `notifications/tools/list_changed` and re-list.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Reach for serve/3 when you just want a port">
+[`Toolnexus.McpServe`](/api/elixir/serve/mcp/) (`serve(tk, addr, mcp: %{})`) is one call and one
+static tool list, with no auth. Use the handler when the MCP endpoint is part of an app you already
+run, or when who-sees-what is decided per request.
+</Aside>
+
+## Examples
+
+### 1. The smallest useful call — mount and list
+
+```elixir
+alias Toolnexus.McpHandler
+
+Application.ensure_all_started(:req)
+
+echo = Toolnexus.define_tool(name: "echo", description: "Echo", execute: fn a -> a["text"] end)
+handler = Toolnexus.mcp_handler(nil, stateless: true, list_tools: fn _ctx -> [echo] end)
+
+{:ok, srv} = Bandit.start_link(plug: {McpHandler, handler}, ip: {127, 0, 0, 1}, port: 0, startup_log: false)
+{:ok, {_, port}} = ThousandIsland.listener_info(srv)
+
+body =
+  Req.post!("http://127.0.0.1:#{port}/",
+    json: %{"jsonrpc" => "2.0", "id" => 1, "method" => "tools/call",
+            "params" => %{"name" => "echo", "arguments" => %{"text" => "hi"}}},
+    retry: false
+  ).body
+
+"hi" = hd(body["result"]["content"])["text"]
+IO.puts("ok: echo -> hi")
+```
+
+### 2. The realistic case — per-identity tools behind your auth
+
+```elixir
+alias Toolnexus.McpHandler
+
+Application.ensure_all_started(:req)
+
+mk = fn name -> Toolnexus.define_tool(name: name, description: name, execute: fn _a, ctx -> "#{name}:#{McpHandler.identity(ctx)}" end) end
+
+handler =
+  Toolnexus.mcp_handler(nil,
+    stateless: true,
+    authenticate: fn conn ->
+      case Plug.Conn.get_req_header(conn, "authorization") do
+        ["Bearer " <> u] when u in ["alice", "admin"] -> {:ok, u}
+        _ -> {:error, :unauthorized}
+      end
+    end,
+    www_authenticate: fn _conn, _err -> ~s(Bearer resource_metadata="https://example.test/.well-known/oauth-protected-resource") end,
+    list_tools: fn ctx ->
+      if McpHandler.identity(ctx) == "admin", do: [mk.("search"), mk.("wipe")], else: [mk.("search")]
+    end
+  )
+
+{:ok, srv} = Bandit.start_link(plug: {McpHandler, handler}, ip: {127, 0, 0, 1}, port: 0, startup_log: false)
+{:ok, {_, port}} = ThousandIsland.listener_info(srv)
+url = "http://127.0.0.1:#{port}/"
+
+call = fn who, name ->
+  Req.post!(url,
+    json: %{"jsonrpc" => "2.0", "id" => 1, "method" => "tools/call", "params" => %{"name" => name}},
+    headers: [{"authorization", "Bearer #{who}"}],
+    retry: false
+  ).body
+end
+
+-32602 = call.("alice", "wipe")["error"]["code"]          # never executed
+"wipe:admin" = hd(call.("admin", "wipe")["result"]["content"])["text"]
+401 = Req.post!(url, json: %{}, retry: false).status
+IO.puts("ok: alice cannot see wipe, admin can, no token -> 401")
+```
+
+### 3. The full surface — gate, structured results, observability
+
+```elixir
+alias Toolnexus.{McpHandler, ToolAnnotations, ToolResult}
+alias Toolnexus.McpHandler.Decision
+
+stats =
+  Toolnexus.define_tool(
+    name: "stats",
+    description: "Counts",
+    output_schema: %{"type" => "object", "properties" => %{"count" => %{"type" => "integer"}}},
+    execute: fn _ -> %ToolResult{structured: %{"count" => 3}, meta: %{"usage" => %{"units" => 2}}} end
+  )
+
+drop =
+  Toolnexus.define_tool(
+    name: "drop",
+    description: "Drop a table",
+    annotations: %ToolAnnotations{title: "Drop", destructive_hint: true},
+    execute: fn _ -> "dropped" end
+  )
+
+handler =
+  Toolnexus.mcp_handler(nil,
+    name: "records", title: "Records API", version: "1.2.3",
+    protocol_versions: ["2025-11-25", "2025-06-18"],
+    list_tools: fn _ctx -> [stats, drop] end,
+    before_call: fn _ctx, tool, args ->
+      if tool.annotations && tool.annotations.destructive_hint && args["nonce"] != "ok",
+        do: %Decision{kind: :confirm, message: "Drop it?", result: ToolResult.ok("re-call with nonce ok")},
+        else: :allow
+    end,
+    on_call: fn ev -> IO.puts("#{ev.name} #{ev.decision} #{ev.ms}ms #{ev.result_bytes}B") end,
+    confirm_timeout: 60_000,
+    max_body_bytes: 1_048_576
+  )
+
+# tools/list carries outputSchema + annotations; tools/call on stats returns
+# structuredContent {"count":3}, _meta {"usage":{"units":2}} and the JSON as its text block.
+true = McpHandler.wire_tool(drop)["annotations"] == %{"title" => "Drop", "destructiveHint" => true}
+McpHandler.stop(handler)
+IO.puts("ok")
+```
+
+## Options
+
+| Option | Default | What it does |
+|---|---|---|
+| `:name` / `:title` / `:version` / `:instructions` | `"toolnexus"` / omitted / `"0.1.0"` / omitted | Static `serverInfo`. |
+| `:server_info` | — | `fn ctx -> %{name:, title:, version:, instructions:} end`, per request; wins. |
+| `:protocol_versions` | `["2025-06-18"]` | Accepted versions; anything outside `["2025-11-25", "2025-06-18"]` is dropped. |
+| `:authenticate` / `:www_authenticate` | — | `{:ok, identity}` or 401 with the given `WWW-Authenticate`. |
+| `:list_tools` | the toolkit's tools | Per-request tool list for `tools/list` and the `tools/call` lookup. |
+| `:before_call` | allow | `:allow` · `{:deny, msg}` · `{:confirm, msg}` · `{:error, r}` (deny) · `%Decision{}`. |
+| `:confirm_timeout` | `300_000` ms | Bounds an elicitation round trip. |
+| `:on_call` | — | `%{name, source, ms, is_error, err, result_bytes, decision, identity, session_id}`; raises isolated. |
+| `:list_resources` / `:read_resource` / `:list_prompts` / `:get_prompt` | — | Absent ⇒ `-32601`. |
+| `:session_ids` | in memory | A `Toolnexus.McpHandler.SessionIds` module or `%{generate:, validate:, terminate:}`. |
+| `:stateless` / `:stateless_session_id` | `false` / — | No session issued or checked; confirm never elicits. |
+| `:max_body_bytes` | 4 MiB | Larger POST ⇒ 413. |
+
+## See also
+
+- [`Toolnexus.McpServe`](/api/elixir/serve/mcp/) — the one-call, listener-owning MCP profile.
+- [`Toolnexus.Mcp.load`](/api/elixir/mcp/load/) — the outbound mirror: connect to an MCP server as a client.

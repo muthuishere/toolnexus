@@ -39,6 +39,12 @@ pub fn acp_messages(req: &InProcessRequest) -> Vec<(String, String)> {
 fn to_stream_event(ev: AcpStreamEvent) -> StreamEvent {
     match ev {
         AcpStreamEvent::Text { delta } => StreamEvent::text(delta),
+        AcpStreamEvent::Thought { delta, via } => StreamEvent {
+            kind: "thought".into(),
+            delta,
+            via: via.into(),
+            ..Default::default()
+        },
         AcpStreamEvent::ToolCall {
             id,
             name,
@@ -46,6 +52,19 @@ fn to_stream_event(ev: AcpStreamEvent) -> StreamEvent {
             via,
         } => StreamEvent {
             kind: "tool_call".into(),
+            id,
+            name,
+            args,
+            via: via.into(),
+            ..Default::default()
+        },
+        AcpStreamEvent::ToolCallArgs {
+            id,
+            name,
+            args,
+            via,
+        } => StreamEvent {
+            kind: "tool_call_args".into(),
             id,
             name,
             args,

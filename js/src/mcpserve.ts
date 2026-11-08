@@ -12,6 +12,9 @@
  * server alongside the A2A routes (see serve.ts), built on the same
  * `@modelcontextprotocol/sdk` the client side already uses.
  */
+import http from "node:http"
+import type { AddressInfo } from "node:net"
+import { randomBytes, timingSafeEqual } from "node:crypto"
 import { Server } from "@modelcontextprotocol/sdk/server/index.js"
 import { ListToolsRequestSchema, CallToolRequestSchema, McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js"
 import type { Tool, ToolSource, ToolResult } from "./types.js"
@@ -66,7 +69,11 @@ export function buildMcpServer(tools: Tool[], cfg?: MCPServeConfig, onCall?: OnC
   )
 
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
-    tools: tools.map((t) => ({ name: t.name, description: t.description, inputSchema: t.inputSchema })),
+    tools: tools.map((t) =>
+      t.outputSchema
+        ? { name: t.name, description: t.description, inputSchema: t.inputSchema, outputSchema: t.outputSchema }
+        : { name: t.name, description: t.description, inputSchema: t.inputSchema },
+    ),
   }))
 
   server.setRequestHandler(CallToolRequestSchema, async (req, extra) => {
@@ -89,10 +96,34 @@ export function buildMcpServer(tools: Tool[], cfg?: MCPServeConfig, onCall?: OnC
         // Host callback errors are isolated.
       }
     }
-    return { content: [{ type: "text", text: result.output }, ...partBlocks(result.parts)], isError: result.isError }
+    return toolResultToMcp(result) as any
   })
 
   return server
+}
+
+/**
+ * §7C / §1. Map a ToolResult to an MCP `CallToolResult`: `output` → the text block (or, when
+ * `output` is empty and `structured` is set, the JSON text of `structured`), `parts` → extra
+ * blocks, `structured` → `structuredContent`, `meta` → `_meta`. With neither set the shape is
+ * byte-identical to the pre-§7C.1 result. `omitFalseIsError` drops `isError:false` (the
+ * hand-written §7C.1 handler wire, like Go's omitempty); the SDK serve path keeps it.
+ */
+export function toolResultToMcp(result: ToolResult, omitFalseIsError = false): Record<string, unknown> {
+  let text = result.output ?? ""
+  if (result.structured !== undefined && result.structured !== null && text === "") {
+    try {
+      text = JSON.stringify(result.structured)
+    } catch {
+      // leave the text empty when structured is not serialisable
+    }
+  }
+  const out: Record<string, unknown> = { content: [{ type: "text", text }, ...partBlocks(result.parts)] }
+  if (!omitFalseIsError) out.isError = result.isError
+  else if (result.isError) out.isError = true
+  if (result.structured !== undefined && result.structured !== null) out.structuredContent = result.structured
+  if (result.meta) out._meta = result.meta
+  return out
 }
 
 /**
@@ -115,4 +146,87 @@ function partBlocks(parts: ContentPart[] | undefined): any[] {
     }
   }
   return out
+}
+
+/** A loopback MCP endpoint for a local agent (SPEC §8C, {@link Toolkit.asMcpServer}). */
+export interface LocalMcpServer {
+  /** `http://127.0.0.1:<port>/mcp`. */
+  url: string
+  /** 64 lowercase hex chars; required as `Authorization: Bearer <token>`. Never logged. */
+  token: string
+  /** Stops the listener. Idempotent. */
+  close(): Promise<void>
+}
+
+/**
+ * Serves `tools` (filtered by `cfg.tools`) as the stateless §7C streamable-HTTP MCP endpoint on
+ * `127.0.0.1:<ephemeral>/mcp` behind a fresh bearer token. Other paths ⇒ 404; missing/wrong
+ * token ⇒ 401 + `WWW-Authenticate: Bearer` (constant-time compare); a non-POST ⇒ 405.
+ */
+export async function serveLocalMcp(tools: Tool[], cfg?: MCPServeConfig): Promise<LocalMcpServer> {
+  const exposed = exposedMcpTools(tools, cfg)
+  // Loaded on first serve, not at import: the transport pulls in @hono/node-server.
+  const { StreamableHTTPServerTransport } = await import("@modelcontextprotocol/sdk/server/streamableHttp.js")
+  const token = randomBytes(32).toString("hex")
+  const want = Buffer.from("Bearer " + token)
+  const server = http.createServer((req, res) => {
+    const u = req.url ?? ""
+    if (u !== "/mcp" && !u.startsWith("/mcp?")) {
+      res.writeHead(404).end("not found")
+      return
+    }
+    const got = Buffer.from(String(req.headers.authorization ?? ""))
+    if (got.length !== want.length || !timingSafeEqual(got, want)) {
+      res.writeHead(401, { "WWW-Authenticate": "Bearer" }).end("unauthorized")
+      return
+    }
+    if (req.method !== "POST") {
+      res.writeHead(405, { Allow: "POST" }).end("method not allowed")
+      return
+    }
+    void (async () => {
+      const body = await readBody(req)
+      let parsed: unknown
+      try {
+        parsed = body ? JSON.parse(body) : undefined
+      } catch {
+        parsed = undefined
+      }
+      const mcp = buildMcpServer(exposed, cfg)
+      const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined })
+      res.on("close", () => {
+        void transport.close()
+        void mcp.close()
+      })
+      await mcp.connect(transport)
+      await transport.handleRequest(req, res, parsed)
+    })().catch(() => {
+      if (!res.headersSent) res.writeHead(500).end("mcp error")
+    })
+  })
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject)
+    server.listen(0, "127.0.0.1", () => resolve())
+  })
+  const port = (server.address() as AddressInfo).port
+  let closing: Promise<void> | undefined
+  return {
+    url: `http://127.0.0.1:${port}/mcp`,
+    token,
+    close: () =>
+      (closing ??= new Promise<void>((resolve) => {
+        server.close(() => resolve())
+        server.closeAllConnections()
+      })),
+  }
+}
+
+function readBody(req: http.IncomingMessage): Promise<string> {
+  return new Promise((resolve, reject) => {
+    let data = ""
+    req.setEncoding("utf8")
+    req.on("data", (c: string) => (data += c))
+    req.on("end", () => resolve(data))
+    req.on("error", reject)
+  })
 }

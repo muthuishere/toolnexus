@@ -158,9 +158,23 @@ defmodule Toolnexus.Tool do
   `concurrency_safe` (`fn args -> boolean end`, optional) decides per call whether the
   tool may run alongside other safe calls of one model response (SPEC §8 "Tool
   scheduling"); `nil` ⇒ safe only when `hints.read_only`.
+
+  `output_schema` (SPEC §1) is the JSON Schema of `ToolResult.structured`; MCP serve
+  advertises it as `outputSchema`. `annotations` (`Toolnexus.ToolAnnotations`, §7C.1)
+  are sent verbatim by `Toolnexus.McpHandler`; `nil` ⇒ derived from `hints`, else omitted.
   """
   @enforce_keys [:name, :description, :input_schema, :source, :execute]
-  defstruct [:name, :description, :input_schema, :source, :execute, :hints, :concurrency_safe]
+  defstruct [
+    :name,
+    :description,
+    :input_schema,
+    :source,
+    :execute,
+    :hints,
+    :concurrency_safe,
+    :output_schema,
+    :annotations
+  ]
 
   @type t :: %__MODULE__{
           name: String.t(),
@@ -169,12 +183,30 @@ defmodule Toolnexus.Tool do
           source: String.t(),
           execute: (map(), Toolnexus.Context.t() -> Toolnexus.ToolResult.t()),
           hints: Toolnexus.ToolHints.t() | nil,
-          concurrency_safe: (map() -> boolean()) | nil
+          concurrency_safe: (map() -> boolean()) | nil,
+          output_schema: map() | nil,
+          annotations: Toolnexus.ToolAnnotations.t() | nil
         }
 
   @doc "sanitize(x): replace every character outside [a-zA-Z0-9_-] with `_` (SPEC §0.2)."
   @spec sanitize(String.t()) :: String.t()
   def sanitize(name), do: String.replace(name, ~r/[^a-zA-Z0-9_-]/, "_")
+end
+
+defmodule Toolnexus.ToolAnnotations do
+  @moduledoc """
+  MCP tool annotations a served tool advertises (SPEC §7C.1). Every field is
+  optional; `nil` fields are omitted on the wire.
+  """
+  defstruct [:title, :read_only_hint, :destructive_hint, :idempotent_hint, :open_world_hint]
+
+  @type t :: %__MODULE__{
+          title: String.t() | nil,
+          read_only_hint: boolean() | nil,
+          destructive_hint: boolean() | nil,
+          idempotent_hint: boolean() | nil,
+          open_world_hint: boolean() | nil
+        }
 end
 
 defmodule Toolnexus.ToolHints do
@@ -199,15 +231,20 @@ defmodule Toolnexus.ToolResult do
   `paths` is port-internal (SPEC §7G.12 D20): when set, a list aligned with `parts` giving
   each part's absolute local file path (or `nil`). It feeds `RunResult.files[].path` only and
   is never sent to a model, over A2A, or inside a part.
+
+  `structured` is the machine-readable result (MCP `structuredContent`) and `meta` the
+  protocol metadata (MCP `_meta`); both `nil` ⇒ the wire is unchanged.
   """
-  defstruct output: "", is_error: false, parts: nil, metadata: nil, paths: nil
+  defstruct output: "", is_error: false, parts: nil, metadata: nil, paths: nil, structured: nil, meta: nil
 
   @type t :: %__MODULE__{
           output: String.t(),
           is_error: boolean(),
           parts: [Toolnexus.ContentPart.t()] | nil,
           metadata: map() | nil,
-          paths: [String.t() | nil] | nil
+          paths: [String.t() | nil] | nil,
+          structured: term() | nil,
+          meta: map() | nil
         }
 
   @doc "Convenience: an error result with the given text."

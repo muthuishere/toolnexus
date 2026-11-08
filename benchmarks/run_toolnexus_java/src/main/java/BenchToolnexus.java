@@ -14,7 +14,8 @@ import java.util.Map;
  * server (via the official MCP Java SDK). JVM warmup is handled with explicit
  * warmup iterations before the measured loop; init is a COLD, first-touch build.
  *
- *   -config mcp|full   -runs N   -warmup W
+ *   -config mcp|full|native   -runs N   -warmup W
+ *   native = get_weather + add as annotated native tools, no MCP (loop overhead only)
  */
 public final class BenchToolnexus {
 
@@ -23,6 +24,19 @@ public final class BenchToolnexus {
         public String multiply(@Param(name = "a", description = "a") long a,
                                @Param(name = "b", description = "b") long b) {
             return String.valueOf(a * b);
+        }
+    }
+
+    public static final class WeatherAddTools {
+        @ToolMethod(name = "get_weather", description = "Get the current weather for a city.")
+        public String getWeather(@Param(name = "city", description = "city") String city) {
+            return "The weather in " + city + " is Sunny, 22C.";
+        }
+
+        @ToolMethod(name = "add", description = "Add two integers.")
+        public String add(@Param(name = "a", description = "a") long a,
+                          @Param(name = "b", description = "b") long b) {
+            return String.valueOf(a + b);
         }
     }
 
@@ -49,7 +63,8 @@ public final class BenchToolnexus {
 
         // ---- cold init ----
         long t0 = System.nanoTime();
-        Toolkit.Options opts = new Toolkit.Options().mcpConfig(mcpConfig).builtins(false);
+        Toolkit.Options opts = new Toolkit.Options().builtins(false);
+        if (!config.equals("native")) opts.mcpConfig(mcpConfig);
         if (config.equals("full")) {
             opts.skillsDir(repo + "/examples/skills");
         }
@@ -57,8 +72,11 @@ public final class BenchToolnexus {
         if (config.equals("full")) {
             for (Tool t : Tools.fromObject(new NativeTools())) tk.register(t);
         }
+        if (config.equals("native")) {
+            for (Tool t : Tools.fromObject(new WeatherAddTools())) tk.register(t);
+        }
         LlmClient agent = LlmClient.create(new LlmClient.Options()
-                .baseUrl(mockUrl).style("openai").model("mock-model"));
+                .baseUrl(mockUrl).style("openai").model("mock-model").apiKey("sk-mock-not-a-real-key"));
         double initMs = (System.nanoTime() - t0) / 1_000_000.0;
         int toolCount = tk.tools().size();
 

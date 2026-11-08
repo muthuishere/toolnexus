@@ -18,8 +18,9 @@
 ;;
 ;;   - only `agent_message_chunk` `session/update` notifications accumulate
 ;;     into a turn's reply — `agent_thought_chunk` and tool-call narration are
-;;     dropped, or they wrap prose around structured output and break JSON
-;;     parsing outright;
+;;     kept out of it, or they wrap prose around structured output and break
+;;     JSON parsing outright (`generate-stream` still REPORTS them, as
+;;     `thought` / `tool_call` / `tool_result` events, never as answer text);
 ;;   - replies to OUR calls and `session/update` notifications interleave on
 ;;     the same stream, so replies are demultiplexed by JSON-RPC id (the ONE
 ;;     reader thread files a reply in `:inbox`, keyed by id — same shape as
@@ -54,8 +55,10 @@
   (:require [clojure.string :as str]
             [koine.fs :as fs]
             [koine.json :as json]
+            [koine.env :as env]
             [koine.process :as proc]
-            [koine.time :as ktime]))
+            [koine.time :as ktime]
+            [toolnexus.builtin :as builtin]))
 
 ;; ---------------------------------------------------------------------------
 ;; config
@@ -155,25 +158,99 @@
   (with-lock! (:write-lock client)
     (fn [] (proc/send-line! (:child client) (json/write-str msg)))))
 
+(defn- first-option-of-kind
+  "The optionId of the first option whose kind starts with `prefix`, or nil."
+  [options prefix]
+  (some (fn [o] (when (str/starts-with? (str (:kind o)) prefix) (:optionId o))) options))
+
+(defn- reply-outcome!
+  [client id chosen]
+  (send-msg! client {:jsonrpc "2.0" :id id
+                     :result  (if chosen
+                                {:outcome {:outcome "selected" :optionId chosen}}
+                                {:outcome {:outcome "cancelled"}})}))
+
 (defn- answer-permission!
   "Answer a `session/request_permission` request with the first `allow`-kind
   option, inline — an unanswered permission request hangs the turn forever,
-  even in bypass mode (ADR 0031)."
+  even in bypass mode (ADR 0031).
+
+  With `:on-permission` set (SPEC §8C), the host decides instead: it is handed
+  the request's params and returns an optionId. A throw, nil or an empty id answers
+  with the first `reject`-kind option, else `cancelled`. It runs OFF the reader
+  thread, so it may block without stalling session/update delivery."
   [client req]
-  (let [options (get-in req [:params :options])
-        chosen  (some (fn [o] (when (str/starts-with? (str (:kind o)) "allow") (:optionId o)))
-                       options)
-        result  (if chosen
-                  {:outcome {:outcome "selected" :optionId chosen}}
-                  {:outcome {:outcome "cancelled"}})]
-    (send-msg! client {:jsonrpc "2.0" :id (:id req) :result result})))
+  (let [options (get-in req [:params :options])]
+    (if-let [decide (:on-permission client)]
+      (proc/run-async!
+       (fn []
+         (let [chosen (try (decide (:params req)) (catch Throwable _ nil))
+               chosen (if (str/blank? (str (or chosen "")))
+                        (first-option-of-kind options "reject")
+                        chosen)]
+           (reply-outcome! client (:id req) chosen))))
+      (reply-outcome! client (:id req) (first-option-of-kind options "allow")))))
+
+(defn- tool-content-text
+  "The text of a tool_call_update's content blocks, concatenated (Go
+  acpToolContentText)."
+  [content]
+  (if (sequential? content)
+    (str/join "" (map #(str (get-in % [:content :text])) content))
+    ""))
+
+(defn- stream-update!
+  "Hand one session/update to the CURRENT turn's emitter (if any), as it is
+  read — this runs on the reader thread, so delivery is incremental:
+    agent_message_chunk -> {:type \"text\" :delta}
+    agent_thought_chunk -> {:type \"thought\" :delta :via \"acp\"} (never part
+                           of the answer)
+    tool_call           -> {:type \"tool_call\" :id :name (title) :args (rawInput) :via \"acp\"}
+    tool_call_update    -> a non-empty :title is remembered as the call's name;
+                           a non-empty :rawInput object first emits
+                           {:type \"tool_call_args\" :id :name :args :via \"acp\"} (#188);
+                           completed|failed then emits
+                           {:type \"tool_result\" :id :name :output :isError :via \"acp\"}
+  An emitter that throws never breaks the reader."
+  [client upd]
+  (let [st   (:state client)
+        kind (:sessionUpdate upd)
+        id   (:toolCallId upd)]
+    (when (= "tool_call" kind)
+      (swap! st assoc-in [:tool-names id] (if (str/blank? (str (:title upd))) (:kind upd) (:title upd))))
+    (when (and (= "tool_call_update" kind) (not (str/blank? (str (:title upd)))))
+      (swap! st assoc-in [:tool-names id] (:title upd)))
+    (when-let [emit (:emit @st)]
+      (let [txt (get-in upd [:content :text])
+            ev  (case (str kind)
+                  "agent_message_chunk" (when-not (= "" (str txt)) {:type "text" :delta (str txt)})
+                  "agent_thought_chunk" (when-not (= "" (str txt)) {:type "thought" :delta (str txt) :via "acp"})
+                  "tool_call"           {:type "tool_call" :id id :name (get-in @st [:tool-names id])
+                                         :args (or (:rawInput upd) {}) :via "acp"}
+                  "tool_call_update"    (let [nm   (get-in @st [:tool-names id])
+                                              args (:rawInput upd)]
+                                          (cond-> []
+                                            (and (map? args) (seq args))
+                                            (conj {:type "tool_call_args" :id id :name nm
+                                                   :args args :via "acp"})
+                                            (contains? #{"completed" "failed"} (:status upd))
+                                            (conj {:type "tool_result" :id id :name nm
+                                                   :output (tool-content-text (:content upd))
+                                                   :isError (= "failed" (:status upd)) :via "acp"})))
+                  nil)]
+        (doseq [e (if (sequential? ev) ev (when ev [ev]))]
+          (try (emit e) (catch Throwable _ nil)))))))
 
 (defn- route!
   "Dispatch one parsed JSON-RPC line from the child:
     - an id with no method  -> a reply to one of OUR requests, filed by id
-    - session/update        -> only agent_message_chunk text is accumulated
-    - session/request_permission -> answered inline, never surfaced
-    - anything else         -> ignored (nothing this client needs)."
+    - session/update        -> handed to :on-update (raw params), then only
+                               agent_message_chunk text is accumulated
+    - session/request_permission -> answered (inline, or via :on-permission)
+    - any OTHER request (has an id) -> -32601: fs/* and terminal/* are declared
+      unsupported in clientCapabilities, and an unanswered request makes the
+      agent wait forever
+    - a notification        -> ignored (nothing this client needs)."
   [client msg]
   (cond
     (and (nil? (:method msg)) (some? (:id msg)))
@@ -181,11 +258,18 @@
 
     (= "session/update" (:method msg))
     (let [upd (get-in msg [:params :update])]
+      (when-let [on (:on-update client)]
+        (try (on (:params msg)) (catch Throwable _ nil)))
       (when (= "agent_message_chunk" (:sessionUpdate upd))
-        (swap! (:state client) update :chunks conj (get-in upd [:content :text]))))
+        (swap! (:state client) update :chunks conj (get-in upd [:content :text])))
+      (stream-update! client upd))
 
     (and (= "session/request_permission" (:method msg)) (some? (:id msg)))
     (answer-permission! client {:id (:id msg) :params (:params msg)})
+
+    (and (some? (:method msg)) (some? (:id msg)))
+    (send-msg! client {:jsonrpc "2.0" :id (:id msg)
+                       :error   {:code -32601 :message (str "method not found: " (:method msg))}})
 
     :else nil))
 
@@ -236,6 +320,16 @@
                                      :message (get-in res [:ok :error :message])}
     :else                           {:ok (get-in res [:ok :result])}))
 
+(defn- await-reply!
+  "await-response! for `method`, with a closed transport reported as SPEC §8C
+  words it: the agent exited before replying — as soon as its stdout closes,
+  never by waiting out a timeout."
+  [client id method timeout-ms]
+  (let [res (await-response! (:state client) id timeout-ms)]
+    (if (= "peer-eof" (:error res))
+      {:error (str "agent exited before replying to " method)}
+      res)))
+
 (defn- call!
   "One request/response over the child — used for the one-shot setup calls
   (`initialize`, `session/new`, `session/set_mode`), never for
@@ -244,38 +338,136 @@
   [client method params]
   (let [id (next-id! (:id-counter client))]
     (send-msg! client {:jsonrpc "2.0" :id id :method method :params (or params {})})
-    (let [res (unwrap-reply (await-response! (:state client) id (:timeout-ms client)))]
+    (let [res (unwrap-reply (await-reply! client id method (:timeout-ms client)))]
       (swap! (:state client) update :inbox dissoc id)
       res)))
+
+;; ---------------------------------------------------------------------------
+;; model / mode switch (shared by connect and the running client, #197)
+;; ---------------------------------------------------------------------------
+
+(defn- set-model-call!
+  "session/set_config_option {configId \"model\"}, then the older
+  session/set_model if the agent rejects that. {:ok _} or
+  {:error [err1 err2]} when both fail."
+  [client model]
+  (let [sid (:session-id client)
+        r1  (call! client "session/set_config_option" {:sessionId sid :configId "model" :value model})]
+    (if-not (:error r1)
+      r1
+      (let [r2 (call! client "session/set_model" {:sessionId sid :modelId model})]
+        (if (:error r2) {:error [r1 r2]} r2)))))
+
+(defn- closed-error [client]
+  (when (:closed? @(:state client))
+    {:error (or (:close-reason @(:state client)) "closed")}))
 
 ;; ---------------------------------------------------------------------------
 ;; connect
 ;; ---------------------------------------------------------------------------
 
+(defn stderr
+  "The agent's most recent stderr lines (koine keeps a bounded tail), joined
+  with newlines — for error messages. Never contains anything we wrote."
+  [client]
+  ;; await-stderr, not stderr-lines: the drain is a background thread, so a
+  ;; child that just died routinely reads as silent for a few ms.
+  (try (str/join "\n" (proc/await-stderr (:child client) 300)) (catch Throwable _ "")))
+
+(declare kill-tree!)
+
 (defn- kill-and-throw!
-  "A handshake phase (`initialize` / `session/new` / `session/set_mode`)
-  failed: force-kill the half-open child so `connect` never leaks a process,
-  then throw."
+  "A handshake phase (`initialize` / `session/new` / `session/set_mode` / set
+  model) failed: force-kill the half-open child so `connect` never leaks a
+  process, then throw. `:phase` and the agent's `:stderr` tail ride in ex-data."
   [client phase res]
-  (try (proc/kill! (:child client)) (catch Throwable _ nil))
-  (throw (ex-info (str "toolnexus: acp: " phase ": " (pr-str (:error res))) (assoc res :phase phase))))
+  (kill-tree! client)
+  (throw (ex-info (str "toolnexus: acp: " phase ": " (pr-str (:error res)))
+                  (assoc res :phase phase :stderr (stderr client)))))
+
+(defn- which
+  "Resolve `cmd` like exec.LookPath: a name with a slash must exist; a bare name
+  is searched on PATH. Returns the path, or nil."
+  [cmd]
+  (let [cmd (str cmd)]
+    (cond
+      (str/blank? cmd) nil
+      (str/includes? cmd "/") (when (and (fs/exists? cmd) (not (fs/directory? cmd))) cmd)
+      :else (some (fn [dir]
+                    (let [p (str (if (str/blank? dir) "." dir) "/" cmd)]
+                      (when (and (fs/exists? p) (not (fs/directory? p))) p)))
+                  (str/split (or (env/get-env "PATH") "") #":")))))
+
+(def ^:private pid-wrapper
+  "Records the agent's pid, then `exec`s it: the shell is REPLACED, so the
+  agent runs with its argv untouched and no shell in between. The pid is what
+  lets `close` end the agent's whole process tree."
+  "echo $$ > \"$0\"; exec \"$@\"")
+
+(defn- spawn-agent!
+  "Spawn `command` (no shell — see `pid-wrapper`). Returns [child pidfile]."
+  [command cwd env-map]
+  (when-not (which (first command))
+    (throw (ex-info (str "toolnexus: acp: start " (pr-str (first command)) ": command not found")
+                    {:phase "start" :stderr ""})))
+  (let [pidfile (str (fs/real-path (fs/temp-dir! "toolnexus-acp")) "/pid")
+        child   (try
+                  (proc/spawn (into ["sh" "-c" pid-wrapper pidfile] (map str command))
+                              (cond-> {:dir cwd}
+                                (seq env-map) (assoc :env env-map)))
+                  (catch Throwable e
+                    (throw (ex-info (str "toolnexus: acp: start " (pr-str (first command)) ": "
+                                         (or (ex-message e) (str e)))
+                                    {:phase "start" :stderr ""}))))]
+    [child pidfile]))
+
+(defn- kill-tree!
+  "Force-end the agent and every descendant it started (captured while the
+  agent is still alive — after it dies its children are reparented)."
+  [client]
+  (let [pidfile (:pidfile client)
+        pid     (try (when (and pidfile (fs/exists? pidfile))
+                       (let [v (json/read-str (str/trim (fs/read-file pidfile)))]
+                         (when (integer? v) v)))
+                     (catch Throwable _ nil))
+        kids    (when pid (try (builtin/child-pids pid) (catch Throwable _ nil)))]
+    (try (proc/kill! (:child client)) (catch Throwable _ nil))
+    (doseq [p kids]
+      (try (proc/sh ["kill" "-KILL" (str p)] {:timeout-ms 5000}) (catch Throwable _ nil)))
+    (when pidfile
+      (try (fs/delete-tree! (subs pidfile 0 (str/last-index-of pidfile "/"))) (catch Throwable _ nil)))))
 
 (defn connect
-  "Spawn `command` (a vector, e.g. [\"devin\" \"acp\"]) and complete
-  `initialize` -> `session/new` (-> optional `session/set_mode`). Returns a
-  live, warm client map. Throws (ex-info) on any handshake failure — a model
-  source that cannot connect is a construction-time error, matching
-  `toolnexus.agents.runtime/create-runtime`'s own validation.
+  "Spawn `command` (a vector, e.g. [\"my-agent\" \"acp\"]) and complete
+  `initialize` -> `session/new` (-> optional `session/set_mode`) (-> optional
+  model). Returns a live, warm client map. Throws (ex-info) on any handshake
+  failure — a model source that cannot connect is a construction-time error,
+  matching `toolnexus.agents.runtime/create-runtime`'s own validation. The
+  ex-data carries `:phase` (\"initialize\", \"session/new\", ...) and the
+  agent's `:stderr` tail.
 
   opts:
-    :cwd                 absolute working directory handed to `session/new`.
-                          A real `devin acp` REJECTS session/new with -32602
-                          without an absolute cwd (ADR 0031) — defaults to
+    :cwd                 absolute working directory handed to `session/new`
+                          AND the child's working directory.
+                          Real agents REJECT session/new with -32602 without
+                          an absolute cwd (ADR 0031) — defaults to
                           the process's own resolved cwd (`koine.fs/real-path`
                           on \".\"), which is always absolute.
-    :mcp-servers          the `mcpServers` array on `session/new` (default
-                          []). Real `devin acp` requires the key to be
-                          present, even empty.
+    :mcp-servers          `session/new` mcpServers: a list of JSON objects
+                          sent VERBATIM and in order (SPEC §8C) — never
+                          validated, renamed or reshaped. Default [] (the key
+                          is always present; real agents require it).
+    :session-meta         sent as session/new `_meta` (opaque); the key is
+                          absent when unset.
+    :client-caps-meta     sent as initialize clientCapabilities._meta (opaque).
+    :model                if set, passed through unchanged after session/new:
+                          session/set_config_option {configId \"model\"}, then
+                          session/set_model if that is rejected. Both failing
+                          is a connect error.
+    :on-permission        (fn [params] option-id) decides every
+                          session/request_permission (see answer-permission!).
+    :on-update            (fn [params]) sees every raw session/update (must not
+                          block — it runs on the reader thread).
     :environment / :env   extra env vars for the child (merged; matches
                           toolnexus.mcp's `environment`/`env` alias).
     :mode                 if set, issues an optional `session/set_mode` after
@@ -283,10 +475,17 @@
     :timeout               per-call timeout ms for the setup handshake.
                           Default 30000.
     :permission-timeout    the safety net bounding a `session/prompt` reply
-                          — see default-permission-timeout-ms. Default 30000."
+                          — see default-permission-timeout-ms. Default 30000.
+
+  The client map also carries `:initialize-result`.
+
+  The agent is spawned without a shell (`exec` replaces the pid-recording
+  wrapper, argv untouched); `close` ends the agent's whole process tree, since
+  koine exposes no process groups."
   ([command] (connect command {}))
   ([command opts]
-   (let [{:keys [cwd mcp-servers environment env mode timeout permission-timeout]} opts
+   (let [{:keys [cwd mcp-servers environment env mode timeout permission-timeout
+                 client-caps-meta session-meta model on-permission on-update]} opts
          timeout-ms            (or timeout default-timeout-ms)
          permission-timeout-ms (or permission-timeout default-permission-timeout-ms)
          cwd                   (or cwd (fs/real-path "."))]
@@ -294,10 +493,11 @@
        (throw (ex-info (str "toolnexus: acp: :cwd must be absolute, got " (pr-str cwd))
                        {:cwd cwd})))
      (let [env-map    (merge (or environment {}) (or env {}))
-           child      (proc/spawn (vec command) (if (seq env-map) {:env env-map} {}))
+           [child pidfile] (spawn-agent! (vec command) cwd env-map)
            state      (atom {:inbox {} :closed? false :close-reason nil :chunks []})
            write-lock (atom false)
            client     {:child               child
+                       :pidfile             pidfile
                        :state               state
                        :write-lock          write-lock
                        :prompt-lock         (atom false)
@@ -305,25 +505,59 @@
                        :session-id          nil
                        :timeout-ms          timeout-ms
                        :permission-timeout-ms permission-timeout-ms
+                       :on-permission       on-permission
+                       :on-update           on-update
                        :close-once          (atom false)}]
        (start-reader! client)
-       (let [init-res (call! client "initialize"
-                              {:protocolVersion   1
-                               :clientCapabilities {:fs {:readTextFile false :writeTextFile false}}})]
+       (let [caps     (cond-> {:fs {:readTextFile false :writeTextFile false}
+                               :terminal false}
+                        client-caps-meta (assoc :_meta client-caps-meta))
+             ;; An agent that dies at once makes the write itself throw
+             ;; (Stream closed / Broken pipe): that is an initialize failure.
+             init-res (try (call! client "initialize"
+                                  {:protocolVersion   1
+                                   :clientCapabilities caps})
+                           (catch Throwable e {:error (ex-message e)}))]
          (when (:error init-res)
            (kill-and-throw! client "initialize" init-res))
-         (let [new-res (call! client "session/new" {:cwd cwd :mcpServers (or mcp-servers [])})]
+         (let [new-res (call! client "session/new"
+                              (cond-> {:cwd cwd :mcpServers (vec (or mcp-servers []))}
+                                session-meta (assoc :_meta session-meta)))]
            (when (:error new-res)
              (kill-and-throw! client "session/new" new-res))
            (let [session-id (get-in new-res [:ok :sessionId])]
              (when (str/blank? (str session-id))
                (kill-and-throw! client "session/new" {:error "no sessionId in response"}))
-             (let [client (assoc client :session-id session-id)]
+             (let [client (assoc client
+                                 :session-id session-id
+                                 :initialize-result (:ok init-res))]
                (when mode
                  (let [mode-res (call! client "session/set_mode" {:sessionId session-id :modeId mode})]
                    (when (:error mode-res)
                      (kill-and-throw! client "session/set_mode" mode-res))))
+               (when-not (str/blank? (str (or model "")))
+                 ;; Passed through unchanged. Stable ACP spelling first, then
+                 ;; the older unstable session/set_model.
+                 (let [r (set-model-call! client model)]
+                   (when (:error r)
+                     (kill-and-throw! client (str "set model " (pr-str model)) r))))
                client))))))))
+
+(defn set-mode!
+  "Change the agent's mode on a RUNNING client (SPEC §8C, #197): sends
+  session/set_mode {sessionId, modeId} at once — no restart, same session,
+  value unvalidated. {:ok result} or {:error ...}; a rejection fails only
+  this call."
+  [client mode]
+  (or (closed-error client)
+      (call! client "session/set_mode" {:sessionId (:session-id client) :modeId mode})))
+
+(defn set-model!
+  "Change the agent's model on a RUNNING client (SPEC §8C, #197) — the
+  :model connect option's logic: session/set_config_option, then
+  session/set_model. {:ok result} or {:error [err1 err2]}."
+  [client model]
+  (or (closed-error client) (set-model-call! client model)))
 
 ;; ---------------------------------------------------------------------------
 ;; prompt / generate
@@ -333,16 +567,18 @@
   "One session/prompt turn, accumulating only agent_message_chunk text.
   Not serialised itself — the caller (`prompt`) holds :prompt-lock for the
   whole call, matching golang/acp.go's `promptMu`."
-  [client text]
+  [client text emit]
   (if (:closed? @(:state client))
-    {:error (or (:close-reason @(:state client)) "closed")}
+    {:error (if (= "peer-eof" (:close-reason @(:state client)))
+              "agent exited before replying to session/prompt"
+              (or (:close-reason @(:state client)) "closed"))}
     (let [id (next-id! (:id-counter client))]
-      (swap! (:state client) assoc :chunks [])
+      (swap! (:state client) assoc :chunks [] :emit emit :tool-names {})
       (send-msg! client {:jsonrpc "2.0" :id id :method "session/prompt"
                          :params {:sessionId (:session-id client)
                                   :prompt    [{:type "text" :text text}]}})
-      (let [res (unwrap-reply (await-response! (:state client) id (:permission-timeout-ms client)))]
-        (swap! (:state client) update :inbox dissoc id)
+      (let [res (unwrap-reply (await-reply! client id "session/prompt" (:permission-timeout-ms client)))]
+        (swap! (:state client) #(-> % (update :inbox dissoc id) (assoc :emit nil)))
         (if (:error res)
           res
           {:ok (str/join "" (:chunks @(:state client)))})))))
@@ -350,9 +586,27 @@
 (defn prompt
   "Send one turn's FULL prompt text and wait for the accumulated
   agent_message_chunk reply. Turns on the same client are serialised —
-  {:ok content} or {:error reason}."
-  [client text]
-  (with-lock! (:prompt-lock client) (fn [] (send-prompt! client text))))
+  {:ok content} or {:error reason}. With `emit`, every session/update of the
+  turn is also handed to it AS IT ARRIVES (see `stream-update!`)."
+  ([client text] (prompt client text nil))
+  ([client text emit]
+   (with-lock! (:prompt-lock client) (fn [] (send-prompt! client text emit)))))
+
+(defn generate-stream
+  "Build a streaming semantic generate — (fn [req emit] -> {:content ...}) —
+  the shape `toolnexus.client/create-in-process-client`'s `:generate-stream`
+  accepts. `emit` receives text / thought / tool_call / tool_result events
+  from the reader thread while the turn runs (incremental, not after it);
+  the returned content is only the agent_message_chunk text. Throws like
+  `generate` on an ACP-level failure."
+  [client]
+  (fn [req emit]
+    (let [text (assemble-prompt-text (:messages req))
+          res  (prompt client text emit)]
+      (if (:error res)
+        (throw (ex-info (str "toolnexus: acp: generate failed: " (pr-str (:error res)))
+                        {:acp-error (:error res)}))
+        {:content (:ok res)}))))
 
 (defn generate
   "Build a semantic `generate` fn — (fn [req] -> {:content ...}) — backed by
@@ -360,21 +614,16 @@
   `toolnexus.client/create-in-process-client` and
   `toolnexus.agents.runtime/create-runtime`'s `:in-process` option accept.
 
-    (let [c (toolnexus.acp/connect [\"devin\" \"acp\"])]
+    (let [c (toolnexus.acp/connect [\"my-agent\" \"acp\"])]
       (toolnexus.client/create-in-process-client
-        {:model \"devin\" :generate (toolnexus.acp/generate c)}))
+        {:model \"my-agent\" :generate (toolnexus.acp/generate c)}))
 
   Throws on an ACP-level failure (a closed session, a timed-out call, an RPC
   error) — the same failure shape any other `generate` fn raising surfaces to
   the caller."
   [client]
-  (fn [req]
-    (let [text (assemble-prompt-text (:messages req))
-          res  (prompt client text)]
-      (if (:error res)
-        (throw (ex-info (str "toolnexus: acp: generate failed: " (pr-str (:error res)))
-                        {:acp-error (:error res)}))
-        {:content (:ok res)}))))
+  (let [g (generate-stream client)]
+    (fn [req] (g req nil))))
 
 ;; ---------------------------------------------------------------------------
 ;; close
@@ -387,5 +636,5 @@
   [client]
   (when (compare-and-set! (:close-once client) false true)
     (swap! (:state client) assoc :closed? true :close-reason "closed")
-    (try (proc/kill! (:child client)) (catch Throwable _ nil)))
+    (kill-tree! client))
   nil)

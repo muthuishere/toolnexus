@@ -16,7 +16,7 @@ description: >-
 > through failure gracefully* — isolate, surface, or bound the failure instead of
 > crashing, hanging, or silently returning a wrong answer.
 >
-> Measured **July 2026** on toolnexus **0.9.4**. MCP Python SDK 1.28.1 ·
+> Measured **July 2026** on Toolnexus **0.9.4**. MCP Python SDK 1.28.1 ·
 > mark3labs/mcp-go 0.48.0 · Node 24 · Elixir 1.20 / OTP 29. Re-run before quoting.
 
 ---
@@ -96,7 +96,7 @@ Worth a spec note if tighter parity on the hang deadline is wanted.
 
 > **Note on the Go stdio MCP client.** The older overhead benchmark documented a
 > real bug where the Go port's stdio MCP child was killed immediately after connect.
-> On this run (toolnexus 0.9.4) that is **no longer observed**: in R1 and R3 the Go
+> On this run (Toolnexus 0.9.4) that is **no longer observed**: in R1 and R3 the Go
 > port holds a live stdio session — the healthy server reports `connected` with all
 > three tools listed while the broken sibling is isolated.
 

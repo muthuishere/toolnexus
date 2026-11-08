@@ -87,6 +87,34 @@ Batteries (§8B): `ToolGuardClassifier`, `ToolRelevanceClassifier`, `SkillReleva
 `CheckAsync(...)` standalone or `AsHook(next)` as a client hook. A `BeforeLLM` override may carry
 `Model` for that turn only (the opt-in `ModelRouterClassifier` sets it).
 
+## Classifier backends, images, cache and helpers
+
+Proposed defaults, owner to confirm (`openspec/changes/add-classifier-backends`, SPEC.md §8B).
+
+- **Backends** are data: `ClassifierBackends.Table` has `TypeSafe` (default), `OpenRouter`
+  (`typesafe/jev-1.14`), `Cloudflare` (`/ai/run` envelope; `${CLOUDFLARE_ACCOUNT_ID}` in the URL
+  expands at call time, and errors name the unexpanded URL), `Vercel`, `OpenAI` (the Decisions API,
+  `POST {BaseUrl}/decisions`, `gpt-6-luna`; decisions report `Calibrated = false`, raw questions
+  are unsupported, a choice needs 2..255 options) and `Custom` (needs `BaseUrl`
+  and `Supports`). `Supports = new ClassifierSupports(Images: true)` overrides the image column.
+  `WithBackend("name")` parses the wire name.
+- **Images**: put a `ContentPart` image (PNG/JPEG, inline data) anywhere in the state. It is sent
+  as an asset and a reference string; a state with no parts is sent verbatim. A backend without
+  image support throws `ClassifierUnsupportedException` before any request; the 16 MiB / 32 MiB and
+  280–1568 px limits are checked client-side. Images are never resized.
+- **Value builders**: `await c.State(v).EvaluateAsync(Judge.Noul(...), ...)` fails closed on an
+  invalid reply; `await c.States(a, b, c).EvaluateAsync(...)` returns one `BatchResult`
+  (`Decision` or `Error`) per state, in order, at most 16 in flight.
+- **Cache** (off by default): `Cache = new MemoryCache(TimeSpan.FromHours(1), 1000)` or your own
+  `IClassifierCache` (async `GetAsync`/`SetAsync`). Per request, keyed on the served model, only
+  valid replies stored; a hit sets `Decision.Cached` and the metric's `Cached`.
+- **Helpers**: `Classifier.ValidateDecision(qs, d)` (returns the error or null),
+  `Thresholds` (inclusive 0.8 / 0.2 / 0.6, next to the unchanged `Bands`),
+  `Classifier.ChunkQuestions(qs, size)`, `Judge.Raw(name, type, instructions, criteria?)` for
+  unmodelled question types (answers decode to `RawAnswer`).
+- `classifier.evaluate` events carry `Questions`, `QuestionsHash` and `Cached`.
+- `ClassifierStyle.Llm` is `[Obsolete]`: it still works unchanged for at least one minor release.
+
 ## API key by host (BREAKING in 0.22.0)
 
 With no `ApiKey`, the client reads `ApiKeyEnv` (the NAME of an env var) if set, else ONLY the env
@@ -133,6 +161,7 @@ never change mid-session. Runnable: `dotnet run --project examples/Toolnexus.Exa
 - `grep` `context` / `before` / `after`; `read` / `grep` report truncation in metadata.
 - `Compaction.Options.OnCompact`, `Agent.AsToolWith(ctx => runtimeOptions)` with `RuntimeOptions.WaitFor`, `ToolContext.CallId`, `LlmClient.ListModelsAsync`.
 - Not in C# yet: the ACP host hooks (Go only; `openspec/changes/add-go-host-asks`).
+- `Options.CompactOnOverflow` (SPEC §7F.1) — a `BeforeLLM`-shaped hook (e.g. a tighter `Compaction` compactor) called when the provider rejects a call as too long (`LlmClient.IsContextOverflow(status, body)`); the same turn is re-sent on the compacted transcript. A breaker throws `LlmClient.ContextOverflowException` after 3 compactions that did not buy two successful calls each, or at once if the hook makes no progress. Unset ⇒ the overflow surfaces as `ProviderException`, unchanged.
 
 ## Media generation
 
@@ -197,6 +226,86 @@ usage; it exits non-zero if any step fails, and exits 0 with a hint when no clie
 
 ```sh
 ELEVENLABS_API_KEY=... dotnet run --project examples/Toolnexus.Examples -- media
+
+## Embeddable MCP server (SPEC §7C.1)
+
+`tk.McpHandler(cfg)` returns an `McpHttpHandler` you mount on your own HTTP server, behind your own
+TLS, CORS and OAuth. `ServeAsync` is unchanged. Every policy is a hook:
+
+```csharp
+var handler = tk.McpHandler(new McpHandlerConfig
+{
+    Authenticate = ex => VerifyBearer(ex.Header("Authorization")),      // throw => 401 (+ WwwAuthenticate)
+    ListTools    = ctx => ToolsFor((User)ctx.Identity!),                 // per request; others are "tool not found"
+    BeforeCall   = (ctx, tool, args) => Task.FromResult(tool.Annotations?.DestructiveHint == true
+                       ? McpDecision.Confirm("Really delete?")          // elicitation on the same POST
+                       : McpDecision.Allow()),
+    OnCall       = ev => Log(ev.Name, ev.Decision, ev.ResultBytes),
+});
+// HttpListener host:  await handler.HandleAsync(httpListenerContext);
+// any other server:   subclass McpHttpExchange and call handler.HandleAsync(exchange).
+handler.NotifyToolsChanged(); // tools/list_changed on every open GET stream
+```
+
+Tools and hooks read the request through `McpContext` (`Identity`, `Request`, `SessionId`, `Meta` =
+`params._meta`); a tool uses `McpContext.Current`. Also: `ServerInfo`, resources/prompts hooks,
+pluggable `SessionIds`, `Stateless`, `ProtocolVersions` (`2025-06-18` default, `2025-11-25` opt-in).
+`ToolResult.Structured`/`Meta` and `ITool.OutputSchema`/`Annotations` map to `structuredContent`,
+`_meta`, `outputSchema` and `annotations`. Runnable: `dotnet run --project examples/Toolnexus.Examples -- mcphandler`.
+
+### MCP 2026-07-28 on the same handler (SPEC §7C.2, opt-in)
+
+List `"2026-07-28"` in `ProtocolVersions` (alone, or next to `"2025-06-18"` to serve both wires on one
+mount). The 2026 wire is stateless: `server/discover`, header validation, `resultType` + `_meta`
+serverInfo, and MRTR instead of elicitation — a `Confirm` decision or a §10 tool suspension
+(`ToolResult.Pending`) answers `input_required`, and the client's retry reaches the tool as
+`ToolContext.Answer`. Without the opt-in the handler is byte-identical to §7C.1.
+
+```csharp
+var auth = new McpServerAuth                                   // OAuth 2.1 protected resource (RS256/JWKS by default)
+{
+    Issuer = "https://login.example",
+    Scopes = new Dictionary<string, IReadOnlyList<string>> { ["*"] = ["mcp"], ["wipe"] = ["mcp:admin"] },
+};
+var handler = tk.McpHandler(new McpHandlerConfig
+{
+    ProtocolVersions = ["2026-07-28", "2025-06-18"],
+    Authenticate     = auth.AuthenticateAsync,                 // identity = McpPrincipal; 401/403 + exact challenge
+    ListSkills       = _ => Task.FromResult(McpHttpHandler.LoadMcpSkills("skills")), // skills/list, skills/get, skill:// reads
+});
+// route GET /.well-known/oauth-protected-resource[/mcp] to auth.Metadata() (or auth.MetadataAsync(listenerCtx))
+```
+
+`McpServerAuth.Verify` replaces the JWT verifier (opaque tokens, introspection). Bring your own authorization
+server: `McpServerAuth` verifies its tokens. The auto-approving dev authorization server the suite uses is test
+tooling (`tests/Toolnexus.Tests/McpDevAuth.cs`), not part of the library.
+
+## Agents via ACP
+
+toolnexus ships no client per coding agent — three vendor-neutral pieces instead (SPEC §8C):
+
+- `tk.AsMcpServer(cfg?)` serves the toolkit for a local agent on
+  `http://127.0.0.1:<ephemeral>/mcp` behind a fresh bearer token (`Url`, `Token`, `Close()`).
+- `AcpClient.StartAsync(new AcpStartOptions { Command, Arguments, McpServers, SessionMeta,
+  ClientCapsMeta, Model, OnPermission, … })` drives any ACP agent; `McpServers` entries are sent
+  verbatim, so you build whichever entry your agent accepts.
+- `InProcess.Options.GenerateStream = acp.GenerateStreamAsync` streams the agent's answer
+  (`Text` deltas, `Thought`, and its own `ToolCall`/`ToolResult` with `Via = "acp"`).
+
+```csharp
+using Toolnexus.Acp; // AcpClient, AcpStartOptions
+
+await using var srv = tk.AsMcpServer();
+using var acp = await AcpClient.StartAsync(new AcpStartOptions
+{
+    Command = "my-agent", Arguments = ["acp"],
+    McpServers = [new Dictionary<string, object?>
+    {
+        ["type"] = "http", ["name"] = "toolnexus", ["url"] = srv.Url,
+        ["headers"] = new[] { new Dictionary<string, object?> { ["name"] = "Authorization", ["value"] = "Bearer " + srv.Token } },
+    }],
+});
+var client = InProcess.CreateClient(new InProcess.Options { Model = "acp", GenerateStream = acp.GenerateStreamAsync });
 ```
 
 ## Documentation
@@ -208,8 +317,44 @@ Everything else — the full surface, with runnable examples — lives on the do
 | **Start here** | [Quickstart](https://muthuishere.github.io/toolnexus/quickstart/) · [Concepts](https://muthuishere.github.io/toolnexus/concepts/) · [Install](https://muthuishere.github.io/toolnexus/install/) |
 | **Tool sources** | [MCP](https://muthuishere.github.io/toolnexus/mcp/) · [Skills](https://muthuishere.github.io/toolnexus/skills/) · [Native](https://muthuishere.github.io/toolnexus/native/) · [HTTP](https://muthuishere.github.io/toolnexus/http/) · [Built-ins](https://muthuishere.github.io/toolnexus/builtins/) · [A2A](https://muthuishere.github.io/toolnexus/a2a/) |
 | **The loop** | [Streaming](https://muthuishere.github.io/toolnexus/streaming/) · [Memory](https://muthuishere.github.io/toolnexus/memory/) · [Suspension](https://muthuishere.github.io/toolnexus/suspension/) · [Resilience](https://muthuishere.github.io/toolnexus/resilience/) · [Observability](https://muthuishere.github.io/toolnexus/observability/) |
-| **Agents** | [Sub-agents & teams](https://muthuishere.github.io/toolnexus/subagents/) · [Personas](https://muthuishere.github.io/toolnexus/persona-agents/) · [Typed decisions](https://muthuishere.github.io/toolnexus/judge/) |
+| **Agents** | [Sub-agents & teams](https://muthuishere.github.io/toolnexus/subagents/) · [Personas](https://muthuishere.github.io/toolnexus/persona-agents/) · [Dreaming](https://muthuishere.github.io/toolnexus/dreaming/) · [Typed decisions](https://muthuishere.github.io/toolnexus/judge/) |
 | **API reference** | [C#](https://muthuishere.github.io/toolnexus/api/csharp/) |
 | **Cookbook** | [Zero to agent](https://muthuishere.github.io/toolnexus/cookbook/zero-to-agent/) · [MCP servers](https://muthuishere.github.io/toolnexus/cookbook/mcp-servers/) · [Agent skills](https://muthuishere.github.io/toolnexus/cookbook/agent-skills/) · [Judge](https://muthuishere.github.io/toolnexus/cookbook/judge/) |
 
 Contract across all eight ports: [`SPEC.md`](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
+
+## MCP 2026-07-28 + OAuth
+
+`McpSource.LoadAsync` / `Toolkit.CreateAsync` speak MCP **2026-07-28** first (SPEC §2): every server gets
+`server/discover` before anything else, over stdio or stateless Streamable HTTP, with no MCP SDK on that
+path. A server that is not a 2026-07-28 server (a JSON-RPC error, HTTP 400/404/405/5xx, or a silent stdio
+child) falls back to the frozen pre-2026 path, which still runs on the `ModelContextProtocol` SDK. Your
+config stays the same.
+
+- **MRTR → §10:** `input_required` rounds go through `WaitFor`. Without a `WaitFor` the tool returns
+  `{status:"pending"}`; re-running it with the `Answer` resumes that same round. A `tools/call` is never
+  re-sent after a lost connection, a timeout or a 5xx.
+- **Skills over MCP:** skills a server publishes through the skills extension join the one `skill` tool
+  (base `skill://<name>/`).
+- **Lazy tool search:** set `"toolSearch": true` (and optionally `"description"`) on a server. You then get
+  `<server>_search_tools` and `<server>_call_tool` instead of every tool.
+- **OAuth 2.1 (SPEC §2A):** the per-server `auth` object takes `clientId`, `clientSecret`,
+  `tokenAuthMethod`, `clientIds`, `clientMetadataUrl`, `redirectUri`, `mode` (`auto`|`pause`),
+  `omitRefreshResource` and `allowHttp`. The client uses a pre-registered client id or a Client ID Metadata
+  Document; dynamic client registration is never used. It does PKCE S256 + `resource`, iss/state checks,
+  single-flight refresh and step-up. `auto` opens the browser and listens on loopback. `pause` sends a §10
+  `authorization` request; answer it with `Data = { ["callbackUrl"] = "<redirected URL>" }`.
+
+```csharp
+await using var tk = await Toolkit.CreateAsync(new Toolkit.Options
+{
+    McpConfig = "mcp.json",
+    TokenStore = myStore,            // ITokenStore; default in-memory per load
+    OpenUrl = url => OpenBrowser(url), // auto mode; default is the OS opener
+    WaitFor = WaitFor,               // MRTR input + pause-mode authorization
+});
+```
+
+On the frozen fallback, the bearer goes onto the SDK's HTTP transport through a delegating handler. A 401
+there runs the same flow once. Not yet on the 2026 path: `list_mcp_resources` / `read_mcp_resource`
+(`ResourceTools()` only sees fallback servers), progress notifications, and the server side (`serve`).

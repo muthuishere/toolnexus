@@ -219,6 +219,60 @@ verb, file, mime, size and provider-reported `usage`, exits 1 if a step fails, a
 hint when no client is available. A client that cannot take a call's args is skipped like an
 unavailable one; saved files carry their `Path` into `RunResult.Files`.
 
+## MCP 2026-07-28 + OAuth
+
+Every MCP server is asked `server/discover` first. A server that speaks protocol
+`2026-07-28` is used through toolnexus's own client: stateless HTTP (JSON or SSE
+replies) or line-delimited stdio. There is no `initialize` and no session. Older
+servers fall back to the previous `mark3labs/mcp-go` path, which is frozen. The
+config format, tool names and result mapping are the same on both paths.
+
+```json
+{
+  "mcpServers": {
+    "github": {
+      "url": "https://example.com/mcp",
+      "auth": { "clientId": "YOUR_CLIENT_ID", "mode": "auto" },
+      "toolSearch": true,
+      "description": "GitHub issues and pull requests"
+    }
+  }
+}
+```
+
+- **OAuth** (`auth`): a 401 starts the flow: protected-resource metadata, then authorization-server metadata, then PKCE S256 with `resource`. The client identity is a pre-registered `clientId`/`clientIds`, or a client ID metadata document (`clientMetadataUrl`). Dynamic client registration is never used. In `auto` mode the browser opens and the callback lands on a loopback listener. In `pause` mode the client sends a §10 `authorization` request; the host answers with `Answer{Ok: true, Data: {"callbackUrl": ...}}`. Tokens are refreshed single-flight and step up on `insufficient_scope`. Pass `Options.TokenStore` (default: in-memory) and `Options.OpenURL` (default: the OS opener). Both are also on `McpLoadOptions`. Tokens never appear in logs or errors.
+- **Input requests** (`input_required`) go through `WaitFor`. Without a `WaitFor`, the run returns `{status:"pending"}`, and resuming continues the same round.
+- **Tool search** (`toolSearch: true`) exposes `<server>_search_tools` and `<server>_call_tool` in place of every server tool.
+- **Skills**: skills from a server's skills extension join the same `skill` tool.
+- **Fallback and OAuth**: the bearer token is attached to the SDK transport for each request (`WithHTTPHeaderFunc`). A 401 from that path runs the same OAuth flow once.
+
+## MCP server you mount, on 2026-07-28 (opt-in)
+
+`tk.MCPHandler(cfg)` is an `http.Handler` for your own mux (SPEC §7C.1). Add `"2026-07-28"` to
+`ProtocolVersions` to serve the stateless 2026-07-28 wire (SPEC §7C.2), optionally with skills and OAuth:
+
+```go
+auth := &toolnexus.MCPServerAuth{Issuer: "https://login.example", Scopes: map[string][]string{"*": {"mcp"}}}
+mux.Handle("/mcp", tk.MCPHandler(toolnexus.MCPHandlerConfig{
+	ProtocolVersions: []string{toolnexus.MCPProtocol2026, "2025-06-18"}, // both wires on one mount
+	Authenticate:     auth.Authenticate,                                  // IdentityFrom(ctx).(toolnexus.MCPPrincipal)
+	ListSkills:       func(context.Context) ([]toolnexus.MCPSkill, error) { return toolnexus.LoadMCPSkills("skills") },
+}))
+mux.Handle("/.well-known/oauth-protected-resource/", auth.Metadata())
+mux.Handle("/.well-known/oauth-protected-resource", auth.Metadata())
+```
+
+Bring your own authorization server: `MCPServerAuth` verifies its tokens. The auto-approving dev
+authorization server the suite uses is test tooling (`internal/devauth`), not part of the library.
+
+## Agents via ACP
+
+toolnexus ships no per-agent client. Three vendor-neutral pieces compose instead (SPEC §8C):
+`tk.AsMCPServer(nil)` serves your toolkit on `127.0.0.1` behind a bearer token, `LoadACP` drives any
+ACP agent (its `MCPServers` entries are sent verbatim — hand it that URL and token), and
+`CreateInProcessClient(InProcessOptions{GenerateStream: acp.GenerateStream})` makes it an ordinary
+streaming client. Launch flags, logins and permission policy are yours to choose.
+
 ## Documentation
 
 Everything else — the full surface, with runnable examples — lives on the docs site:
@@ -228,7 +282,7 @@ Everything else — the full surface, with runnable examples — lives on the do
 | **Start here** | [Quickstart](https://muthuishere.github.io/toolnexus/quickstart/) · [Concepts](https://muthuishere.github.io/toolnexus/concepts/) · [Install](https://muthuishere.github.io/toolnexus/install/) |
 | **Tool sources** | [MCP](https://muthuishere.github.io/toolnexus/mcp/) · [Skills](https://muthuishere.github.io/toolnexus/skills/) · [Native](https://muthuishere.github.io/toolnexus/native/) · [HTTP](https://muthuishere.github.io/toolnexus/http/) · [Built-ins](https://muthuishere.github.io/toolnexus/builtins/) · [A2A](https://muthuishere.github.io/toolnexus/a2a/) |
 | **The loop** | [Streaming](https://muthuishere.github.io/toolnexus/streaming/) · [Memory](https://muthuishere.github.io/toolnexus/memory/) · [Suspension](https://muthuishere.github.io/toolnexus/suspension/) · [Resilience](https://muthuishere.github.io/toolnexus/resilience/) · [Observability](https://muthuishere.github.io/toolnexus/observability/) |
-| **Agents** | [Sub-agents & teams](https://muthuishere.github.io/toolnexus/subagents/) · [Personas](https://muthuishere.github.io/toolnexus/persona-agents/) · [Typed decisions](https://muthuishere.github.io/toolnexus/judge/) |
+| **Agents** | [Sub-agents & teams](https://muthuishere.github.io/toolnexus/subagents/) · [Personas](https://muthuishere.github.io/toolnexus/persona-agents/) · [Dreaming](https://muthuishere.github.io/toolnexus/dreaming/) · [Typed decisions](https://muthuishere.github.io/toolnexus/judge/) |
 | **API reference** | [Go](https://muthuishere.github.io/toolnexus/api/go/) |
 | **Cookbook** | [Zero to agent](https://muthuishere.github.io/toolnexus/cookbook/zero-to-agent/) · [MCP servers](https://muthuishere.github.io/toolnexus/cookbook/mcp-servers/) · [Agent skills](https://muthuishere.github.io/toolnexus/cookbook/agent-skills/) · [Judge](https://muthuishere.github.io/toolnexus/cookbook/judge/) |
 

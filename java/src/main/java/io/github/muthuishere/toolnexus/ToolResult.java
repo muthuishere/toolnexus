@@ -30,6 +30,8 @@ public final class ToolResult {
      * {@code RunResult.files[].path}.
      */
     private final List<String> partPaths;
+    private final Object structured;
+    private final Map<String, Object> meta;
 
     public ToolResult(String output, boolean isError, Map<String, Object> metadata) {
         this(output, isError, metadata, null);
@@ -37,22 +39,64 @@ public final class ToolResult {
 
     /** §1B: a result that also carries non-text content parts. */
     public ToolResult(String output, boolean isError, Map<String, Object> metadata, List<ContentPart> parts) {
-        this(output, isError, metadata, parts, null);
+        this(output, isError, metadata, parts, null, null, null);
     }
 
     ToolResult(String output, boolean isError, Map<String, Object> metadata, List<ContentPart> parts,
                List<String> partPaths) {
+        this(output, isError, metadata, parts, partPaths, null, null);
+    }
+
+    /**
+     * SPEC §1: a result that also carries a machine-readable {@code structured} value (MCP
+     * {@code structuredContent}) and/or protocol {@code meta} (MCP {@code _meta}). Either may be
+     * {@code null}; absent ⇒ byte-identical output everywhere.
+     */
+    public ToolResult(String output, boolean isError, Map<String, Object> metadata, List<ContentPart> parts,
+                      Object structured, Map<String, Object> meta) {
+        this(output, isError, metadata, parts, null, structured, meta);
+    }
+
+    private ToolResult(String output, boolean isError, Map<String, Object> metadata, List<ContentPart> parts,
+                       List<String> partPaths, Object structured, Map<String, Object> meta) {
         this.output = output == null ? "" : output;
         this.isError = isError;
         this.metadata = metadata;
         this.parts = parts == null || parts.isEmpty() ? null : List.copyOf(parts);
         this.partPaths = this.parts == null || partPaths == null || partPaths.size() != this.parts.size()
                 ? null : java.util.Collections.unmodifiableList(new java.util.ArrayList<>(partPaths));
+        this.structured = structured;
+        this.meta = meta;
     }
 
     /** D20: the local path behind each part, or null. Package-private. */
     List<String> partPaths() {
         return partPaths;
+    }
+
+    /** SPEC §1: machine-readable result (MCP {@code structuredContent}), or {@code null}. */
+    public Object structured() {
+        return structured;
+    }
+
+    /** SPEC §1: protocol metadata (MCP {@code _meta}), or {@code null}. */
+    public Map<String, Object> meta() {
+        return meta;
+    }
+
+    /** A copy of this result carrying {@code structured} (SPEC §1). */
+    public ToolResult withStructured(Object structured) {
+        return new ToolResult(output, isError, metadata, parts, partPaths, structured, meta);
+    }
+
+    /** A copy of this result carrying {@code meta} (SPEC §1). */
+    public ToolResult withMeta(Map<String, Object> meta) {
+        return new ToolResult(output, isError, metadata, parts, partPaths, structured, meta);
+    }
+
+    /** SPEC §1: a successful structured result; {@code output} empty (MCP serve emits its JSON text). */
+    public static ToolResult structured(Object structured) {
+        return new ToolResult("", false, null, null, null, structured, null);
     }
 
     public String output() {

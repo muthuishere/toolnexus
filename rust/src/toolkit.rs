@@ -57,6 +57,10 @@ pub struct ToolkitOptions {
     /// typically the same function given to the client. `None` ⇒ MCP
     /// elicitation is not advertised.
     pub wait_for: Option<crate::client::WaitForFn>,
+    /// Where MCP OAuth tokens live (§2A.1a); `None` ⇒ in memory, per load.
+    pub token_store: Option<Arc<dyn mcp::TokenStore>>,
+    /// How `auto`-mode MCP OAuth opens the authorization URL; `None` ⇒ the OS opener.
+    pub open_url: Option<mcp::OpenUrlFn>,
     /// Media generation (§7G): its tools register after A2A agent tools and
     /// before `extra_tools` (first name wins).
     pub media: Option<crate::media::Media>,
@@ -135,6 +139,9 @@ pub async fn create_toolkit(opts: ToolkitOptions) -> Result<Toolkit, ToolkitErro
                 &c,
                 mcp::McpLoadOptions {
                     wait_for: opts.wait_for.clone(),
+                    token_store: opts.token_store.clone(),
+                    open_url: opts.open_url.clone(),
+                    disable_tools: opts.disable_tools.clone(),
                     ..Default::default()
                 },
             )
@@ -143,11 +150,15 @@ pub async fn create_toolkit(opts: ToolkitOptions) -> Result<Toolkit, ToolkitErro
         None => None,
     };
 
+    // skills served by MCP servers (§2.7) join the same `skill` tool
+    let remote_skills: Vec<SkillDef> = mcp.as_ref().map(|m| m.skills.clone()).unwrap_or_default();
     let skill = if !opts.skills_dir.is_empty()
         || !opts.skills.is_empty()
+        || !remote_skills.is_empty()
         || opts.skill_provider.is_some()
     {
         let mut defs = opts.skills.clone();
+        defs.extend(remote_skills);
         if let Some(p) = &opts.skill_provider {
             match p().await {
                 Ok(more) => defs.extend(more),

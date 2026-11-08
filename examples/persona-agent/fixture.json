@@ -78,6 +78,7 @@
     "H3_memoryRemoveDeletesEntry": true,
     "H3_missingSubstringIsLoudError": true,
     "H3_targetUserWritesUSERmd": true,
+    "H3_memoryWriteOver2MBPreservesDisk": true,
     "H4_writeLandsOnDisk": {
       "file": "USER.md",
       "contains": "Prefers dark roast"

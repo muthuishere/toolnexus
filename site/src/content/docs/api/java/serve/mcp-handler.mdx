@@ -1,0 +1,252 @@
+---
+title: "Toolkit.mcpHandler"
+description: "An embeddable MCP server you mount on your own HttpServer, with per-request hooks. — Java."
+sidebar:
+  label: "serve / mcp-handler"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Java</strong> · package <code>io.github.muthuishere:toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7C.1</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/docs/adr/0039-mcp-serve-embeddable-handler.md">ADR 0039</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/java/src/main/java/io/github/muthuishere/toolnexus/McpHandler.java">McpHandler.java</a>
+</p>
+
+```java
+public McpHandler mcpHandler(McpHandler.Config cfg)          // on Toolkit
+
+public final class McpHandler implements com.sun.net.httpserver.HttpHandler {
+    public void notifyToolsChanged();                         // notifications/tools/list_changed on every GET stream
+    public static Object identityFrom(ToolContext ctx);       // also mcpSessionIdFrom / mcpRequestMetaFrom / requestFrom
+}
+
+// hooks: authenticate, wwwAuthenticate, listTools, beforeCall, onCall, serverInfo,
+//        listResources/readResource, listPrompts/getPrompt, sessionIds
+```
+
+A plain **streamable-HTTP MCP server** as a JDK `HttpHandler`. You mount it on your own
+`HttpServer` context, behind your own TLS, CORS and OAuth. Every policy is a hook that runs per
+request: who the caller is (`authenticate`), which tools they see (`listTools`), whether a call
+may run (`beforeCall`: allow, deny, or confirm through MCP elicitation). toolnexus has no idea
+what a tenant, user or role is. Your hooks decide that.
+
+The JSON-RPC transport is written by hand, so no MCP SDK type appears in the API. Protocol
+`2025-06-18` is the default. `2025-11-25` can be turned on with `protocolVersions(...)`.
+
+<Aside type="caution" title="Give the HttpServer a multi-threaded executor">
+A confirm waits for a second request (the client's answer), and a GET stream stays open. The
+JDK `HttpServer` runs every exchange on one thread by default, so set
+`server.setExecutor(Executors.newVirtualThreadPerTaskExecutor())`.
+</Aside>
+
+## When to use it
+
+Use it when you already run an HTTP server and want MCP to be one more route on it. It fits a
+multi-tenant SaaS where each caller sees a different tool list, where tools are built at
+request time from a database, or where a destructive tool needs a human to confirm it.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="mcpHandler is embeddable; serve() owns the listener">
+[`serve(addr, mcp)`](/api/java/serve/mcp/) starts its own server and exposes one fixed tool
+list to everyone. That is the quick way to make a toolkit an MCP server. Use `mcpHandler` when
+the host owns the server, auth and routing, and the tool list or the permission depends on who
+is calling.
+</Aside>
+
+## Examples
+
+### 1. The smallest useful call — mount it and call a tool
+
+```java test
+import com.sun.net.httpserver.HttpServer;
+import io.github.muthuishere.toolnexus.*;
+import java.net.InetSocketAddress;
+import java.net.URI;
+import java.net.http.*;
+import java.util.Map;
+import java.util.concurrent.Executors;
+
+public class Example {
+    public static void main(String[] args) throws Exception {
+        Tool echo = NativeTool.of("echo", "echoes back",
+                Map.of("type", "object", "properties", Map.of("text", Map.of("type", "string"))),
+                (Map<String, Object> a) -> a.get("text"));
+        try (Toolkit tk = Toolkit.create(new Toolkit.Options().builtins(false).extraTools(echo))) {
+            HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+            server.setExecutor(Executors.newVirtualThreadPerTaskExecutor());
+            server.createContext("/mcp", tk.mcpHandler(new McpHandler.Config().stateless(true)));
+            server.start();
+            try {
+                String url = "http://127.0.0.1:" + server.getAddress().getPort() + "/mcp";
+                HttpResponse<String> r = HttpClient.newHttpClient().send(HttpRequest.newBuilder(URI.create(url))
+                        .header("Content-Type", "application/json")
+                        .POST(HttpRequest.BodyPublishers.ofString(
+                                "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"echo\",\"arguments\":{\"text\":\"hi\"}}}"))
+                        .build(), HttpResponse.BodyHandlers.ofString());
+                if (!r.body().contains("\"text\":\"hi\"")) throw new AssertionError(r.body());
+                System.out.println("ok: " + r.body().trim());
+            } finally {
+                server.stop(0);
+            }
+        }
+    }
+}
+```
+
+### 2. The realistic case — bearer auth and a tool list per caller
+
+`authenticate` turns the request into an identity. A failure becomes HTTP 401 with your
+`WWW-Authenticate` header. `listTools` decides what each identity sees, and a tool outside that
+list is never executed, even if the caller knows its name.
+
+```java test
+import com.sun.net.httpserver.HttpServer;
+import io.github.muthuishere.toolnexus.*;
+import java.net.InetSocketAddress;
+import java.net.URI;
+import java.net.http.*;
+import java.util.*;
+import java.util.concurrent.Executors;
+
+public class Example {
+    static HttpResponse<String> post(String url, String token, String body) throws Exception {
+        HttpRequest.Builder b = HttpRequest.newBuilder(URI.create(url))
+                .header("Content-Type", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofString(body));
+        if (token != null) b.header("Authorization", "Bearer " + token);
+        return HttpClient.newHttpClient().send(b.build(), HttpResponse.BodyHandlers.ofString());
+    }
+
+    public static void main(String[] args) throws Exception {
+        Tool search = NativeTool.of("search", "search", Map.of("type", "object"), (Map<String, Object> a) -> "results");
+        Tool reset = NativeTool.of("admin_reset", "admin only", Map.of("type", "object"), (Map<String, Object> a) -> "reset");
+        try (Toolkit tk = Toolkit.create(new Toolkit.Options().builtins(false))) {
+            McpHandler h = tk.mcpHandler(new McpHandler.Config()
+                    .stateless(true)
+                    .authenticate(ex -> {
+                        String auth = ex.getRequestHeaders().getFirst("Authorization");
+                        if ("Bearer alice".equals(auth)) return "alice";
+                        if ("Bearer bob".equals(auth)) return "bob";
+                        throw new IllegalArgumentException("bad token");
+                    })
+                    .wwwAuthenticate((ex, e) -> "Bearer resource_metadata=\"https://example.test/.well-known/oauth-protected-resource\"")
+                    .listTools(ctx -> "alice".equals(ctx.identity()) ? List.of(search, reset) : List.of(search)));
+            HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+            server.setExecutor(Executors.newVirtualThreadPerTaskExecutor());
+            server.createContext("/mcp", h);
+            server.start();
+            try {
+                String url = "http://127.0.0.1:" + server.getAddress().getPort() + "/mcp";
+                String call = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"admin_reset\"}}";
+
+                HttpResponse<String> anon = post(url, null, call);
+                if (anon.statusCode() != 401) throw new AssertionError(anon.statusCode());
+
+                String bob = post(url, "bob", call).body();
+                if (!bob.contains("tool not found: admin_reset")) throw new AssertionError(bob);
+
+                String alice = post(url, "alice", call).body();
+                if (!alice.contains("\"text\":\"reset\"")) throw new AssertionError(alice);
+                System.out.println("ok: 401 for anonymous, bob cannot see admin_reset, alice can");
+            } finally {
+                server.stop(0);
+            }
+        }
+    }
+}
+```
+
+### 3. The full surface — a confirm gate, structured results and `onCall`
+
+`beforeCall` returns `Decision.confirm(...)`. When the client declared elicitation, it is asked
+on the same POST's event stream. When it did not (here: stateless), the caller gets your
+fallback result instead, e.g. "call again with a nonce". `ToolResult.structured(...)` goes out
+as `structuredContent`, and `onCall` reports every call with its decision.
+
+```java test
+import com.sun.net.httpserver.HttpServer;
+import io.github.muthuishere.toolnexus.*;
+import java.net.InetSocketAddress;
+import java.net.URI;
+import java.net.http.*;
+import java.util.*;
+import java.util.concurrent.*;
+
+public class Example {
+    static String post(String url, String body) throws Exception {
+        return HttpClient.newHttpClient().send(HttpRequest.newBuilder(URI.create(url))
+                .header("Content-Type", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofString(body)).build(), HttpResponse.BodyHandlers.ofString()).body();
+    }
+
+    public static void main(String[] args) throws Exception {
+        Tool delete = Tool.withAnnotations(
+                NativeTool.of("delete_record", "Delete a record", Map.of("type", "object"), (Map<String, Object> a) -> "deleted"),
+                new ToolAnnotations("Delete record", false, true, null, null));
+        Tool stats = Tool.withOutputSchema(new Tool() {
+            public String name() { return "stats"; }
+            public String description() { return "counts"; }
+            public Map<String, Object> inputSchema() { return Map.of("type", "object"); }
+            public String source() { return "native"; }
+            public ToolResult execute(Map<String, Object> a, ToolContext c) { return ToolResult.structured(Map.of("count", 3)); }
+        }, Map.of("type", "object", "properties", Map.of("count", Map.of("type", "integer"))));
+        List<McpHandler.CallEvent> events = new CopyOnWriteArrayList<>();
+
+        try (Toolkit tk = Toolkit.create(new Toolkit.Options().builtins(false))) {
+            McpHandler h = tk.mcpHandler(new McpHandler.Config()
+                    .stateless(true)
+                    .listTools(ctx -> List.of(delete, stats))
+                    .beforeCall((ctx, tool, rawArgs) -> {
+                        boolean destructive = tool.annotations() != null && Boolean.TRUE.equals(tool.annotations().destructiveHint());
+                        if (!destructive || rawArgs.contains("\"nonce\":\"n-1\"")) return McpHandler.Decision.allow();
+                        return McpHandler.Decision.confirm("Really delete?",
+                                ToolResult.ok("call delete_record again with \"nonce\":\"n-1\""));
+                    })
+                    .onCall(events::add));
+            HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+            server.setExecutor(Executors.newVirtualThreadPerTaskExecutor());
+            server.createContext("/mcp", h);
+            server.start();
+            try {
+                String url = "http://127.0.0.1:" + server.getAddress().getPort() + "/mcp";
+                String first = post(url, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"delete_record\",\"arguments\":{}}}");
+                if (!first.contains("again with")) throw new AssertionError(first);
+                String second = post(url, "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"delete_record\",\"arguments\":{\"nonce\":\"n-1\"}}}");
+                if (!second.contains("\"text\":\"deleted\"")) throw new AssertionError(second);
+                String s = post(url, "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{\"name\":\"stats\"}}");
+                if (!s.contains("\"structuredContent\":{\"count\":3}")) throw new AssertionError(s);
+
+                if (events.size() != 3 || events.get(0).decision() != McpHandler.DecisionKind.CONFIRM) throw new AssertionError(events);
+                System.out.println("ok: decisions " + events.stream().map(e -> e.decision().wire()).toList());
+            } finally {
+                server.stop(0);
+            }
+        }
+    }
+}
+```
+
+## Fields and overloads
+
+| Member | Type | What it is |
+|---|---|---|
+| `name` / `title` / `version` / `instructions` | `String` | Static `serverInfo`; defaults `"toolnexus"` / `"0.1.0"`; an empty `title` is omitted. `serverInfo(ctx -> …)` wins when set. |
+| `protocolVersions` | `List<String>` | Accepted versions, newest first. Only `2025-11-25` and `2025-06-18` are implemented; anything else is dropped. Default `["2025-06-18"]`. |
+| `authenticate` / `wwwAuthenticate` | hooks | Run on every request. A throw ⇒ HTTP 401 with the header you return. |
+| `listTools` | `ctx -> List<Tool>` | Per request, for `tools/list` and the `tools/call` lookup. `null` ⇒ the toolkit's tools. |
+| `beforeCall` | `(ctx, tool, rawArgs) -> Decision` | `allow` / `deny(message, result?)` / `confirm(message, fallback?)`; a throw is a deny. |
+| `confirmTimeout` | `Duration` | Bound on the elicitation round trip; default 5 minutes. |
+| `onCall` | `CallEvent -> void` | `{name, source, ms, isError, err, resultBytes, decision, identity, sessionId}`; throws are isolated. |
+| `listResources` / `readResource`, `listPrompts` / `getPrompt` | hooks | `null` ⇒ capability not advertised and the methods answer `-32601`. |
+| `sessionIds` | `SessionIds` | `generate` / `validate` / `terminate`; default in-memory. Plug a signed id or a DB so any replica validates any session. |
+| `stateless` / `statelessSessionId` | `boolean` / `String` | No session issued or checked; confirm never elicits. The id, when set, is echoed on `initialize` and never validated. |
+| `maxBodyBytes` | `long` | POST body cap (413); default 4 MiB. |
+| `RequestContext` | class | `identity()`, `exchange()`, `sessionId()`, `requestMeta()` — passed to every hook, and reachable from a tool as `ToolContext.mcp()`. |
+| `Tool.annotations()` / `Tool.outputSchema()` | defaults | Advertised verbatim; annotations fall back to `Tool.hints()`. `Tool.withAnnotations` / `Tool.withOutputSchema` tag an existing tool. |
+| `ToolResult.structured()` / `meta()` | fields | Sent as `structuredContent` / `_meta`; an empty `output` with `structured` sends its JSON as the text block. |
+
+## See also
+
+- [`McpServe.build`](/api/java/serve/mcp/) — the listener-owning profile with one fixed tool list.
+- [`A2AServer.start`](/api/java/serve/a2a/) — the inbound A2A profile.
+- [`Toolkit.create`](/api/java/toolkit/create/) — the tools the handler serves when `listTools` is not set.

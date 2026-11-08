@@ -15,8 +15,9 @@ notifications interleave with responses). It's two behaviors the spike at
 ``spikes/acp/`` proved matter:
 
 * **Only ``agent_message_chunk`` forms the reply.** ``agent_thought_chunk`` and tool
-  narration must be dropped, or they corrupt structured output the host expects to
-  parse.
+  narration must be kept out of the reply, or they corrupt structured output the host
+  expects to parse. ``generate_stream`` reports them to its emitter instead, as they
+  arrive (``thought`` / ``tool_call`` / ``tool_result`` events).
 * **A permission request is answered, never awaited.** ``session/request_permission``
   left unanswered hangs a turn forever, even in an agent's "bypass" mode — so this
   client answers inline, from the same thread that demultiplexes the wire, with the
@@ -60,8 +61,10 @@ from __future__ import annotations
 import json
 import os
 import queue
+import signal
 import subprocess
 import threading
+import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
@@ -69,7 +72,10 @@ __all__ = [
     "ACPOptions",
     "ACPClient",
     "ACPError",
+    "ACPExitedError",
+    "ACPLaunchError",
     "ACPPermissionTimeoutError",
+    "ACPCancelledError",
     "load_acp",
 ]
 
@@ -88,6 +94,28 @@ _HANDSHAKE_TIMEOUT = 30.0
 class ACPError(RuntimeError):
     """An ACP protocol-level failure — a JSON-RPC error reply, or a call that timed
     out waiting on the wire."""
+
+
+class ACPLaunchError(ACPError):
+    """The agent failed to start, or to answer ``initialize``."""
+
+
+class ACPExitedError(ACPError):
+    """The agent process ended (its stdout closed) while a request was waiting for
+    its reply — raised at once instead of waiting out a timeout (SPEC §8C)."""
+
+    def __init__(self, method: str) -> None:
+        super().__init__(f"acp: agent exited before replying to {method}")
+        self.method = method
+
+
+class ACPCancelledError(ACPError):
+    """The turn was cancelled by the caller (``cancel`` set mid-turn); the agent was
+    sent ``session/cancel`` and the session stays usable."""
+
+
+class _TurnCancelled(Exception):
+    pass
 
 
 class ACPPermissionTimeoutError(ACPError):
@@ -119,6 +147,50 @@ class ACPOptions:
     protocol_version: int = 1
     permission_timeout: float = 5.0
     mode: Optional[str] = None
+    # Bounds initialize / session/new / session/set_mode / model calls (seconds).
+    # None => 30s.
+    request_timeout: Optional[float] = None
+    # session/new mcpServers (SPEC §8C): raw JSON objects sent VERBATIM and in
+    # order — never validated, renamed or reshaped. None => [].
+    mcp_servers: Optional[list[dict[str, Any]]] = None
+    # Sent as session/new _meta (opaque); the key is absent when None.
+    session_meta: Optional[dict[str, Any]] = None
+    # Sent as initialize clientCapabilities._meta (vendor flags). Opaque.
+    client_caps_meta: Optional[dict[str, Any]] = None
+    # Passed through unchanged after session/new: session/set_config_option
+    # {configId:"model"}, then session/set_model; both failing is a load error.
+    model: Optional[str] = None
+    # Receives the agent's stderr (anything with .write(str)); None => discarded.
+    stderr: Any = None
+    # Decides every session/request_permission: given the request params, return an
+    # optionId; None/"" (or raising) answers with the first reject-kind option, else
+    # "cancelled". None => the first allow-kind option (the historical default).
+    on_permission: Optional[Callable[[dict[str, Any]], Optional[str]]] = None
+    # Observes every raw session/update params (runs on the reader thread: must not
+    # block).
+    on_update: Optional[Callable[[dict[str, Any]], None]] = None
+
+
+def _safe_emit(emit: Optional[Callable[[dict[str, Any]], None]], ev: dict[str, Any]) -> None:
+    if emit is None:
+        return
+    try:
+        emit(ev)
+    except Exception:  # noqa: BLE001 — a consumer never breaks the wire
+        pass
+
+
+def _tool_content_text(content: Any) -> str:
+    """The text parts of a tool_call_update's content array
+    (``[{type: "content", content: {type: "text", text}}, ...]``), joined."""
+    if not isinstance(content, list):
+        return ""
+    out: list[str] = []
+    for part in content:
+        inner = (part or {}).get("content") if isinstance(part, dict) else None
+        if isinstance(inner, dict) and isinstance(inner.get("text"), str):
+            out.append(inner["text"])
+    return "".join(out)
 
 
 def _content_to_text(content: Any) -> str:
@@ -189,10 +261,18 @@ class ACPClient:
 
         self._id_counter = 0
         self._pending: dict[str, "queue.Queue[dict[str, Any]]"] = {}
+        self._pending_method: dict[str, str] = {}
         self._session_id: Optional[str] = None
         self._closed = False
+        self._exited = False
+        # The raw initialize result.
+        self.initialize_result: dict[str, Any] = {}
 
         self._accum: list[str] = []
+        # The active turn's stream emitter (None outside a streaming turn) and the
+        # tool-call titles seen this turn, keyed by toolCallId.
+        self._emit: Optional[Callable[[dict[str, Any]], None]] = None
+        self._tool_names: dict[str, str] = {}
 
         self._reader = threading.Thread(target=self._read_loop, name="acp-reader", daemon=True)
         self._reader.start()
@@ -216,11 +296,16 @@ class ACPClient:
             except (BrokenPipeError, ValueError, OSError) as exc:
                 raise ACPError(f"acp: failed to write to child process: {exc}") from exc
 
-    def _call(self, method: str, params: dict[str, Any], timeout: float = _HANDSHAKE_TIMEOUT) -> dict[str, Any]:
+    def _call(self, method: str, params: dict[str, Any], timeout: Optional[float] = None) -> dict[str, Any]:
+        if timeout is None:
+            timeout = self._opts.request_timeout or _HANDSHAKE_TIMEOUT
         req_id = self._next_id()
         reply_q: "queue.Queue[dict[str, Any]]" = queue.Queue(maxsize=1)
         with self._state_lock:
+            if self._exited:
+                raise ACPExitedError(method)
             self._pending[req_id] = reply_q
+            self._pending_method[req_id] = method
         self._write({"jsonrpc": "2.0", "id": req_id, "method": method, "params": params})
         try:
             msg = reply_q.get(timeout=timeout)
@@ -228,6 +313,8 @@ class ACPClient:
             with self._state_lock:
                 self._pending.pop(req_id, None)
             raise ACPError(f"acp: {method} timed out after {timeout}s") from None
+        if msg.get("_exited"):
+            raise ACPExitedError(method)
         error = msg.get("error")
         if error:
             raise ACPError(f"acp error {error.get('code')}: {error.get('message')}")
@@ -253,10 +340,13 @@ class ACPClient:
             self._drain_pending_on_eof()
 
     def _drain_pending_on_eof(self) -> None:
+        # Fail fast: every waiting request learns at once that the agent is gone.
         with self._state_lock:
+            self._exited = True
             pending = list(self._pending.items())
             self._pending.clear()
-        eof_error = {"error": {"code": -1, "message": "acp: child process closed the connection"}}
+            self._pending_method.clear()
+        eof_error = {"_exited": True, "error": {"code": -1, "message": "acp: child process closed the connection"}}
         for _req_id, q in pending:
             try:
                 q.put_nowait(eof_error)
@@ -273,6 +363,7 @@ class ACPClient:
             req_id = msg["id"]
             with self._state_lock:
                 q = self._pending.pop(req_id, None)
+                self._pending_method.pop(req_id, None)
             if q is not None:
                 try:
                     q.put_nowait(msg)
@@ -281,42 +372,105 @@ class ACPClient:
             return
 
         if method == "session/update":
-            self._handle_update(msg.get("params") or {})
+            params = msg.get("params") or {}
+            if self._opts.on_update is not None:
+                try:
+                    self._opts.on_update(params)
+                except Exception:  # noqa: BLE001 — an observer never breaks the wire
+                    pass
+            self._handle_update(params)
             return
 
         if method == "session/request_permission" and has_id:
             self._answer_permission(msg)
             return
 
-        # Any other server-initiated request/notification is outside this client's
-        # scope (e.g. fs/read_text_file — this client declares fs capabilities as
-        # false, so a conformant agent won't send one). Reply with an empty result
-        # to any unknown *request* so a strict peer doesn't itself hang on us.
-        if has_id:
-            self._write({"jsonrpc": "2.0", "id": msg["id"], "result": {}})
+        # Any other agent->client REQUEST (fs/*, terminal/* — declared unsupported in
+        # clientCapabilities) is answered with -32601, or the agent waits forever.
+        if has_id and method:
+            self._write(
+                {
+                    "jsonrpc": "2.0",
+                    "id": msg["id"],
+                    "error": {"code": -32601, "message": f"method not found: {method}"},
+                }
+            )
 
     def _handle_update(self, params: dict[str, Any]) -> None:
+        # Runs on the reader thread, as each notification arrives — so a streaming
+        # turn's emitter sees every event the moment it is read off the wire.
         update = params.get("update") or {}
-        if update.get("sessionUpdate") != "agent_message_chunk":
-            # agent_thought_chunk and tool_call/tool_call_update narration are
-            # dropped here, on purpose — mixing them into the reply is exactly the
-            # corruption ADR 0031 gate item 3 proves against structured output.
-            return
-        content = update.get("content") or {}
-        text = content.get("text")
-        if text:
+        kind = update.get("sessionUpdate")
+        with self._state_lock:
+            emit = self._emit
+        if kind == "agent_message_chunk":
+            # Only agent_message_chunk forms the reply: agent_thought_chunk and
+            # tool_call/tool_call_update narration never reach the content — mixing
+            # them in is exactly the corruption ADR 0031 gate item 3 proves against
+            # structured output. They are REPORTED to a streaming emitter instead.
+            text = (update.get("content") or {}).get("text")
+            if text:
+                with self._state_lock:
+                    self._accum.append(str(text))
+                _safe_emit(emit, {"type": "text", "delta": str(text)})
+        elif kind == "agent_thought_chunk":
+            text = (update.get("content") or {}).get("text")
+            if text:
+                _safe_emit(emit, {"type": "thought", "delta": str(text), "via": "acp"})
+        elif kind == "tool_call":
+            call_id = update.get("toolCallId") or ""
+            name = update.get("title") or update.get("kind") or ""
             with self._state_lock:
-                self._accum.append(str(text))
+                self._tool_names[call_id] = name
+            _safe_emit(
+                emit,
+                {"type": "tool_call", "id": call_id, "name": name, "args": update.get("rawInput"), "via": "acp"},
+            )
+        elif kind == "tool_call_update":
+            call_id = update.get("toolCallId") or ""
+            title = update.get("title")
+            with self._state_lock:
+                # A non-empty title is remembered as the call's name for later events (#188).
+                if title:
+                    self._tool_names[call_id] = title
+                name = self._tool_names.get(call_id, "")
+            if emit is None:
+                return
+            raw = update.get("rawInput")
+            if isinstance(raw, dict) and raw:
+                _safe_emit(emit, {"type": "tool_call_args", "id": call_id, "name": name, "args": raw, "via": "acp"})
+            status = update.get("status")
+            if status not in ("completed", "failed"):
+                return
+            _safe_emit(
+                emit,
+                {
+                    "type": "tool_result",
+                    "id": call_id,
+                    "name": name,
+                    "output": _tool_content_text(update.get("content")),
+                    "is_error": status == "failed",
+                    "via": "acp",
+                },
+            )
 
     def _answer_permission(self, request: dict[str, Any]) -> None:
         params = request.get("params") or {}
         options = params.get("options") or []
         chosen: Optional[str] = None
-        for option in options:
-            kind = (option or {}).get("kind") or ""
-            if kind.startswith("allow"):
-                chosen = option.get("optionId")
-                break
+        want = "allow"
+        if self._opts.on_permission is not None:
+            try:
+                chosen = self._opts.on_permission(params) or None
+            except Exception:  # noqa: BLE001 — a failing host decision rejects
+                chosen = None
+            want = "reject"
+        if chosen is None:
+            for option in options:
+                kind = (option or {}).get("kind") or ""
+                if isinstance(kind, str) and kind.startswith(want):
+                    chosen = option.get("optionId")
+                    break
         if chosen is not None:
             result = {"outcome": {"outcome": "selected", "optionId": chosen}}
         else:
@@ -326,68 +480,190 @@ class ACPClient:
     # -- handshake -------------------------------------------------------- #
 
     def _connect(self) -> None:
-        self._call(
-            "initialize",
-            {
-                "protocolVersion": self._opts.protocol_version,
-                "clientCapabilities": {"fs": {"readTextFile": False, "writeTextFile": False}},
-            },
-        )
+        caps: dict[str, Any] = {"fs": {"readTextFile": False, "writeTextFile": False}, "terminal": False}
+        if self._opts.client_caps_meta is not None:
+            caps["_meta"] = self._opts.client_caps_meta
+        try:
+            init = self._call("initialize", {"protocolVersion": self._opts.protocol_version, "clientCapabilities": caps})
+        except ACPError as exc:
+            raise ACPLaunchError(f"acp: initialize: {exc}") from exc
+        self.initialize_result = init
         cwd = self._opts.cwd or os.getcwd()
         if not os.path.isabs(cwd):
             cwd = os.path.abspath(cwd)
-        result = self._call("session/new", {"cwd": cwd, "mcpServers": []})
+        new_params: dict[str, Any] = {"cwd": cwd, "mcpServers": list(self._opts.mcp_servers or [])}
+        if self._opts.session_meta is not None:
+            new_params["_meta"] = self._opts.session_meta
+        try:
+            result = self._call("session/new", new_params)
+        except ACPError as exc:
+            raise ACPError(f"acp: session/new: {exc}") from exc
         self._session_id = result.get("sessionId")
         if self._opts.mode:
             self._call("session/set_mode", {"sessionId": self._session_id, "modeId": self._opts.mode})
+        if self._opts.model:
+            self._apply_model(self._opts.model)
+
+    def _apply_model(self, model: str) -> None:
+        # Passed through unchanged: the stable spelling first, then set_model.
+        try:
+            self._call(
+                "session/set_config_option",
+                {"sessionId": self._session_id, "configId": "model", "value": model},
+            )
+        except ACPError as e1:
+            try:
+                self._call("session/set_model", {"sessionId": self._session_id, "modelId": model})
+            except ACPError as e2:
+                raise ACPError(f"acp: set model {json.dumps(model)}: {e1}; {e2}") from e2
 
     # -- public API --------------------------------------------------------- #
 
-    def generate(self, request: dict[str, Any]) -> dict[str, Any]:
+    def set_mode(self, mode: str) -> None:
+        """Change the running session's mode: ``session/set_mode {sessionId, modeId}``
+        (SPEC §8C). No restart, same session; sent at once, not queued behind a turn.
+        The agent's error raises :class:`ACPError`; the client stays usable."""
+        self._check_open()
+        try:
+            self._call("session/set_mode", {"sessionId": self._session_id, "modeId": mode})
+        except ACPError as exc:
+            raise ACPError(f"acp: session/set_mode: {exc}") from exc
+
+    def set_model(self, model: str) -> None:
+        """Change the running session's model, exactly as the ``model`` option does at
+        load: ``session/set_config_option {configId:"model"}``, then ``session/set_model``.
+        Raises :class:`ACPError` only when both fail; the client stays usable."""
+        self._check_open()
+        self._apply_model(model)
+
+    def _check_open(self) -> None:
+        if self._closed:
+            raise ACPError("acp: client is closed")
+
+    def generate(self, request: dict[str, Any], cancel: Optional[threading.Event] = None) -> dict[str, Any]:
         """``Callable[[dict], dict]`` — the exact shape ``create_in_process_client``
         wants. Sends exactly one ``session/prompt`` on the warm session, accumulates
         only ``agent_message_chunk`` text, and blocks (synchronously) until the
         reader thread delivers the reply or ``permission_timeout`` elapses.
+
+        ``cancel`` (optional, anything with ``is_set()`` such as a
+        :class:`threading.Event`): when it is set mid-turn the ``session/cancel``
+        notification is sent, the turn's reply is awaited (bounded by
+        ``request_timeout``, default 30s) so the next turn never lands on a busy
+        session, and :class:`ACPCancelledError` is raised. The process and session
+        stay warm.
+        """
+        return self.generate_stream(request, None, cancel)
+
+    def generate_stream(
+        self,
+        request: dict[str, Any],
+        emit: Optional[Callable[[dict[str, Any]], None]],
+        cancel: Optional[threading.Event] = None,
+    ) -> dict[str, Any]:
+        """:meth:`generate` that also reports the turn AS IT HAPPENS — the shape
+        ``create_in_process_client(generate_stream=...)`` wants. ``emit`` is called
+        from the reader thread as each ``session/update`` is read:
+        ``agent_message_chunk`` -> ``{"type": "text", "delta"}``,
+        ``agent_thought_chunk`` -> ``{"type": "thought", "delta", "via": "acp"}``
+        (never part of the answer), ``tool_call`` -> ``{"type": "tool_call", "id",
+        "name": title, "args": rawInput, "via": "acp"}`` and each completed/failed
+        ``tool_call_update`` -> ``{"type": "tool_result", "id", "name", "output",
+        "is_error", "via": "acp"}``. The return value and ``cancel`` are
+        :meth:`generate`'s.
         """
         with self._turn_lock:
-            prompt_text = _render_prompt(request)
-            with self._state_lock:
-                self._accum = []
-
-            req_id = self._next_id()
-            reply_q: "queue.Queue[dict[str, Any]]" = queue.Queue(maxsize=1)
-            with self._state_lock:
-                self._pending[req_id] = reply_q
-
-            self._write(
-                {
-                    "jsonrpc": "2.0",
-                    "id": req_id,
-                    "method": "session/prompt",
-                    "params": {
-                        "sessionId": self._session_id,
-                        "prompt": [{"type": "text", "text": prompt_text}],
-                    },
-                }
-            )
-
             try:
-                msg = reply_q.get(timeout=self._opts.permission_timeout)
-            except queue.Empty:
+                return self._prompt_turn(request, emit, cancel)
+            finally:
                 with self._state_lock:
-                    self._pending.pop(req_id, None)
-                raise ACPPermissionTimeoutError(
-                    "acp: turn hung waiting on a reply (possibly an unanswered "
-                    f"session/request_permission) after {self._opts.permission_timeout}s"
-                ) from None
+                    self._emit = None
+                    self._tool_names = {}
 
-            error = msg.get("error")
-            if error:
-                raise ACPError(f"acp error {error.get('code')}: {error.get('message')}")
+    def _prompt_turn(
+        self,
+        request: dict[str, Any],
+        emit: Optional[Callable[[dict[str, Any]], None]],
+        cancel: Optional[threading.Event] = None,
+    ) -> dict[str, Any]:
+        if cancel is not None and cancel.is_set():
+            raise ACPCancelledError("acp: turn cancelled")
+        prompt_text = _render_prompt(request)
+        with self._state_lock:
+            self._accum = []
+            self._tool_names = {}
+            self._emit = emit
 
+        req_id = self._next_id()
+        reply_q: "queue.Queue[dict[str, Any]]" = queue.Queue(maxsize=1)
+        with self._state_lock:
+            if self._exited:
+                raise ACPExitedError("session/prompt")
+            self._pending[req_id] = reply_q
+            self._pending_method[req_id] = "session/prompt"
+
+        self._write(
+            {
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "method": "session/prompt",
+                "params": {
+                    "sessionId": self._session_id,
+                    "prompt": [{"type": "text", "text": prompt_text}],
+                },
+            }
+        )
+
+        try:
+            msg = self._await_reply(reply_q, cancel)
+        except _TurnCancelled:
+            # ACP: session/cancel is a notification (no id); the agent then ends the
+            # turn with stopReason "cancelled". Wait (bounded) for that reply so the
+            # next turn never lands on a session still busy with this one.
+            self._write({"jsonrpc": "2.0", "method": "session/cancel", "params": {"sessionId": self._session_id}})
+            try:
+                reply_q.get(timeout=self._opts.request_timeout or _HANDSHAKE_TIMEOUT)
+            except queue.Empty:
+                pass
             with self._state_lock:
-                content = "".join(self._accum)
-            return {"content": content}
+                self._pending.pop(req_id, None)
+            raise ACPCancelledError("acp: turn cancelled") from None
+        except queue.Empty:
+            with self._state_lock:
+                self._pending.pop(req_id, None)
+            raise ACPPermissionTimeoutError(
+                "acp: turn hung waiting on a reply (possibly an unanswered "
+                f"session/request_permission) after {self._opts.permission_timeout}s"
+            ) from None
+
+        if msg.get("_exited"):
+            raise ACPExitedError("session/prompt")
+        error = msg.get("error")
+        if error:
+            raise ACPError(f"acp error {error.get('code')}: {error.get('message')}")
+
+        with self._state_lock:
+            content = "".join(self._accum)
+        return {"content": content}
+
+    def _await_reply(
+        self, reply_q: "queue.Queue[dict[str, Any]]", cancel: Optional[threading.Event]
+    ) -> dict[str, Any]:
+        """The turn's reply within ``permission_timeout``; raises ``queue.Empty`` on
+        timeout and ``_TurnCancelled`` as soon as ``cancel`` is set."""
+        if cancel is None:
+            return reply_q.get(timeout=self._opts.permission_timeout)
+        deadline = time.monotonic() + self._opts.permission_timeout
+        while True:
+            if cancel.is_set():
+                raise _TurnCancelled()
+            left = deadline - time.monotonic()
+            if left <= 0:
+                raise queue.Empty
+            try:
+                return reply_q.get(timeout=min(left, 0.02))
+            except queue.Empty:
+                continue
 
     def is_alive(self) -> bool:
         """True while the child process is still running."""
@@ -408,20 +684,44 @@ class ACPClient:
                 stdin.close()
             except (BrokenPipeError, ValueError, OSError):
                 pass
+        # The agent runs in its own process group, so an adapter's children (an
+        # `npx …` launch is a tree) end with it.
+        _signal_group(self._proc, signal.SIGTERM)
         try:
-            self._proc.terminate()
-        except OSError:
+            self._proc.wait(timeout=3)
+        except subprocess.TimeoutExpired:
             pass
+        _signal_group(self._proc, getattr(signal, "SIGKILL", signal.SIGTERM))
         try:
             self._proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            try:
-                self._proc.kill()
-                self._proc.wait(timeout=5)
-            except (OSError, subprocess.TimeoutExpired):  # pragma: no cover - best effort
-                pass
+        except (OSError, subprocess.TimeoutExpired):  # pragma: no cover - best effort
+            pass
 
         self._drain_pending_on_eof()
+
+
+def _signal_group(proc: "subprocess.Popen[Any]", sig: int) -> None:
+    """Signal the child's whole process group (POSIX), else the child alone."""
+    try:
+        if os.name == "posix":
+            os.killpg(proc.pid, sig)
+        elif sig == signal.SIGTERM:
+            proc.terminate()
+        else:
+            proc.kill()
+    except (OSError, ProcessLookupError):
+        pass
+
+
+def _pump_stderr(stream: Any, sink: Any) -> None:
+    try:
+        for line in stream:
+            try:
+                sink.write(line)
+            except Exception:  # noqa: BLE001
+                pass
+    except (ValueError, OSError):
+        pass
 
 
 def load_acp(opts: ACPOptions) -> ACPClient:
@@ -438,16 +738,22 @@ def load_acp(opts: ACPOptions) -> ACPClient:
     if not os.path.isabs(cwd):
         cwd = os.path.abspath(cwd)
 
-    proc = subprocess.Popen(
-        [opts.command, *opts.args],
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
-        cwd=cwd,
-        env=env,
-        text=True,
-        bufsize=1,
-    )
+    try:
+        proc = subprocess.Popen(
+            [opts.command, *opts.args],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE if opts.stderr is not None else subprocess.DEVNULL,
+            cwd=cwd,
+            env=env,
+            text=True,
+            bufsize=1,
+            start_new_session=os.name == "posix",
+        )
+    except OSError as exc:
+        raise ACPLaunchError(f"acp: start {json.dumps(opts.command)}: {exc}") from exc
+    if opts.stderr is not None and proc.stderr is not None:
+        threading.Thread(target=_pump_stderr, args=(proc.stderr, opts.stderr), daemon=True).start()
 
     client = ACPClient(opts, proc)
     try:

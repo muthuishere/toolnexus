@@ -42,7 +42,7 @@ defmodule Toolnexus.McpServe do
   @doc """
   Handle one streamable-HTTP MCP request (`/mcp`). Stateless: each POST is a
   self-contained JSON-RPC exchange; notifications are accepted with `202`.
-  Non-POST methods answer `405` (like the JS SDK's stateless transport).
+  Non-POST methods answer `405` with `Allow: POST` (like the JS SDK's stateless transport).
   """
   @spec handle_http(Plug.Conn.t(), [Tool.t()], map() | nil, (map() -> any()) | nil) ::
           Plug.Conn.t()
@@ -67,7 +67,76 @@ defmodule Toolnexus.McpServe do
         end
 
       _ ->
-        send_resp(conn, 405, "Method Not Allowed")
+        conn
+        |> put_resp_header("allow", "POST")
+        |> send_resp(405, "Method Not Allowed")
+    end
+  end
+
+  @doc false
+  # SPEC §8C `asMcpServer`: the §7C endpoint on a loopback ephemeral port
+  # behind a per-call bearer token. See `Toolnexus.Toolkit.as_mcp_server/2`.
+  @spec serve_loopback([Tool.t()], map()) :: %{
+          url: String.t(),
+          token: String.t(),
+          close: (-> :ok)
+        }
+  def serve_loopback(tools, cfg) do
+    token = Base.encode16(:crypto.strong_rand_bytes(32), case: :lower)
+    exposed = exposed_tools(tools, cfg)
+
+    {:ok, pid} =
+      Bandit.start_link(
+        plug: {__MODULE__.Guard, %{token: token, tools: exposed, cfg: cfg}},
+        scheme: :http,
+        ip: {127, 0, 0, 1},
+        port: 0,
+        startup_log: false
+      )
+
+    Process.unlink(pid)
+    {:ok, {_ip, port}} = ThousandIsland.listener_info(pid)
+
+    close = fn ->
+      try do
+        if Process.alive?(pid), do: Supervisor.stop(pid, :normal, 5_000)
+      catch
+        :exit, _ -> :ok
+      end
+
+      :ok
+    end
+
+    %{url: "http://127.0.0.1:#{port}/mcp", token: token, close: close}
+  end
+
+  defmodule Guard do
+    @moduledoc false
+    @behaviour Plug
+    import Plug.Conn
+
+    def init(st), do: st
+
+    def call(conn, st) do
+      cond do
+        conn.request_path != "/mcp" ->
+          send_resp(conn, 404, "not found")
+
+        not Plug.Crypto.secure_compare(auth(conn), "Bearer " <> st.token) ->
+          conn
+          |> put_resp_header("www-authenticate", "Bearer")
+          |> send_resp(401, "unauthorized")
+
+        true ->
+          Toolnexus.McpServe.handle_http(conn, st.tools, st.cfg, nil)
+      end
+    end
+
+    defp auth(conn) do
+      case get_req_header(conn, "authorization") do
+        [v | _] -> v
+        _ -> ""
+      end
     end
   end
 
@@ -91,6 +160,7 @@ defmodule Toolnexus.McpServe do
       "tools" =>
         Enum.map(tools, fn t ->
           %{"name" => t.name, "description" => t.description, "inputSchema" => t.input_schema}
+          |> put_some("outputSchema", t.output_schema)
         end)
     })
   end
@@ -130,15 +200,38 @@ defmodule Toolnexus.McpServe do
           end
         end
 
-        rpc_result(id, %{
-          "content" => [%{"type" => "text", "text" => result.output}] ++ mcp_blocks(result),
-          "isError" => result.is_error
-        })
+        rpc_result(
+          id,
+          result |> result_wire() |> Map.put("isError", result.is_error)
+        )
     end
   end
 
   defp handle_rpc(id, method, _params, _tools, _cfg, _on_call),
     do: rpc_error(id, -32601, "Method not found: #{method}")
+
+  @doc false
+  # The CallToolResult body shared with `Toolnexus.McpHandler` (isError excluded —
+  # each caller owns that rule). structured ⇒ structuredContent (an empty output
+  # then carries the JSON of structured as its text), meta ⇒ _meta. Both nil ⇒
+  # exactly the pre-§7C.1 shape.
+  @spec result_wire(ToolResult.t()) :: map()
+  def result_wire(%ToolResult{} = result) do
+    structured = Map.get(result, :structured)
+
+    text =
+      if structured != nil and result.output in ["", nil],
+        do: Jason.encode!(structured),
+        else: result.output
+
+    %{"content" => [%{"type" => "text", "text" => text}] ++ mcp_blocks(result)}
+    |> put_some("structuredContent", structured)
+    |> put_some("_meta", Map.get(result, :meta))
+  end
+
+  @doc false
+  def put_some(map, _key, nil), do: map
+  def put_some(map, key, value), do: Map.put(map, key, value)
 
   # SPEC §7B: a tool's non-text parts follow the text block as MCP content blocks —
   # image ⇒ image, audio ⇒ audio, file with data ⇒ embedded resource, file with url ⇒

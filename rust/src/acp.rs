@@ -57,8 +57,9 @@ pub enum AcpError {
     PermissionTimeout(Duration),
     #[error("acp error {code}: {message}")]
     Rpc { code: i64, message: String },
-    #[error("toolnexus: acp: agent exited{}", .code.map(|c| format!(" with code {c}")).unwrap_or_default())]
-    AgentExited { code: Option<i32> },
+    /// The agent's stdout closed while `method` (empty: none) awaited a reply.
+    #[error("toolnexus: acp: agent exited{}{}", if .method.is_empty() { String::new() } else { format!(" before replying to {}", .method) }, .code.map(|c| format!(" with code {c}")).unwrap_or_default())]
+    AgentExited { method: String, code: Option<i32> },
     #[error("toolnexus: acp: {0}")]
     Protocol(String),
     #[error("toolnexus: acp: io: {0}")]
@@ -112,10 +113,21 @@ pub type UpdateHandler = Arc<dyn Fn(&Value) + Send + Sync>;
 /// One event of a streamed turn ([`AcpClient::generate_stream`]). Tool events
 /// carry `via: "acp"`: the AGENT ran these tools, a host loop must not.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum AcpStreamEvent {
     /// A reply text delta (`agent_message_chunk` only).
     Text { delta: String },
+    /// An agent thought delta (`agent_thought_chunk`). Never part of the reply text.
+    Thought { delta: String, via: &'static str },
     ToolCall {
+        id: String,
+        name: String,
+        args: Value,
+        via: &'static str,
+    },
+    /// Late arguments from a `tool_call_update` carrying a non-empty `rawInput`
+    /// object (issue #188); `name` is the latest known title.
+    ToolCallArgs {
         id: String,
         name: String,
         args: Value,
@@ -190,8 +202,11 @@ pub struct AcpOptions {
     pub initialize_timeout: Duration,
     /// Bounds `session/new` and `session/set_mode`; default 30s.
     pub request_timeout: Duration,
-    /// Bounds the host permission handler; on expiry the request is answered
-    /// `cancelled` and the turn fails with [`AcpError::PermissionTimeout`]. Default 30s.
+    /// Bounds each turn (`session/prompt` until its reply), as in every other
+    /// port: a turn still unfinished after this long — typically blocked on an
+    /// unanswered `session/request_permission` — fails with
+    /// [`AcpError::PermissionTimeout`]. It also bounds the host permission
+    /// handler, whose request is then answered `cancelled`. Default 30s.
     pub permission_timeout: Duration,
     /// Host permission handler; `None` ⇒ the first `allow*` option.
     pub on_permission: Option<PermissionHandler>,
@@ -199,7 +214,23 @@ pub struct AcpOptions {
     pub on_update: Option<UpdateHandler>,
     /// Wait between SIGTERM and SIGKILL of the agent's process group on close; default 2s.
     pub kill_grace: Duration,
+    /// Sent as `session/new` `mcpServers` verbatim and in order (empty ⇒ `[]`);
+    /// never validated or reshaped (SPEC §8C).
+    pub mcp_servers: Vec<Value>,
+    /// Sent as `session/new` `_meta`; absent when `None`. Opaque.
+    pub session_meta: Option<Value>,
+    /// Sent as `initialize` `clientCapabilities._meta` (vendor flags); opaque.
+    pub client_caps_meta: Option<Value>,
+    /// Passed through unchanged after `session/new`: `session/set_config_option
+    /// {configId:"model"}`, then `session/set_model` if the agent rejects that.
+    /// Both failing fails `load`.
+    pub model: Option<String>,
+    /// Receives the agent's stderr as it arrives (default: discarded).
+    pub stderr: Option<StderrHandler>,
 }
+
+/// Receives chunks of the agent's stderr.
+pub type StderrHandler = Arc<dyn Fn(&[u8]) + Send + Sync>;
 
 impl AcpOptions {
     pub fn new(command: impl Into<String>) -> Self {
@@ -216,6 +247,11 @@ impl AcpOptions {
             on_permission: None,
             on_update: None,
             kill_grace: Duration::from_secs(2),
+            mcp_servers: Vec::new(),
+            session_meta: None,
+            client_caps_meta: None,
+            model: None,
+            stderr: None,
         }
     }
     pub fn args<I, S>(mut self, args: I) -> Self
@@ -256,7 +292,7 @@ type Reply = Result<Value, AcpError>;
 
 struct Shared {
     stdin: Mutex<Option<ChildStdin>>,
-    pending: std::sync::Mutex<HashMap<String, oneshot::Sender<Reply>>>,
+    pending: std::sync::Mutex<HashMap<String, (String, oneshot::Sender<Reply>)>>,
     /// Where the running turn's updates go (None between turns).
     sink: std::sync::Mutex<Option<mpsc::UnboundedSender<TurnEvent>>>,
     exited: std::sync::Mutex<Option<Option<i32>>>,
@@ -277,6 +313,7 @@ pub struct AcpClient {
     turn: Mutex<()>,
     kill_grace: Duration,
     request_timeout: Duration,
+    permission_timeout: Duration,
     agent_info: Value,
     pid: Option<u32>,
 }
@@ -301,7 +338,11 @@ impl AcpClient {
             .envs(opts.env.iter().cloned())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null());
+            .stderr(if opts.stderr.is_some() {
+                Stdio::piped()
+            } else {
+                Stdio::null()
+            });
         let mut wrap = CommandWrap::from(cmd);
         // Its own process group (POSIX) / Job Object (Windows), so close stops
         // everything it started — an npx adapter AND the agent it spawned.
@@ -317,6 +358,18 @@ impl AcpClient {
         let pid = child.id();
         let stdin = child.stdin().take().expect("piped stdin");
         let stdout = child.stdout().take().expect("piped stdout");
+        if let (Some(h), Some(mut err)) = (opts.stderr.clone(), child.stderr().take()) {
+            tokio::spawn(async move {
+                use tokio::io::AsyncReadExt;
+                let mut buf = [0u8; 4096];
+                while let Ok(n) = err.read(&mut buf).await {
+                    if n == 0 {
+                        break;
+                    }
+                    h(&buf[..n]);
+                }
+            });
+        }
 
         let shared = Arc::new(Shared {
             stdin: Mutex::new(Some(stdin)),
@@ -340,15 +393,23 @@ impl AcpClient {
             turn: Mutex::new(()),
             kill_grace: opts.kill_grace,
             request_timeout: opts.request_timeout,
+            permission_timeout: opts.permission_timeout,
             agent_info: Value::Null,
             pid,
         };
+        let mut caps = json!({
+            "fs": {"readTextFile": false, "writeTextFile": false},
+            "terminal": false,
+        });
+        if let Some(meta) = &opts.client_caps_meta {
+            caps["_meta"] = meta.clone();
+        }
         let init = client
             .call(
                 "initialize",
                 json!({
                     "protocolVersion": opts.protocol_version,
-                    "clientCapabilities": {"fs": {"readTextFile": false, "writeTextFile": false}},
+                    "clientCapabilities": caps,
                 }),
                 opts.initialize_timeout,
             )
@@ -361,12 +422,12 @@ impl AcpClient {
             }
         };
         client.agent_info = init;
+        let mut session_new = json!({"cwd": cwd.to_string_lossy(), "mcpServers": opts.mcp_servers});
+        if let Some(meta) = &opts.session_meta {
+            session_new["_meta"] = meta.clone();
+        }
         let sn = client
-            .call(
-                "session/new",
-                json!({"cwd": cwd.to_string_lossy(), "mcpServers": []}),
-                opts.request_timeout,
-            )
+            .call("session/new", session_new, opts.request_timeout)
             .await;
         let sid = match sn.map(|v| {
             v.get("sessionId")
@@ -399,7 +460,71 @@ impl AcpClient {
                 return Err(e);
             }
         }
+        if let Some(model) = opts.model.as_deref().filter(|m| !m.is_empty()) {
+            if let Err(e) = client.apply_model(model, opts.request_timeout).await {
+                client.close().await;
+                return Err(e);
+            }
+        }
         Ok(client)
+    }
+
+    /// Passed through unchanged: the stable ACP spelling
+    /// (`session/set_config_option {configId:"model"}`) first, then the older
+    /// `session/set_model`. Both failing is an error carrying both messages.
+    async fn apply_model(&self, model: &str, timeout: Duration) -> Result<(), AcpError> {
+        let sid = self.session_id.clone();
+        let first = self
+            .call(
+                "session/set_config_option",
+                json!({"sessionId": sid, "configId": "model", "value": model}),
+                timeout,
+            )
+            .await;
+        if let Err(e1) = first {
+            let second = self
+                .call(
+                    "session/set_model",
+                    json!({"sessionId": sid, "modelId": model}),
+                    timeout,
+                )
+                .await;
+            if let Err(e2) = second {
+                return Err(AcpError::Protocol(format!(
+                    "set model {model:?}: {e1}; {e2}"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    async fn ensure_open(&self) -> Result<(), AcpError> {
+        if self.shared.stdin.lock().await.is_none() {
+            return Err(AcpError::Protocol("ACP client is closed".into()));
+        }
+        Ok(())
+    }
+
+    /// Change the agent's mode on the running session (`session/set_mode
+    /// {sessionId, modeId}`), SPEC §8C. Sent at once, not queued behind a running
+    /// turn; no restart. An agent rejection fails only this call.
+    pub async fn set_mode(&self, mode: &str) -> Result<(), AcpError> {
+        self.ensure_open().await?;
+        self.call(
+            "session/set_mode",
+            json!({"sessionId": self.session_id, "modeId": mode}),
+            self.request_timeout,
+        )
+        .await
+        .map(|_| ())
+    }
+
+    /// Change the model on the running session — exactly the load-time `model`
+    /// option: `session/set_config_option`, then `session/set_model` (SPEC §8C).
+    /// The value passes through unvalidated; an agent rejection fails only this call.
+    pub async fn set_model(&self, model: &str) -> Result<(), AcpError> {
+        self.ensure_open().await?;
+        self.apply_model(model, self.request_timeout).await
     }
 
     /// The agent's process id (on unix also its process-group id).
@@ -423,7 +548,7 @@ impl AcpClient {
 
     async fn call(&self, method: &str, params: Value, timeout: Duration) -> Reply {
         let id = self.new_id();
-        let rx = self.register(&id)?;
+        let rx = self.register(&id, method)?;
         write_line(
             &self.shared,
             &json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}),
@@ -431,7 +556,7 @@ impl AcpClient {
         .await?;
         match tokio::time::timeout(timeout, rx).await {
             Ok(Ok(r)) => r,
-            Ok(Err(_)) => Err(self.exit_error()),
+            Ok(Err(_)) => Err(self.exit_error(method)),
             Err(_) => {
                 self.shared.pending.lock().unwrap().remove(&id);
                 Err(AcpError::Timeout {
@@ -442,21 +567,22 @@ impl AcpClient {
         }
     }
 
-    fn register(&self, id: &str) -> Result<oneshot::Receiver<Reply>, AcpError> {
+    fn register(&self, id: &str, method: &str) -> Result<oneshot::Receiver<Reply>, AcpError> {
         if self.shared.exited.lock().unwrap().is_some() {
-            return Err(self.exit_error());
+            return Err(self.exit_error(method));
         }
         let (tx, rx) = oneshot::channel();
         self.shared
             .pending
             .lock()
             .unwrap()
-            .insert(id.to_owned(), tx);
+            .insert(id.to_owned(), (method.to_owned(), tx));
         Ok(rx)
     }
 
-    fn exit_error(&self) -> AcpError {
+    fn exit_error(&self, method: &str) -> AcpError {
         AcpError::AgentExited {
+            method: method.to_owned(),
             code: self.shared.exited.lock().unwrap().flatten(),
         }
     }
@@ -475,7 +601,7 @@ impl AcpClient {
         let (tx, rx) = mpsc::unbounded_channel();
         *self.shared.sink.lock().unwrap() = Some(tx);
         let id = self.new_id();
-        let reply = match self.register(&id) {
+        let reply = match self.register(&id, "session/prompt") {
             Ok(r) => r,
             Err(e) => {
                 *self.shared.sink.lock().unwrap() = None;
@@ -493,6 +619,8 @@ impl AcpClient {
             _guard: guard,
             updates: rx,
             reply: Some(reply),
+            id,
+            deadline: tokio::time::Instant::now() + self.permission_timeout,
             finished: None,
             backlog: VecDeque::new(),
             seen: Vec::new(),
@@ -528,8 +656,10 @@ impl AcpClient {
     /// [`generate_cancellable`](Self::generate_cancellable) that also reports
     /// the turn as it happens: message chunks as [`AcpStreamEvent::Text`], the
     /// agent's own tool calls as `ToolCall` / `ToolResult` (on a
-    /// `tool_call_update` with status `completed` or `failed`), all `via: "acp"`.
-    /// Thoughts and plans are not emitted (observe them with `on_update`).
+    /// `tool_call_update` with status `completed` or `failed`), thought chunks as
+    /// [`AcpStreamEvent::Thought`], all `via: "acp"`. Each event is emitted as its
+    /// `session/update` arrives, not after the turn. Plans are not emitted
+    /// (observe them with `on_update`).
     pub async fn generate_stream<F>(
         &self,
         messages: &[(String, String)],
@@ -571,6 +701,14 @@ impl AcpClient {
                         });
                     }
                 }
+                "agent_thought_chunk" => {
+                    if let Some(t) = u.text().filter(|t| !t.is_empty()) {
+                        emit(AcpStreamEvent::Thought {
+                            delta: t.to_owned(),
+                            via: "acp",
+                        });
+                    }
+                }
                 "tool_call" => {
                     let name = if title.is_empty() {
                         field("kind")
@@ -586,15 +724,29 @@ impl AcpClient {
                     });
                 }
                 "tool_call_update" => {
+                    // A non-empty title renames the call for every later event
+                    // of this id; a non-empty rawInput object carries its late
+                    // arguments (SPEC: tool_call_args, issue #188).
+                    if !title.is_empty() {
+                        names.insert(id.clone(), title);
+                    }
+                    let name = names.get(&id).cloned().unwrap_or_default();
+                    if let Some(raw) = u
+                        .update
+                        .get("rawInput")
+                        .filter(|v| v.as_object().is_some_and(|o| !o.is_empty()))
+                    {
+                        emit(AcpStreamEvent::ToolCallArgs {
+                            id: id.clone(),
+                            name: name.clone(),
+                            args: raw.clone(),
+                            via: "acp",
+                        });
+                    }
                     let status = field("status");
                     if status != "completed" && status != "failed" {
                         continue;
                     }
-                    let name = if title.is_empty() {
-                        names.get(&id).cloned().unwrap_or_default()
-                    } else {
-                        title
-                    };
                     emit(AcpStreamEvent::ToolResult {
                         id,
                         name,
@@ -650,6 +802,10 @@ pub struct PromptStream<'a> {
     _guard: tokio::sync::MutexGuard<'a, ()>,
     updates: mpsc::UnboundedReceiver<TurnEvent>,
     reply: Option<oneshot::Receiver<Reply>>,
+    /// The `session/prompt` request id, dropped from `pending` on timeout.
+    id: String,
+    /// Per-turn bound (`permission_timeout` from the prompt being sent).
+    deadline: tokio::time::Instant,
     finished: Option<Reply>,
     backlog: VecDeque<SessionUpdate>,
     seen: Vec<SessionUpdate>,
@@ -696,9 +852,15 @@ impl PromptStream<'_> {
                         }
                     }
                 }
+                _ = tokio::time::sleep_until(self.deadline) => {
+                    self.reply = None;
+                    self.client.shared.pending.lock().unwrap().remove(&self.id);
+                    let d = self.client.permission_timeout;
+                    self.finished = Some(Err(AcpError::PermissionTimeout(d)));
+                }
                 r = reply => {
                     self.reply = None;
-                    self.finished = Some(r.unwrap_or_else(|_| Err(self.client.exit_error())));
+                    self.finished = Some(r.unwrap_or_else(|_| Err(self.client.exit_error("session/prompt"))));
                     // updates written before the reply line are already queued
                     while let Ok(ev) = self.updates.try_recv() {
                         if let Some(u) = self.absorb(ev) {
@@ -740,7 +902,10 @@ async fn write_line(shared: &Shared, v: &Value) -> Result<(), AcpError> {
     let mut line = serde_json::to_vec(v).map_err(|e| AcpError::Protocol(e.to_string()))?;
     line.push(b'\n');
     let mut stdin = shared.stdin.lock().await;
-    let w = stdin.as_mut().ok_or(AcpError::AgentExited { code: None })?;
+    let w = stdin.as_mut().ok_or(AcpError::AgentExited {
+        method: String::new(),
+        code: None,
+    })?;
     w.write_all(&line).await?;
     w.flush().await?;
     Ok(())
@@ -766,7 +931,7 @@ async fn read_loop(
                     Value::String(s) => s.clone(),
                     other => other.to_string(),
                 };
-                if let Some(tx) = shared.pending.lock().unwrap().remove(&key) {
+                if let Some((_, tx)) = shared.pending.lock().unwrap().remove(&key) {
                     let r = match msg.get("error") {
                         Some(e) => Err(AcpError::Rpc {
                             code: e.get("code").and_then(Value::as_i64).unwrap_or(0),
@@ -859,8 +1024,8 @@ async fn read_loop(
     }
     *shared.exited.lock().unwrap() = Some(code);
     let waiting: Vec<_> = shared.pending.lock().unwrap().drain().collect();
-    for (_, tx) in waiting {
-        let _ = tx.send(Err(AcpError::AgentExited { code }));
+    for (_, (method, tx)) in waiting {
+        let _ = tx.send(Err(AcpError::AgentExited { method, code }));
     }
 }
 

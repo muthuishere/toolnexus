@@ -16,7 +16,12 @@ Mirrors the JS reference (``js/src/mcpserve.ts``).
 from __future__ import annotations
 
 import asyncio
+import hmac
 import inspect
+import json
+import secrets
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Awaitable, Callable, Optional, Union
 
 import anyio
@@ -92,10 +97,7 @@ def build_mcp_server(
 
     @server.list_tools()
     async def _list_tools() -> list[McpToolDef]:
-        return [
-            McpToolDef(name=t.name, description=t.description, inputSchema=t.input_schema)
-            for t in tools
-        ]
+        return [_mcp_tool_def(t) for t in tools]
 
     # validate_input=False: no input validation — execute() is called directly,
     # matching the JS reference (which does not validate against inputSchema).
@@ -126,12 +128,43 @@ def build_mcp_server(
                     await ev
             except Exception:  # noqa: BLE001 — host callback errors are isolated
                 pass
-        return CallToolResult(
-            content=[TextContent(type="text", text=result.output), *_parts_to_content(result.parts)],
-            isError=result.is_error,
-        )
+        return tool_result_to_call_result(result)
 
     return server
+
+
+def _mcp_tool_def(t: Tool) -> McpToolDef:
+    """The wire tool for ``t`` on the §7C serve path: name verbatim, description,
+    inputSchema, and ``outputSchema`` only when the tool declares one."""
+    kwargs: dict[str, Any] = {}
+    if t.output_schema is not None:
+        kwargs["outputSchema"] = t.output_schema
+    return McpToolDef(name=t.name, description=t.description, inputSchema=t.input_schema, **kwargs)
+
+
+def structured_text(result: ToolResult) -> str:
+    """The text block for a result: ``output``, or — when it is empty and ``structured``
+    is set — the compact JSON of ``structured`` (the MCP spec asks a structured result
+    to carry equivalent text). Keys are sorted to match the Go reference's encoding."""
+    if result.structured is not None and result.output == "":
+        return json.dumps(result.structured, separators=(",", ":"), sort_keys=True, ensure_ascii=False)
+    return result.output
+
+
+def tool_result_to_call_result(result: ToolResult) -> CallToolResult:
+    """Map a :class:`ToolResult` to the SDK ``CallToolResult`` (§7C): text block first,
+    §1B parts after it, ``isError`` propagates, ``structured`` ⇒ ``structuredContent``,
+    ``meta`` ⇒ ``_meta``. Absent ⇒ byte-identical to the pre-§7C.1 result."""
+    kwargs: dict[str, Any] = {}
+    if result.structured is not None:
+        kwargs["structuredContent"] = result.structured
+    if result.meta is not None:
+        kwargs["_meta"] = result.meta
+    return CallToolResult(
+        content=[TextContent(type="text", text=structured_text(result)), *_parts_to_content(result.parts)],
+        isError=result.is_error,
+        **kwargs,
+    )
 
 
 def _parts_to_content(parts: Optional[list[dict[str, Any]]]) -> list[Any]:
@@ -247,3 +280,106 @@ async def serve_mcp_http_request(
         tg.cancel_scope.cancel()
 
     return captured["status"], captured["headers"], bytes(captured["body"])
+
+
+# ---------------------------------------------------------------------------
+# Loopback + bearer — the toolkit as an MCP server for a local agent (SPEC §8C).
+# ---------------------------------------------------------------------------
+
+
+class _LoopThread:
+    """A private event loop on a daemon thread: runs the MCP request handling."""
+
+    def __init__(self) -> None:
+        self.loop = asyncio.new_event_loop()
+        self._t = threading.Thread(target=self.loop.run_forever, name="toolnexus-mcp-loopback", daemon=True)
+        self._t.start()
+
+    def run(self, coro: Any) -> Any:
+        return asyncio.run_coroutine_threadsafe(coro, self.loop).result()
+
+    def stop(self) -> None:
+        self.loop.call_soon_threadsafe(self.loop.stop)
+        self._t.join(timeout=3)
+
+
+class LoopbackMCPServer:
+    """The handle :meth:`Toolkit.as_mcp_server` returns: ``url``
+    (``http://127.0.0.1:<port>/mcp``), ``token`` (64 lowercase hex chars — never
+    logged) and an idempotent :meth:`close`."""
+
+    def __init__(self, tools: Callable[[], list[Tool]], cfg: Optional[MCPServeConfig] = None) -> None:
+        self.token: str = secrets.token_hex(32)
+        loop = _LoopThread()
+        self._loop: Optional[_LoopThread] = loop
+        want = ("Bearer " + self.token).encode("latin-1")
+        cfg = dict(cfg or {})
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *a: Any) -> None:  # never log (the token is in headers)
+                pass
+
+            def _empty(self, status: int, extra: Optional[dict[str, str]] = None) -> None:
+                self.send_response(status)
+                for k, v in (extra or {}).items():
+                    self.send_header(k, v)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+            def _handle(self) -> None:
+                if self.path != "/mcp" and not self.path.startswith("/mcp?"):
+                    self._empty(404)
+                    return
+                got = (self.headers.get("Authorization") or "").encode("latin-1", errors="replace")
+                if not hmac.compare_digest(got, want):
+                    self._empty(401, {"WWW-Authenticate": "Bearer"})
+                    return
+                if self.command != "POST":
+                    # Stateless: no server-sent stream to hold open, no session to DELETE.
+                    self._empty(405, {"Allow": "POST"})
+                    return
+                length = int(self.headers.get("Content-Length", 0) or 0)
+                data = self.rfile.read(length) if length else b""
+                headers = [(k.lower().encode("latin-1"), v.encode("latin-1")) for k, v in self.headers.items()]
+                try:
+                    server = build_mcp_server(exposed_mcp_tools(tools(), cfg), cfg)
+                    status, rh, rb = loop.run(serve_mcp_http_request(server, "POST", "/mcp", headers, data))
+                except Exception:  # noqa: BLE001
+                    self._empty(500)
+                    return
+                self.send_response(status)
+                for hk, hv in rh:
+                    if hk.lower() == b"content-length":
+                        continue
+                    self.send_header(hk.decode("latin-1"), hv.decode("latin-1"))
+                self.send_header("Content-Length", str(len(rb)))
+                self.end_headers()
+                if rb:
+                    self.wfile.write(rb)
+
+            do_POST = _handle  # noqa: N815
+            do_GET = _handle  # noqa: N815
+            do_DELETE = _handle  # noqa: N815
+            do_PUT = _handle  # noqa: N815
+            do_PATCH = _handle  # noqa: N815
+
+        httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        httpd.daemon_threads = True
+        self._httpd: Optional[ThreadingHTTPServer] = httpd
+        self.url: str = f"http://127.0.0.1:{httpd.server_address[1]}/mcp"
+        self._lock = threading.Lock()
+        threading.Thread(target=httpd.serve_forever, name="toolnexus-mcp-loopback-http", daemon=True).start()
+
+    def close(self) -> None:
+        """Stop the listener. Idempotent."""
+        with self._lock:
+            httpd, loop = self._httpd, self._loop
+            self._httpd, self._loop = None, None
+        if httpd is not None:
+            httpd.shutdown()
+            httpd.server_close()
+        if loop is not None:
+            loop.stop()
+
+    def __repr__(self) -> str:  # never show the token
+        return f"LoopbackMCPServer(url={self.url!r})"

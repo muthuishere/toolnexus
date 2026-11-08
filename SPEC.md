@@ -44,13 +44,24 @@ A new language port is "correct" iff these hold. Run it against the shared
 `examples/` (same `mcp.json` + skill) and the outputs must match the others.
 
 1. **Tool** = `{ name, description, inputSchema (JSON-Schema object), source, execute(args,ctx)->ToolResult }`.
-   `ToolResult = { output: string, isError: bool, parts?: ContentPart[], metadata? }`.
+   `ToolResult = { output: string, isError: bool, parts?: ContentPart[], metadata?, structured?, meta? }`;
+   `Tool.outputSchema?` describes `structured`. Absent ⇒ byte-identical output everywhere.
 1b. **ContentPart** = `text | image | file | audio` (§1B). Non-text parts carry `mimeType` plus
    exactly one of `data` (standard base64, padded, unwrapped) or `url`. **Never a path.**
 2. **sanitize(x)** = replace `[^a-zA-Z0-9_-]` with `_`. **MCP tool name** = `sanitize(server)_sanitize(tool)`.
 3. **MCP config**: accept top-level `mcpServers` | `servers` | `mcp`. `url`⇒remote, `command`⇒local.
    `disabled`/`enabled:false` ⇒ skip. Default timeout 30000ms. A failed server is isolated (status `failed`), never fatal.
    Remote `headers` values expand `${ENV_VAR}` from the environment (never logged).
+   **Protocol (§2, target of `upgrade-mcp-2026-07-28`):** `server/discover` first; on `2026-07-28` every
+   request carries `_meta` `io.modelcontextprotocol/{protocolVersion,clientCapabilities,clientInfo}` and, over
+   HTTP, `MCP-Protocol-Version`/`Mcp-Method`/`Mcp-Name`; missing `resultType` ⇒ `complete`; MRTR
+   `input_required` ⇒ §10 (form⇒`input`, url⇒`authorization`), retried with `inputResponses`+`requestState`;
+   a `tools/call` is **never** re-sent except after 401 / 403 `insufficient_scope`. Discover failing ⇒ the
+   frozen pre-2026 path (§2.F). OAuth (§2A): PRM → AS metadata → pre-registered `clientId` → CIMD (**no DCR**),
+   PKCE S256 + `resource`, `state`+`iss` checked, tokens never logged; `auto` or §10 `authorization` pause.
+   Opt-in `toolSearch` ⇒ only `search_tools` + `call_tool`. **MCP server** (§7C): 2026-07-28 only, HTTP only,
+   header mismatch `-32020` checked before unsupported version `-32022`, serverInfo in result `_meta`, skills
+   extension, optional `auth` (§2A.2). Fixtures: `examples/mcp-2026/`.
 4. **MCP execute**: `isError`⇒error w/ joined text; `structuredContent`⇒`JSON.stringify`; else joined text parts.
    **`content[]` non-text entries become `ToolResult.parts` on EVERY branch** — image⇒`image`,
    audio⇒`audio`, `resource_link`⇒`file{url}`, `resource` blob⇒`file{data}`, `resource` text⇒
@@ -88,6 +99,8 @@ A new language port is "correct" iff these hold. Run it against the shared
    non-2xx⇒`HTTP <status>: <body>` isError, else body text.
 10. **Unified client**: `{baseUrl,style:"openai"|"anthropic",model,apiKey?}`; system = systemPrompt+`\n\n`+skillsPrompt();
     loop call→execute tool calls→feed back (provider's tool-result shape)→repeat to maxTurns(10).
+    Opt-in `stopRecovery` (default off, §8): malformed tool args ⇒ corrective ×1, truncated ⇒ continue ×3,
+    empty answer ⇒ nudge ×1, each with a byte-exact pinned user message.
 11. **Built-in tools** (`source:"builtin"`): the default toolset — `bash, read, write, edit, grep, glob,
     webfetch, question, apply_patch, todowrite` — names + input schemas per §4A. **On by default**;
     global toggle (`builtins:false` | `builtins.disabled:true` | `builtins.enabled:false` ⇒ whole source off, MCP
@@ -141,6 +154,8 @@ Tool {
   description: string
   inputSchema: JSONSchema      // a JSON-Schema object ({type:"object", properties, ...})
   source:      "mcp" | "skill" | "native" | "http" | "builtin" | "a2a" | "media" | "custom"
+  outputSchema?: JSONSchema    // schema of ToolResult.structured; absent ⇒ omitted everywhere
+  annotations?:  { title?, readOnlyHint?, destructiveHint?, idempotentHint?, openWorldHint? } // §7C.1
   execute(args: object, ctx?: Context) -> ToolResult
 }
 ```
@@ -152,9 +167,16 @@ ToolResult {
   output:    string            // text handed back to the model — ALWAYS required
   isError:   boolean
   parts?:    ContentPart[]     // non-text output (§1B); absent ⇒ byte-identical to pre-0.17
-  metadata?: object            // free-form (title, server, skill name, ...)
+  metadata?: object            // free-form (title, server, skill name, ...) — never on a wire
+  structured?: any             // machine-readable result (MCP structuredContent); absent ⇒ byte-identical
+  meta?: object                // protocol metadata for the wire result (MCP `_meta`); absent ⇒ omitted
 }
 ```
+
+`structured` does not replace `output`: when a tool sets `structured` and leaves `output` empty, MCP
+serve emits the JSON text of `structured` as the text block (the MCP spec asks for equivalent
+unstructured content). The client loop (§8) keeps using `output`; `structured` and `meta` are for the
+MCP serve surfaces (§7C, §7C.1) until a change says otherwise.
 
 `output` stays required even when `parts` is present: it is what the transcript, compaction,
 token estimation and any text-only provider see. A tool returning an image sets `output` to a
@@ -276,7 +298,165 @@ Answer  { id, ok, data? }
 
 ## 2. MCP source
 
-### Config file format
+> **Status: client shipped in all eight ports; server side pending** (OpenSpec change
+> `upgrade-mcp-2026-07-28`; the 2026 server builds on PR #140's MCP handler). The reference implementation is the Go spike `spikes/mcp-2026/golang`; all
+> eight language spikes under `spikes/mcp-2026/` pass the 8×8 interop matrix (`spikes/mcp-2026/interop.sh`).
+> Servers that fail `server/discover` (§2.2a) get the frozen pre-2026 path (§2.F below).
+> Shared conformance fixtures: `examples/mcp-2026/`.
+
+toolnexus **owns its MCP layer** (no MCP SDK) and speaks protocol **`2026-07-28`** first, over **stdio**
+(local) and **Streamable HTTP** (remote), through one client API. The config file format, type inference,
+tool naming (`sanitize(server)_sanitize(tool)`), the per-server load bound, the `tools/call` result mapping
+(text / `structuredContent` / `isError` / non-text `parts`), failure isolation, status and the host-facing
+extensions are **unchanged** — they are specified in §2.F and apply to both paths. New optional per-server
+config keys (absent ⇒ byte-identical behaviour): `auth` (§2A), `description` (tool search, below),
+`toolSearch` (below).
+
+### 2.1 Wire constants (byte-exact)
+
+| constant | value |
+|---|---|
+| protocol version | `2026-07-28` |
+| `_meta` key: version | `io.modelcontextprotocol/protocolVersion` |
+| `_meta` key: client capabilities | `io.modelcontextprotocol/clientCapabilities` |
+| `_meta` key: client info | `io.modelcontextprotocol/clientInfo` |
+| `_meta` key: server info | `io.modelcontextprotocol/serverInfo` |
+| skills extension id | `io.modelcontextprotocol/skills` |
+| method not found / invalid params | `-32601` / `-32602` |
+| header mismatch | `-32020` |
+| unsupported protocol version | `-32022` (`data: {supported: [..], requested}`) |
+
+### 2.2 Discover first
+
+- The client sends **`server/discover`** before any other request. If the result's `supportedVersions`
+  contains `2026-07-28`, the server is used on the 2026 path. **No `initialize`** is ever sent on it, and
+  there is no session (`Mcp-Session-Id`), no resumable SSE and no server→client request.
+- `serverInfo` is read from the result, else from result `_meta["io.modelcontextprotocol/serverInfo"]`
+  (as GitHub's hosted server sends it).
+- `server/discover` failing with `-32601` (method not found) or an unsupported-version error (`-32022`,
+  or an HTTP 400/404 equivalent from an old server) ⇒ **frozen fallback** (§2.F). Any other failure is a
+  load failure (status `failed`, isolated, never fatal).
+
+### 2.2a Fallback trigger and stdio (pinned for the library, change `upgrade-mcp-2026-07-28` task 1.2)
+
+- **Fallback ⇒ frozen path (§2.F)** when `server/discover` gets: any JSON-RPC **error response** (old
+  servers answer `-32601`, `-32600` or a "not initialized" code before `initialize`), an HTTP **400, 404, 405 or 5xx** (the Java SDK's stateless server answers an unknown method with 500; a
+  server that is really down then fails on the frozen path too, so the outcome is still `failed`), or a 2xx reply that is not a JSON-RPC response for the request, or a result without
+  `"2026-07-28"` in `supportedVersions`. Over **stdio**, a discover that gets no reply within
+  `min(timeout, 5 s)` also falls back (older servers may ignore a pre-`initialize` request).
+- **stdio probe child (amended, change `reuse-stdio-discover-probe`):** when discover gets a JSON-RPC
+  **reply** within `min(timeout, 5 s)` — an error (`-32601` etc.) or a result without `2026-07-28` — the
+  **same child** continues into `initialize` on the frozen path over the probe's pipes: exactly **one**
+  process start. Only when discover gets **no reply** (silence) is the probe child terminated and the
+  frozen path starts its own process, with `env`/`cwd`/`command` unchanged. A port whose frozen path is
+  an MCP SDK hands the SDK the probe child's open stdin/stdout (or a minimal adapter transport over
+  them). Shared fixture: `examples/mcp-2026/legacy-stdio/` (counts process starts).
+- **Load failure** (status `failed`, isolated): connection refused / DNS, an HTTP 401/403 that
+  OAuth (§2A) could not satisfy, a stdio child that exits before replying.
+- **Caching (resolved):** `tools/list` is fetched once at load on the direct path (as §2.F); tool search
+  caches it for `ttlMs` (no hint ⇒ fetched once per load). **stdio concurrency (resolved):** allowed,
+  demultiplexed by `id`.
+- **Resource on refresh (resolved):** sent by default (spec MUST); `auth.omitRefreshResource: true` drops it.
+
+### 2.3 Every request
+
+- `params._meta` carries `io.modelcontextprotocol/protocolVersion: "2026-07-28"`,
+  `io.modelcontextprotocol/clientCapabilities` (`{"elicitation":{"form":{}}}`) and
+  `io.modelcontextprotocol/clientInfo` (`{name, version}`).
+- Over HTTP the headers `MCP-Protocol-Version: 2026-07-28`, `Mcp-Method: <method>` and, for `tools/call`
+  and `prompts/get` (the `name` param) and `resources/read` (the `uri` param), `Mcp-Name: <value>`. A value
+  that has leading/trailing whitespace, contains a character outside printable ASCII (0x20–0x7E), or itself
+  looks like the sentinel is sent as
+  `=?base64?<std-base64>?=`. Remote `headers` (with `${ENV}` expansion, never logged) are added as before.
+- Responses are accepted as `application/json` or `text/event-stream` (the final SSE `data:` carrying a
+  result or error is used). stdio is one JSON-RPC message per line; responses are demultiplexed by `id`
+  (concurrent calls allowed); stderr is passed through and **never parsed**; a dead child fails every
+  pending call instead of hanging. stdio carries no headers, so only `-32022` can apply there.
+
+### 2.4 Results: `resultType`, cache hints
+
+- `resultType` missing ⇒ `"complete"`. `"input_required"` ⇒ MRTR (§2.5). Any other value is an error.
+- `tools/list` (and other list/read results) may carry `ttlMs` and `cacheScope`; the client MAY cache
+  for `ttlMs` (tool search does, below). Absent hints ⇒ no caching.
+- The `tools/call` result is mapped onto `ToolResult` exactly as §2.F *Behaviour* specifies.
+
+### 2.5 MRTR (`input_required`) → §10
+
+A `tools/call` result `{resultType:"input_required", inputRequests:{<key>: {method, params}}, requestState?}`
+is surfaced through §10 `waitFor`, one `Request` per input request:
+
+- `elicitation/create` with `mode:"form"` ⇒ `Request{kind:"input", prompt: params.message,
+  data:{schema: params.requestedSchema}}`; `mode:"url"` ⇒ `Request{kind:"authorization", url}`.
+- `Answer` → input response: `ok` ⇒ `{action:"accept", content: answer.data}`; `!ok` ⇒ `decline` when
+  `answer.reason=="declined"`, else `cancel` (same mapping as the §2.F elicitation bridge).
+- The client re-sends the **same** `tools/call` with `params.inputResponses = {<key>: <response>}` and
+  `params.requestState` echoed verbatim from the server (each MRTR `Request.id` is `mrtr-<random>`; an
+  OAuth pause's is `auth-<random>`). Further `input_required` rounds repeat; a paused
+  round resumes that round, earlier rounds are never re-asked.
+- Without a `waitFor`, the loop returns `{status:"pending"}` per §10 (no hang).
+
+### 2.6 No hidden re-execution
+
+The client **never** re-sends a `tools/call` after a lost connection, timeout, 5xx or unreadable response —
+the caller gets an error (the server may have executed it; spec issue #3394). It re-sends only after a
+pre-dispatch rejection: HTTP **401**, or **403 with `error="insufficient_scope"`**, carrying
+`WWW-Authenticate` (§2A), at most 3 auth retries per request. The MRTR re-send (§2.5) is a new round, not a
+retry.
+
+### 2.7 Skills extension (SEP-2640) — client
+
+When `server/discover` lists `capabilities.extensions["io.modelcontextprotocol/skills"]`:
+
+- `skills/list` ⇒ `{skills:[{uri, frontmatter}], ttlMs, cacheScope}`; URIs are `skill://<name>/SKILL.md`.
+- `skills/get {uri}` ⇒ `{skill:{uri, frontmatter, resources:[{uri, digest:"sha256:<hex>", size}]}}`;
+  unknown ⇒ `-32602`.
+- `resources/read {uri}` ⇒ `{contents:[{uri, mimeType, text}]}` (`text/markdown` for `.md`, else
+  `text/plain`).
+- Remote skills join the **same** `skill` tool inventory as local skills (§3); a remote skill's loaded body
+  is byte-identical to the local copy of the same files.
+- **URI containment** (client and server): percent-decode once, then reject any leftover `%`, `\`, NUL,
+  `:`, and any empty / `.` / `..` segment; a download also rejects a resource outside the skill and a
+  sha256 mismatch, before writing anything. Server answer for a bad URI: `-32602`.
+
+### 2.8 Tool search (lazy exposure) — client
+
+Opt-in per server: `"toolSearch": true` (+ optional `"description": "<what this server is for>"`). Absent
+⇒ unchanged. With it the toolkit exposes **two** tools for that server instead of every server tool:
+
+- `search_tools` — description `"Search the tools of <about> by keywords. Returns name, description and
+  inputSchema of the best matches; run one with call_tool."`, schema
+  `{type:"object", properties:{query:{type:"string"}, limit:{type:"integer"}}, required:["query"]}`.
+  Ranking is BM25 over the tool name (weight ×2, split on `_` and camelCase) and description; each hit is
+  `{name, description, inputSchema, server}` where `server` is the configured `description`, or `""` when
+  none is configured.
+- `call_tool` — description `"Run a tool found with search_tools."`, args `{name, arguments}`; the result
+  is identical to a direct call (MRTR still routes through §10).
+- **Toolkit names:** the two tools follow normal naming, `sanitize(server)_search_tools` and
+  `sanitize(server)_call_tool` (source `mcp`, server = the configured server); `about` = the configured
+  `description`, else the server name. In `call_tool`, `name` is the **server's** tool name (as returned by
+  `search_tools`), not the prefixed toolkit name; an unknown name is a tool error
+  `unknown tool "<name>" on <server>`.
+- **`search_tools` result text** is the JSON array of hits (`[{name, description, inputSchema, server}, …]`,
+  best first, at most `limit`, default 5), serialised compactly with keys in exactly that order (`name`, `description`, `inputSchema`, `server`; the inputSchema object as the server sent it); no match ⇒ `[]`.
+- The per-server `tools` filter and the disable lists apply **before** search: `search_tools` ranks, and
+  `call_tool` accepts, only tools the filter allows (a filtered-out name is `unknown tool "<name>" on <server>`).
+- Direct server-tool names are hidden in this mode. Search is client-side (the spec has no search method):
+  `tools/list` is fetched once and cached for its `ttlMs`.
+
+### 2.9 Not supported
+
+roots, sampling, logging (deprecated by the spec); Dynamic Client Registration (§2A); Tasks extension
+(follow-up change); `x-mcp-header` mirroring; SSE progress notifications on the 2026 path; `nextCursor`
+pagination on the 2026 path; prompts/resource-template/subscription helpers.
+
+### 2.F Frozen fallback — pre-2026 behaviour (verbatim, frozen)
+
+Used **only** when `server/discover` fails as in §2.2 (servers on 2025-11-25 and older). **Frozen:** no
+feature introduced by `upgrade-mcp-2026-07-28` lands here, except OAuth (§2A). The text below is the
+pre-change §2, kept verbatim (headings demoted one level); its config format, naming, result mapping and
+host-facing extensions also govern the 2026 path. It is deleted when the spec's removal window passes.
+
+#### Config file format
 
 Superset of the Claude-desktop / opencode format. The top-level key may be
 `mcpServers` (Claude style), `servers`, or `mcp` — all accepted.
@@ -320,7 +500,7 @@ sibling config sections, not MCP servers. (Without this, a config file that carr
 toggle, an `agents` block, an `a2a` card block, or an `mcpServer` profile would produce a bogus MCP
 server.)
 
-### Behaviour (mirrors opencode `mcp/index.ts` + `mcp/catalog.ts`)
+#### Behaviour (mirrors opencode `mcp/index.ts` + `mcp/catalog.ts`)
 
 - **local** → connect over **stdio** (spawn `command[0]` with `command[1:]`, merged
   env = process env + `environment`, in `cwd`).
@@ -372,12 +552,12 @@ server.)
     yields **no** `parts` key at all, so it stays byte-identical.
 - `close()` disconnects every client (and kills stdio child trees).
 
-### Status (queryable)
+#### Status (queryable)
 
 `connected | disabled | failed`  (v1 drops opencode's `needs_auth` /
 `needs_client_registration` since OAuth is deferred.)
 
-### Elicitation bridge (server→client input, mapped onto §10)
+#### Elicitation bridge (server→client input, mapped onto §10)
 
 An MCP server may **elicit** input from the user *during* a `tools/call` it is servicing —
 `elicitation/create`, a reverse-request on the same session (the mirror of sampling/roots). toolnexus
@@ -397,7 +577,7 @@ bridges it onto the one §10 `waitFor` rather than inventing a second input path
   uses URL mode → `kind:"authorization"`, entered out-of-band. v1 ships form mode across all ports; URL
   mode where the port's MCP SDK supports it.
 
-### Host-facing extensions (ctx-aware load, per-server allowlist, list-only inventory)
+#### Host-facing extensions (ctx-aware load, per-server allowlist, list-only inventory)
 
 Additive; grounded in `docs/adr/0001-rag-go-consumer-needs.md`. A caller passing none of these gets
 byte-identical behavior.
@@ -418,6 +598,109 @@ byte-identical behavior.
 - **Toolkit sugar.** `DisableTools []string` drops tools by their final exposed name across every
   source; `DisableSkills []string` drops skills by name from the `skill` catalog. Both compose with the
   map filters above.
+
+---
+
+## 2A. MCP authorization (OAuth 2.1, MCP 2026-07-28 `basic/authorization`)
+
+> **Status: client (§2A.1) shipped in all eight ports; server (§2A.2) pending** (change `upgrade-mcp-2026-07-28`; reference
+> `spikes/mcp-2026/golang` `auth.go`, `serverauth.go`, `devauth.go`; verified live against Keycloak 26.8.1 and
+> GitHub's hosted MCP server). Applies to the 2026 path and to the frozen fallback (§2.F). stdio has no auth.
+
+### 2A.1 Client
+
+Per-server config `auth` (all optional; absent ⇒ a 401 still triggers the flow with CIMD if the AS supports
+it): `{ clientId?, clientSecret?, tokenAuthMethod?: "client_secret_basic"|"client_secret_post",
+clientIds?: {<issuer>: <id>}, clientMetadataUrl?, redirectUri?, mode?: "auto"|"pause",
+omitRefreshResource?: bool, allowHttp?: bool }`, plus a host-supplied **token store** (default in-memory).
+
+1. **Trigger.** HTTP 401 (or 403 `insufficient_scope`) with `WWW-Authenticate: Bearer ...`. After a restart
+   the first request goes token-less to learn the issuer before a stored token is sent.
+2. **Protected Resource Metadata** (RFC 9728): the challenge's `resource_metadata` URL, else
+   `/.well-known/oauth-protected-resource<path>`, else `/.well-known/oauth-protected-resource`. PRM `resource`
+   MUST equal the server URI. `authorization_servers[0]` is used; none ⇒ error `PRM lists no
+   authorization_servers`. AS must be https (`allowHttp` escape hatch, dev/test only).
+3. **AS metadata**: `/.well-known/oauth-authorization-server<path>` (RFC 8414) → `/.well-known/openid-configuration<path>`
+   → `<path>/.well-known/openid-configuration` (no path: the first two at root). Metadata `issuer` MUST equal the
+   issuer. `code_challenge_methods_supported` lacking `S256` ⇒ refuse (`authorization server does not advertise
+   PKCE S256; refusing`).
+4. **Client identity, in order:** a pre-registered `clientId` bound to that issuer (`clientIds[issuer]`, or
+   `clientId`), optional `clientSecret` via `tokenAuthMethod`; then a **Client ID Metadata Document** URL as
+   `client_id` when the AS advertises `client_id_metadata_document_supported`. **No Dynamic Client
+   Registration, ever.** Neither ⇒ error naming the issuer: `no client identity for <issuer>: <why> and no
+   client id is configured — register an app with <issuer> and set auth.clientId (dynamic client registration
+   is not supported)` (byte-exact in every port; `auth.clientId` is the mcp.json key). `<why>` is
+   `it does not support Client ID Metadata Documents`, or `auth.clientMetadataUrl is not set` when the AS supports
+   CIMD but no URL is configured.
+5. **Authorization code + PKCE S256**, `resource=<server URI>` on the authorize and token requests, `scope` =
+   the challenge `scope`, else PRM `scopes_supported`. Random `state`.
+6. **Callback validation** (before acting on `error`): when the AS advertises
+   `authorization_response_iss_parameter_supported`, `iss` MUST be present and equal the issuer (`authorization
+   response iss mismatch (possible mix-up attack)` / `authorization response missing iss`); `state` MUST match
+   (`authorization response state mismatch`); `error=<e>` ⇒ `authorization denied: <e>`. On failure nothing is
+   stored.
+7. **Token request** sends `Accept: application/json` and accepts a JSON **or** `application/x-www-form-urlencoded`
+   reply (GitHub). Errors are `token endpoint: HTTP <status> <error>` — **never the body**.
+8. **Refresh** on expiry (10 s skew) and on 401 `invalid_token` with a refresh token; `resource` is sent unless
+   `omitRefreshResource` (Entra). **Single-flight:** concurrent callers share one refresh request.
+9. **Step-up** on 403 `insufficient_scope`: re-authorize with the union of the challenge `scope` and the
+   previously granted scopes.
+10. **Two modes.** `auto` (default for CLI/desktop): open the system browser, receive the callback on
+    `http://127.0.0.1:<random>/callback` (5 min timeout). `pause`: no browser — return a §10
+    `Request{id:"auth-<random>", kind:"authorization", prompt:"Authorize access to <resource>", url, expiresAt}`
+    (10 min expiry) through `waitFor`, or as `{status:"pending"}` without one. The `Answer` carries the callback
+    URL the AS redirected to (the reference API is `Resume(id, callbackURL)`); resuming completes the flow and sends the
+    **paused request** — same MRTR round, same `inputResponses`/`requestState` — for the first time. The tool
+    runs exactly once. Unknown id ⇒ `unknown pending authorization "<id>"`; expired ⇒ `pending authorization
+    expired`. Hosts that already answer `authorization` requests (URL elicitation) get OAuth for free.
+11. **Token handling.** Credentials are keyed by issuer and sent only once the server's AS issuer is confirmed.
+    Tokens, codes, verifiers and secrets are **never logged** and never appear in error text.
+
+### 2A.1a Library surface (pinned; names are per-port idiom of the same words)
+
+- **mcp.json** `auth` object exactly as 2A.1 (keys camelCase in every port's JSON).
+- **Load options** (the same place `waitFor` is passed to `loadMcp` / the toolkit today):
+  `tokenStore` — `{load(resource) -> Token|null, save(resource, Token), delete(resource)}`, default in-memory per
+  load; `openUrl(url)` — how `auto` mode opens the browser (default: the OS opener; tests inject an HTTP GET).
+- **Token** `{accessToken, refreshToken?, expiresAt?, scopes[], issuer, clientId}`; its string/debug form never
+  shows a token value.
+- **Pause answer:** the host answers the §10 `authorization` request with
+  `Answer{id, ok:true, data:{callbackUrl:"<the full URL the AS redirected to>"}}`; `ok:false` ⇒ the load or tool
+  call fails with `authorization denied: <reason or "cancelled">`. With no `waitFor`, a pause during **load**
+  marks that server `failed` with `authorization pending` (isolated); during a **tool call** it returns the §10
+  `{status:"pending"}` result like any other MRTR request, and the resumed answer completes the flow and
+  sends the paused request once.
+- **mode default:** `auto` unless the config says `pause`. A `redirectUri` is required for `pause`, optional for
+  `auto` (default loopback).
+- **Frozen fallback + OAuth:** a port whose fallback still uses an MCP SDK attaches the bearer token as an
+  `Authorization` header to that SDK's HTTP transport; a 401 from the SDK path triggers the same flow once.
+  Where a port's SDK cannot take a dynamic header, that port says so in its README and `CHANGELOG.md`.
+- **Server side (§2A.2, §7C) is a follow-up** that builds on `serve`'s MCP handler from change
+  `add-mcp-serve-handler` (PR #140); the in-process dev authorization server ships with it. Until then ports
+  carry a dev AS in **test support code** only.
+
+### 2A.2 Server (`serve` MCP profile)
+
+`mcp.auth = { issuer, audience?, scopes?: {"*": [...], <tool>: [...]}, verify? }`. Absent ⇒ unprotected
+(unchanged).
+
+- **PRM** at `/.well-known/oauth-protected-resource` and `/.well-known/oauth-protected-resource/mcp`:
+  `{resource: <audience>, authorization_servers: [issuer], scopes_supported: scopes["*"],
+  bearer_methods_supported: ["header"]}`.
+- **401** for a missing token, `WWW-Authenticate: Bearer resource_metadata="<scheme>://<host>/.well-known/oauth-protected-resource/mcp", scope="<scopes[*]>"`;
+  an invalid/expired/wrong-audience token adds `, error="invalid_token"`. Body `{"error":"unauthorized"}`. The
+  token and the failure reason are never echoed.
+- **403** when the token lacks a needed scope (needed = `scopes["*"]`, plus `scopes[<tool>]` for `tools/call`):
+  same header with the **full** needed set and `, error="insufficient_scope"`. Scopes match exactly (no
+  hierarchy).
+- **Default verifier**: RS256 JWT, keys from the issuer's discovered `jwks_uri` (by `kid`), checks signature,
+  `iss`, `aud` = `audience` (default: the server's `/mcp` URL), `exp`. `verify(ctx, token) -> Principal` replaces
+  it (opaque tokens / introspection).
+- **Principal** `{subject, scopes, claims}` is visible to the tool through its `Context` during execution.
+- Header validation (`-32020`/`-32022`, §7C) runs **before** auth.
+- **Dev authorization server** (every port, one call, in-process, **not for production**): auto-approves as
+  `dev-user`, issues RS256 JWTs, serves AS metadata + JWKS, supports PKCE, CIMD, refresh, and an Entra-style
+  "reject `resource` on refresh" switch for tests.
 
 ---
 
@@ -460,6 +743,15 @@ byte-identical behavior.
   carries the native parser's own error message for a human. A host must not have to call the
   inventory surface to learn that six of eighty-seven skills vanished. A port that also has a warn
   slot MAY call it; the returned data is what conformance compares.
+- **Oversized descriptions are warned, never modified** (issue #84). A skill whose `description`
+  is longer than **1,024 Unicode code points** (the published Agent Skills limit) is reported in a
+  `warnings` list — a sibling of `skipped` on the loader result (over the exposed skills) and on
+  the S3 inventory (unfiltered) — as `{ location, reason: "oversized-description", chars }`, where
+  `chars` is the description's length in **code points** (not bytes, not UTF-16 units). Exactly
+  1,024 does not warn. Order is normative discovery order. The catalog still carries the
+  description **in full**; the catalog and the `skill` tool output stay byte-identical, and the
+  warning is the entire observable effect. A port also emits it through the warn channel it uses
+  for duplicate names (never stdout). Fixture: `conformance/skill_description/`.
 - Skill `Info { name, description, location (abs path to SKILL.md), content }`.
 - Duplicate names: first wins, log a warning.
 - **Discovery order is normative, not each ecosystem's directory walk.** "First wins" only decides
@@ -1106,6 +1398,43 @@ an object ⇒ used as-is. All Task reads/writes go through the store.
 
 ## 7C. MCP server — inbound (`serve` MCP profile)
 
+> **Target contract (change `upgrade-mcp-2026-07-28`, ports pending):** the server speaks **`2026-07-28`
+> only** over Streamable HTTP. Until a port ships it, that port serves the pre-change profile in §7C.F.
+> **BREAKING when shipped:** old-era MCP clients (`initialize`) can no longer call `serve /mcp`.
+
+Expose a toolkit as an MCP server (the gateway role is unchanged — every source's unified tools, dispatched
+straight to `Tool.execute`, no client loop). **HTTP only** (`POST /mcp`, stateless, no per-client session
+state); **no stdio transport**. `MCPServeConfig = { name?, version?, tools?, auth? }` (`auth` per §2A.2).
+
+- **Header validation, in this order** (any failure ⇒ HTTP 400 + JSON-RPC error; checked before auth):
+  1. `MCP-Protocol-Version` header missing ⇒ `-32020` `Header mismatch: MCP-Protocol-Version header missing`.
+  2. `Mcp-Method` ≠ body `method` ⇒ `-32020`.
+  3. For `tools/call` / `prompts/get` (`name`) and `resources/read` (`uri`): `Mcp-Name` (base64 sentinel
+     `=?base64?...?=` decoded) ≠ body value ⇒ `-32020`.
+  4. Header version ≠ `_meta["io.modelcontextprotocol/protocolVersion"]` ⇒ `-32020` (mismatch wins over
+     support, design decision 8).
+  5. Version ≠ `2026-07-28` ⇒ `-32022` `Unsupported protocol version`, `data: {supported:["2026-07-28"], requested}`.
+  Unknown method ⇒ HTTP 404 + `-32601`; parse error ⇒ `-32700`; notifications ⇒ 202.
+- **Only `POST /mcp` is served.** The profile is stateless and offers no server-initiated SSE stream, so any
+  other method on `/mcp` (notably `GET`) ⇒ HTTP **405** with `Allow: POST`, answered at once — never a held-open
+  stream. This holds for the pre-change profile (§7C.F) too. Pinned by `conformance/serve_mcp/cases.json`, replayed
+  by all eight ports.
+- **Every result** carries `resultType` (`"complete"` unless MRTR) and `_meta["io.modelcontextprotocol/serverInfo"]
+  = {name, version}` (defaults `toolnexus` / `0.1.0`).
+- **`server/discover`** ⇒ `{resultType, supportedVersions:["2026-07-28"], capabilities:{tools:{}, resources:{},
+  extensions:{"io.modelcontextprotocol/skills":{}}}, _meta, ttlMs:3600000, cacheScope:"public"}`.
+- **`tools/list`** ⇒ tools in deterministic order (by name, code point), `name` verbatim, `ttlMs:60000`,
+  `cacheScope:"public"`; `mcp.tools` filtering as in §7C.F.
+- **`tools/call`** ⇒ `Tool.execute`; `ToolResult` → `CallToolResult` mapping and throw ⇒ `isError:true` as in §7C.F.
+  Unknown tool ⇒ `-32602` `Unknown tool: <name>`. A tool suspension (§10 `Pending` of kind `input`) is returned as
+  `resultType:"input_required"` with `inputRequests` (form `elicitation/create`) and an opaque `requestState`;
+  the retried call carries `inputResponses`.
+- **Skills extension** (§2.7): `skills/list`, `skills/get`, `resources/read` for `skill://` URIs publish the
+  toolkit's skills; URI containment rejects with `-32602`.
+- **Auth**: §2A.2.
+
+### 7C.F Pre-change profile (frozen, until each port ships the above)
+
 Expose a toolkit **as an MCP server** so any MCP client (Claude Desktop, an IDE, another agent) can
 call its tools — the inbound mirror of §7B. Where A2A advertises **skills** and fulfils a Task through
 the whole client loop, MCP advertises the toolkit's **unified tools** (every source — mcp · skill ·
@@ -1128,12 +1457,13 @@ toolkit.serve(addr, { mcp?, onCall?, ...a2a })  -> ServeHandle { url, stop() }
 - **`initialize`** advertises `serverInfo:{name, version}` from the profile (defaults `name:"toolnexus"`,
   `version:"0.1.0"`) and `capabilities.tools`.
 - **`tools/list`** → one entry per exposed tool: `{ name, description, inputSchema }`, where `name` is
-  the toolkit `Tool.name` used **verbatim** (already sanitized at registration, §0.2 — *not*
+  the toolkit `Tool.name` used **verbatim** (plus `outputSchema` when the tool sets one) (already sanitized at registration, §0.2 — *not*
   re-sanitized, unlike §7A/§7B skill ids) and `inputSchema` is the tool's `parameters` (JSON Schema).
   When `mcp.tools` is set, the list is filtered to exactly those names; **unknown names are ignored**
   (never an error). Omit `mcp.tools` ⇒ all toolkit tools.
 - **`tools/call`** (`{ name, arguments }`) → `Tool.execute(arguments, ctx)`; map the `ToolResult` to a
-  `CallToolResult`: `output` → a `{type:"text", text}` content part, followed by one MCP content
+  `CallToolResult`: `output` → a `{type:"text", text}` content part (or the JSON of `structured` when
+  `output` is empty), `structured` → `structuredContent`, `meta` → `_meta` (both omitted when absent), followed by one MCP content
   block per non-text `ToolResult.parts` entry in order (`image`→image, `audio`→audio, `file` with
   `data`→embedded resource, `file` with `url`→`resource_link`); `isError` propagates. An
   `execute` throw becomes `isError:true` with the error text — **never crashes the server**. An unknown
@@ -1148,6 +1478,221 @@ toolkit.serve(addr, { mcp?, onCall?, ...a2a })  -> ServeHandle { url, stop() }
 Deferred (forward-compatible): a **stdio** transport (for local clients like Claude Desktop), MCP
 resources / prompts / sampling / completion (skills already reach clients via the `skill` tool), auth
 in core, and the Go CLI `serve --mcp` subcommand.
+
+### 7C.1 Embeddable MCP handler (`mcpHandler`) — ADR 0039
+
+A plain, embeddable streamable-HTTP MCP server with **generic** per-request hooks, for a host to mount
+on its own router behind its own TLS/CORS/OAuth. It has **no** tenant, user, role or storage concept:
+the host decides those inside the hooks. `serve(addr, {mcp})` above is unchanged. All types are
+toolnexus's own (never an SDK type), so every port can implement it on its own SDK or by hand.
+
+```
+toolkit.mcpHandler(cfg) -> Handler            // the port's native HTTP handler + notifyToolsChanged()
+cfg = {
+  name?, title?, version?, instructions?,     // static serverInfo (defaults "toolnexus" / "0.1.0"; title omitted when empty)
+  serverInfo?(ctx) -> {name, title?, version, instructions}   // resolved at initialize; wins over the static fields
+  protocolVersions?: string[]                 // accepted versions, newest first; default ["2025-06-18"];
+                                              // entries the port does not implement are dropped
+  authenticate?(request) -> identity | error  // every HTTP request, before JSON-RPC parsing
+  wwwAuthenticate?(request, error) -> string  // header on the 401
+  listTools?(ctx) -> Tool[]                   // per request; nil ⇒ the toolkit's tools
+  beforeCall?(ctx, tool, rawArgs) -> {kind: allow|deny|confirm, message?, result?: ToolResult}
+  confirmTimeout?,                            // elicitation round-trip bound, default 5 min
+  onCall?({name, source, ms, isError, err, resultBytes, decision, identity, sessionId})
+  listResources?(ctx) -> Resource[], readResource?(ctx, uri) -> ResourceContent[]
+  listPrompts?(ctx) -> Prompt[], getPrompt?(ctx, name, args) -> {description?, messages:[{role, text}]}
+  sessionIds?: { generate(ctx), validate(ctx, id) -> bool, terminate(ctx, id) }   // default in-memory
+  stateless?: bool                            // no Mcp-Session-Id checked
+  statelessSessionId?: string                 // stateless only: echoed as Mcp-Session-Id on initialize, never validated
+}
+identityFrom(ctx), requestFrom(ctx), mcpSessionIdFrom(ctx), mcpRequestMetaFrom(ctx)  // params._meta
+Tool.annotations? = { title?, readOnlyHint?, destructiveHint?, idempotentHint?, openWorldHint? }
+```
+
+- **Versions**: a port implements `2025-06-18` and `2025-11-25`, and accepts only what
+  `protocolVersions` lists of those. `2025-11-25` differs on the server side only by optional fields
+  plus one rule a port MUST apply for a request carrying `MCP-Protocol-Version: 2025-11-25`: invalid
+  tool arguments are an `isError` tool result, not `-32602`. `2025-03-26` is **not** accepted (it
+  permits JSON-RPC batches, which this surface rejects). `2026-07-28` is implemented as an **opt-in**
+  stateless wire (§7C.2) and is never a default; `initialize` never negotiates it (a legacy client
+  asking for it gets the newest legacy version listed).
+- **`_meta`**: a request's `params._meta` is exposed to every hook and tool via `mcpRequestMetaFrom(ctx)`;
+  `ToolResult.meta` leaves as the result's `_meta`.
+- **Transport**: `POST` JSON-RPC ⇒ `application/json`, or
+  `text/event-stream` when a server→client request is sent first; notifications and client responses
+  ⇒ `202`; `GET` with `Accept: text/event-stream` ⇒ a stream for server notifications, else `405`;
+  `DELETE` ⇒ terminate the session. `initialize` echoes the client's protocol version when supported,
+  else the newest supported, and returns `Mcp-Session-Id` (stateful). A non-initialize request without
+  a session ⇒ `400`; an id `validate` rejects ⇒ `404`; an unsupported `MCP-Protocol-Version` header ⇒
+  `400`; a JSON array body (batch) ⇒ JSON-RPC `-32600`; a non-JSON content type ⇒ `415`.
+- **Auth**: `authenticate` error ⇒ HTTP `401` with `WWW-Authenticate` from `wwwAuthenticate` when it
+  returns non-empty. The identity is opaque and reaches every hook and tool through the call context.
+- **Tools**: `tools/list` and the `tools/call` lookup both use `listTools(ctx)`; a name outside it ⇒
+  JSON-RPC `-32602` "tool not found: <name>", and the tool is **never executed**. Tools need not be
+  registered in the toolkit. `capabilities.tools.listChanged` is `true`; `notifyToolsChanged()` sends
+  `notifications/tools/list_changed` on every open GET stream. Wire entry: `{name, description,
+  inputSchema, annotations?}` — `annotations` verbatim from `Tool.annotations`, else derived from
+  `Tool.hints` (`readOnlyHint`/`destructiveHint`/`openWorldHint`), else omitted. Results map exactly as §7C.
+- **Gate**: `allow` (also the zero value) runs the tool. `deny` returns `result` when set, else an
+  `isError` result with `message` (default "denied"); a `beforeCall` error is a `deny` with its text.
+  `confirm`: when the session's client declared `capabilities.elicitation` at initialize, send
+  `elicitation/create` `{message, requestedSchema:{type:object, properties:{confirm:{type:boolean}}}}` on
+  the same POST's event stream and wait (≤ `confirmTimeout`); `accept` (with `confirm` not `false`) ⇒ run,
+  anything else ⇒ `isError` "declined"; a failure/timeout ⇒ `isError` "confirmation failed: …". When the
+  client cannot elicit (or `stateless`), return `result` when set, else `isError` "confirmation required:
+  <message>". Any nonce/re-call flow is the host's, built from `result` + its own `beforeCall`.
+- **onCall** fires once per `tools/call` (also for deny/confirm outcomes); its throws are isolated.
+- **Resources/prompts**: a nil `listResources`/`listPrompts` ⇒ the capability is not advertised and the
+  methods answer `-32601`.
+- **Sessions**: client capabilities are cached per process on the instance that saw `initialize`, and
+  an elicitation answer is delivered only to the instance holding the waiting call — a multi-instance
+  host needs sticky routing for confirms. The session *store* is always the host's.
+
+Left to the host: identity/tenant/role mapping, OAuth and RFC 9728 metadata, CORS, TLS, rate limits,
+what backs `sessionIds`, branding values.
+
+### 7C.2 MCP 2026-07-28 on `mcpHandler` (opt-in) — ADR 0040
+
+The server half of change `upgrade-mcp-2026-07-28` (client: §2, §2A.1). Enabled by listing
+`"2026-07-28"` in `protocolVersions`; absent ⇒ the handler is byte-identical to §7C.1 (and a 2026
+client's `server/discover` gets the legacy `400`, which is the client's §2.2a fallback trigger).
+The wire is **stateless**: no `initialize`, no `Mcp-Session-Id`, no server→client request, no GET
+stream. Every §7C.1 hook keeps its meaning; nothing about tenants, users or storage is added.
+
+```
+cfg.protocolVersions: ["2026-07-28"]                 // 2026 only
+cfg.protocolVersions: ["2026-07-28", "2025-06-18"]   // both wires on one mount
+cfg.listSkills?(ctx) -> Skill[]                      // SEP-2640 skills extension; nil ⇒ not advertised
+Skill = { name, frontmatter?: {..}, files: [{path, text}] }   // files include "SKILL.md"; paths relative, "/"-separated
+loadMcpSkills(dir) -> Skill[]                        // helper: **/SKILL.md under dir
+MCPServerAuth { issuer, audience?, resourcePath? ("/mcp"), scopes?: {"*": [..], <tool>: [..]}, verify?(ctx, token, audience) -> Principal, httpClient? }
+  .authenticate(request)  -> Principal | MCPAuthError   // plug into cfg.authenticate
+  .metadata()             -> HTTP handler for the RFC 9728 document
+Principal = { subject, scopes, claims }              // what identityFrom(ctx) returns under MCPServerAuth
+MCPAuthError = { status (401|403), challenge, reason } // any authenticate hook may return it
+// NOT library surface: the dev authorization server below is test/interop tooling in every port
+```
+
+**Routing (pinned).** With 2026-07-28 the only accepted version, every POST is a 2026 request
+(including `initialize`, which then fails header validation) and GET/DELETE ⇒ `405` (`Allow: POST`).
+With legacy versions also listed, a POST is a 2026 request iff its method is not `initialize`, its
+`MCP-Protocol-Version` header is absent or not a listed legacy version, and (the method is
+`server/discover`, or an `Mcp-Method` header is present, or `params._meta` carries
+`io.modelcontextprotocol/protocolVersion`); everything else is served by §7C.1 unchanged. The header
+alone never selects the 2026 wire (issue #150): a real 2026 client always sends `Mcp-Method`, so a request
+with `MCP-Protocol-Version: 2026-07-28` and neither marker is a legacy request, and the §7C.1 wire accepts
+`2026-07-28` in that header whenever it is listed. `initialize` never answers `2026-07-28`, which has no
+`initialize`: it negotiates among the listed legacy versions only (newest listed when the requested one is
+not among them), and a client that wants 2026 uses `server/discover`. Content type
+(`415`) and body size (`413`) are checked as in §7C.1; on a 2026-only handler a JSON array body ⇒
+`400` `-32600` "batch requests are not supported", an unparsable body ⇒ `400` `-32700` "Parse error".
+
+**Order:** notification (no `id`) ⇒ `202` · header validation · `authenticate` · dispatch.
+
+**Header validation** (HTTP `400`, JSON-RPC error, before auth), in this order:
+1. `MCP-Protocol-Version` missing ⇒ `-32020` `Header mismatch: MCP-Protocol-Version header missing`.
+2. `Mcp-Method` ≠ body method ⇒ `-32020` `Header mismatch: Mcp-Method header value '<h>' does not match body value '<b>'`.
+3. `tools/call`, `prompts/get` (`params.name`), `resources/read` (`params.uri`): `Mcp-Name` (the
+   `=?base64?<std-base64>?=` sentinel decoded) ≠ body value, or the header is absent or its sentinel does not
+   decode (both reported as `''`, and a mismatch even when the body value is `''`) ⇒ `-32020`
+   `Header mismatch: Mcp-Name header value '<h>' does not match body value '<b>'`.
+4. header version ≠ `params._meta["io.modelcontextprotocol/protocolVersion"]` (absent ⇒ `''`) ⇒ `-32020`
+   `Header mismatch: MCP-Protocol-Version header value '<h>' does not match _meta value '<m>'`.
+5. version ≠ `2026-07-28` ⇒ `-32022` `Unsupported protocol version`, `data: {supported: ["2026-07-28"], requested: <m>}`.
+
+**Results.** Every result carries `resultType` (`"complete"`, or `"input_required"` for MRTR) and
+`_meta["io.modelcontextprotocol/serverInfo"] = {name, title?, version}` (from `serverInfo(ctx)` / the
+static fields, defaults `toolnexus` / `0.1.0`), merged into any `_meta` the result already has
+(`ToolResult.meta` keys first, the serverInfo key set last). JSON-RPC errors carry no `_meta`.
+Unknown method ⇒ HTTP `404` `-32601` `Method not found: <method>`; other errors are HTTP `200`.
+`cacheScope` is `"private"` when `authenticate` is configured, else `"public"` (except discover).
+
+| method | result (besides `resultType` + `_meta`) |
+|---|---|
+| `server/discover` | `supportedVersions: ["2026-07-28"]`, `capabilities: {tools:{}, resources:{}` iff `listResources` or `listSkills`, `prompts:{}` iff `listPrompts`, `extensions: {"io.modelcontextprotocol/skills": {}}` iff `listSkills}`, `instructions` when non-empty, `ttlMs: 3600000`, `cacheScope: "public"` |
+| `ping` | — |
+| `tools/list` | `tools` = `listTools(ctx)` (else the toolkit's) **sorted by name (code point)**, each entry exactly §7C.1's wire entry; `ttlMs: 60000`, `cacheScope` |
+| `tools/call` | below |
+| `skills/list` | `skills: [{uri: "skill://<name>/SKILL.md", frontmatter}]` sorted by name; `ttlMs: 60000`, `cacheScope` |
+| `skills/get {uri}` | `skill: {uri, frontmatter, resources: [{uri: "skill://<name>/<path>", digest: "sha256:<hex of the UTF-8 text>", size: <UTF-8 byte length>}]}` (files sorted by path); bad URI ⇒ `-32602` `Invalid skill URI: <why>`; unknown ⇒ `-32602` `Unknown skill: <uri>` |
+| `resources/read {uri}` | `skill://` URI with `listSkills` set: `contents: [{uri, mimeType: "text/markdown" for .md else "text/plain", text}]`, `ttlMs: 60000`, `cacheScope`; bad URI ⇒ `-32602` `Invalid resource URI: <why>`; unknown ⇒ `-32602` `Resource not found: <uri>`. Any other URI ⇒ `readResource` as §7C.1 (error `-32002`) |
+| `resources/list`, `prompts/list`, `prompts/get` | §7C.1's payload |
+
+Frontmatter defaults to `{name}`; `loadMcpSkills` sets `{name, description}` (§3 parsing, trimmed
+strings), walks `**/SKILL.md` without following symlinks, skips a skill whose frontmatter has no
+`name`, and includes every regular file under the skill directory that is valid UTF-8 (binary files are
+skipped: the wire is text). **URI containment** (§2.7): strip `skill://`, percent-decode once, then
+reject a leftover `%`, `\` or NUL (`skill URI has encoded, backslash or NUL characters`), fewer than two
+`/`-segments (`skill URI needs skill://<name>/<path>`), or any empty / `.` / `..` / `:`-containing
+segment (`skill URI path escapes the skill (empty, '.', '..' or ':' segment)`); not `skill://` ⇒ `not a
+skill:// URI`; a decode failure ⇒ `bad percent-encoding`.
+
+**`tools/call`.** Lookup as §7C.1 (`listTools`); unknown ⇒ `-32602` `Unknown tool: <name>`. Arguments
+that are present and not an object ⇒ `isError` result `invalid arguments: must be an object` (the
+2025-11-25 rule). Results map exactly as §7C (text / structured / parts / `isError` / `meta`).
+`beforeCall` runs on every round: `deny` as §7C.1. **MRTR replaces elicitation:**
+
+- `requestState` is `base64url-nopad(compact JSON {"tool":"<name>"[, "confirmed":true]})` — exactly those
+  keys in that order. It is **not** integrity-protected (a client may equally answer "accept"); a
+  `requestState` that does not decode or names another tool is ignored. `beforeCall` still runs on a
+  retry, so a forged state never bypasses `deny`.
+- `confirm`: when the state says `confirmed`, the tool runs. Else, when the request has a valid state
+  and `inputResponses.confirm`: `action` ≠ `accept`, or `content.confirm === false` ⇒ `isError`
+  `declined`; otherwise the tool runs (the confirm round is consumed: it is not passed on as an
+  answer). Else, when `params._meta["io.modelcontextprotocol/clientCapabilities"]` has `elicitation`:
+  answer `input_required` with `inputRequests: {"confirm": {method: "elicitation/create", params:
+  {mode: "form", message: <message or "Confirm this action?">, requestedSchema: {type: "object",
+  properties: {confirm: {type: "boolean", title: "Confirm", description: <message>}}}}}}` and
+  `requestState` for `{tool}`. Else the §7C.1 no-elicitation result (`result`, or `confirmation
+  required: <message>`).
+- **Tool suspension (§10).** When the request has a valid state and `inputResponses` holds exactly one
+  entry `<key>: {action, content?}`, the tool's context carries `Answer{id: <key>, ok: action ==
+  "accept", data: content, reason: (ok ? none : action == "decline" ? "declined" : "cancelled")}`.
+  When `execute` returns a pending `Request` (no error), the result is `input_required` with
+  `inputRequests: {<request.id>: …}` and `requestState` for `{tool, confirmed?}` (confirmed carried
+  over from a valid state for the same tool only): `kind:"authorization"` with a `url` ⇒ `{method:"elicitation/create", params:{mode:"url",
+  message: prompt, url, elicitationId: id}}`; any other kind ⇒ `{method:"elicitation/create",
+  params:{mode:"form", message: prompt, requestedSchema: request.data.schema or {type:"object",
+  properties:{}}}}`. The tool MUST be idempotent (§10): the retry re-executes it.
+- `onCall` fires once per round (an `input_required` round reports `isError:false` and its decision).
+
+**Auth (`MCPServerAuth`, §2A.2).** `authenticate(request)`: no `Authorization: Bearer <t>` ⇒ `401`;
+`verify` (default: RS256 JWT, key by `kid` from the issuer's `jwks_uri` discovered in §2A.1 step 3
+order with metadata `issuer` equal to the issuer, unknown `kid` refetches at most every 30 s; checks
+signature, `iss`, `aud` (string or array) = audience, `exp` > now) fails ⇒ `401` with `,
+error="invalid_token"`; a missing scope ⇒ `403` with the **full** needed set and `,
+error="insufficient_scope"`. Needed = `scopes["*"]` plus, when the `Mcp-Method` header is `tools/call`,
+`scopes[<decoded Mcp-Name>]` (de-duplicated, order kept) — so per-tool scopes apply on the 2026 wire;
+older wires check `scopes["*"]` only. Challenge: `Bearer resource_metadata="<metadata URL>"` then `,
+scope="<needed joined by space>"` when non-empty, then the error. Audience = `audience`, else
+`<scheme>://<Host><resourcePath>` of the request; metadata URL = origin of `audience` +
+`/.well-known/oauth-protected-resource` + its path, else `<scheme>://<Host>/.well-known/oauth-protected-resource<resourcePath>`.
+The returned `Principal` is the identity (`identityFrom(ctx)`). The handler answers any
+`MCPAuthError` (both wires) with its status, `WWW-Authenticate` = a non-empty `wwwAuthenticate` hook
+result else the error's challenge, `Content-Type: application/json` and body `{"error":"unauthorized"}`;
+other `authenticate` errors keep §7C.1's plain `401`. The token and the failure reason never appear on
+the wire. `metadata()` answers `GET /.well-known/oauth-protected-resource` and
+`…/oauth-protected-resource<resourcePath>` with `{resource: <audience>, authorization_servers:
+[issuer], scopes_supported: scopes["*"] or [], bearer_methods_supported: ["header"]}`; anything else `404`.
+
+**Dev authorization server — test and interop tooling, NOT library surface.** No port exports it: each
+keeps it in its test tree (Go: `internal/devauth`, used by the tests and `internal/interop/mcp2026server`),
+and a host brings its own authorization server, which `MCPServerAuth` verifies. Every port's tests use one
+that behaves as follows (never production): plain
+HTTP on `127.0.0.1:<random>`, issuer `http://127.0.0.1:<port>` (clients need `auth.allowHttp`);
+`/.well-known/oauth-authorization-server` (code flow, PKCE `S256` only, `authorization_response_iss_parameter_supported:
+true`, `client_id_metadata_document_supported: !noCimd`), `/jwks` (one RSA key, `kid:"dev"`),
+`/authorize` (auto-approves as `dev-user`; pre-registered `clients` with exact redirect match, loopback
+redirects match on any port; an `http(s)://` client_id is fetched as a Client ID Metadata Document whose
+`client_id` must equal the URL and `client_name` be non-empty; an unknown client or redirect ⇒ `400`,
+never a redirect; missing `resource` ⇒ `error=invalid_target`), `/token` (code single-use + PKCE +
+client/redirect/resource match; refresh rotation; `rejectRefreshResource` ⇒ `invalid_target` when a
+refresh carries `resource`; `secrets` for confidential clients via basic or post). Access tokens are
+RS256 JWTs `{iss, sub:"dev-user", aud:<resource>, scope, client_id, jti, iat, exp}`. **No dynamic
+client registration.**
+
+Conformance: `conformance/mcp_handler/cases.json` scenarios `mcp2026_*`; interop: `interop/mcp2026/matrix.sh` (8 clients × 8 servers)
+(the Go 2026 client of change `upgrade-mcp-2026-07-28` against this server).
 
 ---
 
@@ -1512,8 +2057,8 @@ wired (`fromDir`, or `memoryTool(dir)` added to `uses.tools`). One tool, three a
 | action | effect |
 |--------|--------|
 | `add` | append an entry |
-| `replace` | swap an existing substring (`with`) |
-| `remove` | delete an existing substring |
+| `replace` | swap the **first** occurrence of an existing substring (`with`) |
+| `remove` | delete the **first** occurrence of an existing substring |
 
 `target` = `self` (`MEMORY.md`, default) or `user` (`USER.md`). **All actions write to disk.**
 A `replace`/`remove` whose substring is absent ⇒ loud `isError`. The tool **does not** mutate
@@ -1532,11 +2077,168 @@ runtime's **injectable clock** (fixtures run on a virtual clock). Inbound **chan
 host's job**: deliver external events by calling `post`/`wake` — the library owns the
 trigger→turn seam, not a scheduler or gateway.
 
+### Memory hierarchy (opt-in; fixture `examples/memory-hierarchy/`)
+
+Three tiers on existing seams. **Every option below is opt-in; absent, the soul, the `memory`
+tool (schema, description, behavior) and the files on disk are byte-identical to the above.**
+
+| tier | file(s) | injected? | written by | read by |
+|------|---------|-----------|------------|---------|
+| index | `MEMORY.md` (+ `USER.md`) | yes, at session start | `memory` target `self`/`user` | the soul |
+| notes | `<home>/memory/<slug>.md` | **never** | `memory` target `note:<slug>` | `memory` `read`/`list` |
+| ground truth | a `ConversationStore` | never | the client loop | `transcriptSearchTool` |
+
+**Index cap — `fromDir(dir, { memoryIndexCap })`** (also `composeSoul(dir, { memoryIndexCap, notes })`).
+Value `true` ⇒ preset `{maxLines: 200, maxBytes: 25600}`; an object's missing field takes the
+preset's; a value `< 1` or non-integer ⇒ construction error. *Permitted per-port difference:*
+Go's `IndexCap` is a struct of plain `int`s, so a zero field means "missing ⇒ the preset's"
+(`&IndexCap{}` is the preset) and only a negative field is rejected; every other port rejects `0`. Applies to `MEMORY.md` only,
+**after** the 2 MB read cap and **before** the section `trim`. Algorithm (exact):
+1. `lines` = content split on `"\n"`; if content ends with `"\n"`, drop the final empty element.
+2. If `len(lines) <= maxLines` and UTF-8 length of `join(lines, "\n") <= maxBytes` ⇒ content unchanged.
+3. Else `kept` = first `maxLines` lines; while `len(kept) > 1` and UTF-8 length of
+   `join(kept, "\n") > maxBytes`, drop the last; if the lone remaining line still exceeds
+   `maxBytes`, cut it at the last whole code point whose UTF-8 end is `<= maxBytes`.
+4. Result = `join(kept, "\n")` + notice, where the notice is exactly (`<N>`/`<B>` = the cap
+   values, not the kept counts):
+   - notes on: `\n\n[MEMORY.md index truncated at <N> lines / <B> bytes. Keep MEMORY.md a short index; move detail into notes (memory target "note:<slug>").]`
+   - notes off: `\n\n[MEMORY.md index truncated at <N> lines / <B> bytes. Keep MEMORY.md a short index (keep entries short).]`
+
+Disk is never touched. `USER.md` is not capped.
+
+**Notes tier — `fromDir(dir, { notes: true })` / `memoryTool(dir, { notes: true })`.**
+Notes off ⇒ the tool is exactly the one above (an unrecognised `target` still means `self`;
+`read`/`list` ⇒ `unknown action: <action>`). Notes on, the tool becomes:
+
+- description (exact): `Persist durable memory. MEMORY.md is a short index loaded at the start of every session; put detail in notes (target note:<slug>, stored in memory/<slug>.md, never loaded automatically) and point to them from the index. Record what will change a future decision. action=add appends an entry; replace swaps the first occurrence of an existing substring (with); remove deletes it; read returns a file; list lists the notes. target=self (MEMORY.md, default), user (USER.md) or note:<slug> (slug: lowercase letters, digits, '.', '_', '-'). Writes persist to disk and load at the START of your NEXT session — they do NOT change your current context.`
+- schema: `action` enum `["add","replace","remove","read","list"]`; `target` a plain string (no enum)
+  described `self=MEMORY.md (default), user=USER.md, note:<slug>=memory/<slug>.md`; `text`/`with`
+  as above; `required: ["action"]` (property order as listed; fixture-pinned).
+- `target` resolution: absent ⇒ `self`; `self`/`user` as above; `note:<slug>` ⇒
+  `<home>/memory/<slug>.md` when slug matches `^[a-z0-9][a-z0-9._-]{0,63}$` **and** does not
+  contain `..`, else `isError` `invalid note slug: <slug>` with **no I/O**. The match is anchored at
+  the true end of the string — `abc\n` is invalid (use `\z` / a full match where `$` also
+  matches before a final newline); 64 characters is the longest valid slug; anything else ⇒
+  `isError` `unknown target: <target>`.
+- `add`/`replace`/`remove`: same semantics as `self` (in every target, `replace` inserts
+  `with` **literally** — `$&`, `$1`, `$$`, `\1`, `${1}` are never expanded); `text` not a string ⇒ `isError`
+  `text is required`. `add` to a missing note creates it (and `memory/`). Success:
+  notes ⇒ `ok (<action> → memory/<slug>.md)`; `self`/`user` ⇒ unchanged
+  (`ok (<action> → MEMORY.md); loads next session`).
+- `read`: the file's content with the 2 MB byte cap + bootstrap truncation notice (never
+  written back); missing file ⇒ `isError` `not found: <target>` (`<target>` as given, `self`
+  when absent).
+- `list` (ignores `target`): one line `<slug>\t<bytes>` per regular file (checked **without
+  following symlinks** — a symlink, dangling or not, and a directory are skipped, never an error) `memory/<slug>.md` whose
+  slug is valid, sorted by slug ascending **by explicit sort** (code-point order — never rely on
+  directory order), joined by `"\n"`, no trailing newline; none ⇒ `(no notes)`. `log.md` is listed.
+- Notes are **never** injected into the soul.
+
+**Write safety (always on).** Every `memory` write is atomic: a temp file in the same
+directory, flushed (fsync), renamed over the target; an existing file's permission bits are kept.
+Read-modify-write (`add`/`replace`/`remove`) reads the **full** file (never the capped view) and
+is serialized per **resolved absolute path** — symlinks resolved (a file that does not exist
+yet: its directory resolved, the name appended), so a home reached through a symlink and through
+its real path shares one lock — within one runtime/process (two tools over one home
+in one runtime lose nothing). Across processes the last rename wins (not fixed). On a case-insensitive filesystem
+two spellings of one path may map to two locks — host-dependent, not normalized.
+*Permitted per-port difference:* clojure writes in place (no temp file + rename — `koine.fs`
+has no rename yet) and its per-path lock is an in-process lock only; serialization within one
+runtime and full-file read-modify-write hold, atomicity against a crash mid-write does not.
+Tracked in `openspec/changes/add-memory-hierarchy` (tasks).
+
+**`transcriptSearchTool(store, { maxResults? = 20, snippetChars? = 200, name? = "transcript_search" })`** —
+a read-only `Tool` over a `ConversationStore`. Construction throws
+`transcriptSearchTool: the store must implement list()` when the store has no `list()`; a
+`maxResults`/`snippetChars` `< 1` throws. Description (exact): `Search past conversation transcripts — the ground truth of what actually happened. Case-insensitive substring match over message text. Returns one line per matching message: <conversationId>#<index> <role>: <snippet>. Read-only.`
+Schema: `query` (string, `Text to find (case-insensitive substring).`), `conversationId`
+(string, `Search only this conversation.`), `limit` (integer, `Most hits to return (default and max <maxResults>).`); `required: ["query"]`.
+
+- **Message text** = pieces joined by `"\n"`: string `content`; for array content, each part in
+  order — `text` parts' `text`, `tool_use` parts' `input` as compact JSON (no spaces; object keys
+  **sorted** lexicographically by code point, recursively for nested objects; arrays keep their
+  order; non-ASCII — U+2028/U+2029 included — emitted as-is, never HTML-escaped (`<`, `>`, `&` raw too),
+  `JSON.stringify` escaping otherwise), `tool_result` parts' content (recursively, same rules); other parts (images…)
+  contribute nothing; then each OpenAI `tool_calls[].function.arguments` string verbatim. The
+  text is then **normalized**: every run of ASCII whitespace (space, `\t \n \r \f \v`) ⇒ one
+  space, leading/trailing space trimmed.
+- **Query** is normalized the same way; empty ⇒ `isError` `query is required` **before** the
+  store is read. `limit` present (JSON `null` counts as present) and not an integer `>= 1` ⇒ `isError` `limit must be an integer >= 1`;
+  else effective limit = `min(limit, maxResults)` (absent ⇒ `maxResults`).
+- **Match** = substring after **ASCII-only** case folding (`A–Z` ⇒ `a–z`; no Unicode
+  lowercasing). One hit per message, at its first match. Positions and lengths are in **code
+  points**.
+- **Order**: conversations in `list()` order (newest first) — or only `conversationId`
+  (`get` it; absent ⇒ no hits) — messages ascending by 0-based index.
+- **Line** per hit: `<conversationId>#<index> <role>: <snippet>` (`role` = the message's `role`,
+  `unknown` if not a string). Snippet: whole text if it is `<= snippetChars` code points; else a
+  window of `snippetChars` code points starting at
+  `clamp(matchStart + floor(queryLen/2) - floor(snippetChars/2), 0, len - snippetChars)`,
+  prefixed `…` if it does not start at 0 and suffixed `…` if it does not reach the end
+  (the `…` are not counted).
+- **Output**: hit lines joined by `"\n"`; when total hits exceed the limit, a final line
+  `(+<k> more)` (`k` = hits not shown); no hits ⇒ `no matches`. Never writes.
+
+### Dreaming (fixture `examples/dreaming/`; build gate: Mt. Moon)
+
+A dream is a heartbeat pass in which a persona checks its memory against the transcripts and
+tidies it. One preset, one option — no new verb or loop (ADR 0016/0017 stand).
+
+**`DREAM_PROMPT`** — byte-identical in every port (lines joined by `"\n"`, no trailing newline):
+
+```
+You are dreaming: an offline pass over your own memory. Memory exists so that a future session decides better. MEMORY.md is a short index loaded at the start of every session; notes (memory target "note:<slug>") hold the detail; the transcripts (transcript_search) are the ground truth of what actually happened.
+Work in this order:
+1. Verify: read MEMORY.md and the notes it points to (memory read, memory list) and check each claim against the transcripts. Fix or remove a claim only when it is contradicted by the transcripts; a claim they do not mention stays (transcripts may be pruned).
+2. Demote: move detail out of MEMORY.md into a note and leave a one-line [[slug]] pointer, so the index stays short.
+3. Merge: fold duplicate or conflicting notes into one.
+4. Repair links: point every [[slug]] at an existing note or create it; give every note an index line.
+5. Log: if you changed anything, append exactly one entry with memory add, target "note:log", text starting "dream: " and naming every change and why.
+If nothing needs changing, write nothing and reply HEARTBEAT_OK.
+```
+
+**`dreamer(dir, { store, instructions?, name?, model? })`** returns a plain agent:
+- tools **exactly** `[memory (notes on, over dir), transcript_search (over store)]`, in that
+  order — never the persona's own tools;
+- the dreamer's `memory` tool is the notes-on tool behind a **dream guard** (same name,
+  description and schema), checked before anything else: `target` `user` (any action) ⇒
+  `isError` `dreamer: USER.md is off-limits`; `target` `note:log` with `action` `replace` or
+  `remove` ⇒ `isError` `dreamer: memory/log.md is append-only`. Nothing is read or written on a
+  refusal. `add`/`read` on `note:log` and every other target behave as the plain tool, so the
+  audit trail can only grow and the user model is never touched by a dream;
+- soul = `## HEARTBEAT.md\n\n` + parts joined by `"\n\n"`, parts = `DREAM_PROMPT`, then
+  `<dir>/DREAM.md` (2 MB cap, trimmed, only if non-empty), then `instructions` (trimmed, only if
+  non-empty). Because the prompt sits in a `HEARTBEAT.md` section, the ordinary
+  `HEARTBEAT_PROMPT` wake drives a pass and `HEARTBEAT_OK` keeps an idle pass silent;
+- `name` default `<basename(dir)>-dreamer`; `model` default `"inherit"` (the persona's client —
+  docs recommend a cheap model); `does` = `dreams over the memory in <dir>`;
+- `store` missing ⇒ throws `dreamer: store is required`; a store without `list()` ⇒ the
+  `transcriptSearchTool` error. Schedule it with `startAgent(d, …, { everyMs })` or run one
+  pass with `d.run(HEARTBEAT_PROMPT, …)`.
+
+**`fromDir(dir, { dream: { everyMs, store, instructions? } })`** — opt-in sugar. `everyMs <= 0`
+⇒ throws. When the returned persona is started with `startAgent`, a
+`dreamer(dir, { store, instructions, name: "<persona name>-dreamer" })` is registered on the
+**same runtime**, spawned under its root, and given its own heartbeat at `everyMs` (same tick/
+coalesce/wake rules as above); `stop()` stops both. If the persona's agent tree already registers
+`<persona name>-dreamer`, `startAgent` throws `startAgent: dreamer name collision: <name> is already registered`
+before anything is spawned or scheduled; if the dreamer otherwise fails to spawn, the persona's
+heartbeat is cancelled before the error propagates (nothing keeps running). Dreamer replies never reach `onBeat` /
+`beats`. `run()`/`asTool()` of the persona never dream. Absent `dream` ⇒ only the persona is
+registered and spawned (byte-identical).
+
+**`memory/log.md`** — the audit/revert trail. A pass that changes anything appends exactly one
+entry through the memory tool (`add`, target `note:log`, text beginning `dream: `), so the on-disk
+entry is `- dream: <every change and why>\n`. A pass that changes nothing writes nothing. The
+library does not enforce the log's content or the `[[slug]]` link syntax — `DREAM_PROMPT` asks for them —
+but the dream guard (above) makes the log append-only and `USER.md` unreachable for the dreamer.
+No pre-pass snapshot is taken (not done; the log is the trail).
+
 ### Composition, not API
 
-Higher patterns are recipes over the above, no new surface: **dream / consolidation** = a
-`startAgent` whose `HEARTBEAT.md` says "fold notes into `MEMORY.md` via the memory tool"; a
-**channel assistant** = the host's inbound handler calling `post`/`wake`.
+Higher patterns are recipes over the above: **dream / consolidation** ships as the one preset,
+`dreamer()` (above) — a plain agent over the `memory` tool and `transcriptSearchTool`, not a new
+verb or loop; a **channel assistant** = the host's inbound handler calling `post`/`wake`.
 
 ---
 
@@ -1579,6 +2281,64 @@ The compacted transcript is `[leading system prompt (verbatim), summary system m
   unchanged; only the body between it and the tail is summarized.
 
 Absent a `compactor`, a run is byte-identical to today (compaction is entirely opt-in).
+
+### 7F.1 Reactive compaction on context overflow (change `add-reactive-compaction`, issue #194)
+
+A proactive compactor works from an **estimate**; the provider is the only authority on whether
+a prompt fits. When the provider rejects a request because the prompt is too long, the loop can
+compact and retry instead of failing the run — opt-in, through one client option:
+
+| option | meaning |
+|--------|---------|
+| `compactOnOverflow` | a hook with the `beforeLLM` signature (§8) — typically a `compactor(...)` with a **tighter** budget than the proactive one. Idiomatic spelling per port (`compactOnOverflow` / `CompactOnOverflow` / `compact_on_overflow` / `:compact-on-overflow`). **Absent ⇒ byte-identical**: an overflow surfaces as the typed `LlmHttpError` exactly as today. |
+
+**Detection (`isContextOverflow(status, body)`, exported from every port, idiomatic name).** True
+iff **both**:
+
+1. `status` is `400` or `413`, and
+2. the provider's (redacted) error body, lowercased, contains at least one of these markers:
+   `context_length_exceeded` (OpenAI `error.code`), `maximum context length` (OpenAI message),
+   `prompt is too long` (Anthropic message), `prompt_too_long`, `request_too_large` (Anthropic
+   413 `error.type`), `context window` (OpenAI-compatible gateways: "exceeds the context window").
+
+Nothing else counts: a 413 with no marker, a marker under any other status (e.g. a 429 or 500
+mentioning the context length), and transport errors are not overflows. Detection runs on the
+**final** failure of an LLM call — after the §8 retry layer and `onError` have finished (none of
+`400`/`413` is in the default retryable set, so in practice that is the first attempt).
+
+**Reaction.** On an overflow, with `compactOnOverflow` set, the loop calls the hook with
+`{messages, tools, model, turn}` (the working transcript and the values of the failing call). If
+it returns `messages` that are **strictly fewer** than the working transcript, they replace the
+working transcript (exactly as a `beforeLLM` rewrite does — they flow into `RunResult.messages`,
+the store, and every later turn) and the **same turn** is re-sent with the same tools and model.
+`beforeLLM` does **not** run again for the retry; the retry does **not** consume a turn (`turn`,
+`maxTurns` and `RunResult.turns` count turns, not attempts). If the hook returns nothing, or a
+transcript that is not shorter, the run fails at once with `ContextOverflowError` (below).
+
+**Breaker — "rapid refill", pinned.** The loop keeps two counters per run: `okSince` (successful
+LLM calls since the last reactive compaction) and `streak` (reactive compactions in the current
+rapid chain, initially `0`). An overflow is a **rapid refill** when `streak > 0` and
+`okSince < 2` — the transcript was compacted and overflowed again within fewer than two
+successful LLM calls (the retry itself counts as one when it succeeds). On each overflow:
+
+1. not a rapid refill ⇒ `streak = 0`;
+2. `streak == 3` ⇒ fail with `ContextOverflowError` (`compactions = 3`); no hook call;
+3. otherwise call the hook (Reaction, above); on success `streak += 1`, `okSince = 0`, retry.
+
+Every successful LLM call does `okSince += 1`. So a run fails after **3 compactions in a row that
+did not buy at least two successful calls each**; a run whose overflows are spaced by ≥ 2
+successful calls compacts as often as it needs.
+
+**`ContextOverflowError`** — typed, idiomatic per port (a subclass/variant of the port's error
+type), carrying `compactions` (the streak at failure: `3` from the breaker, else the number of
+compactions in the current chain), `status` and `body` (from the last provider error, same
+redaction as `LlmHttpError`). Its message is pinned byte-identical:
+`context overflow: <compactions> reactive compaction(s) did not make the prompt fit`.
+It is a failure, never a §10 `Pending`; an interrupted-turn save (§8) applies as for any error.
+
+Both loops (`run` and `stream`), both styles, and the resume paths apply it identically. In
+`stream` the overflow is an HTTP error before any event of that turn, so nothing is emitted for
+the failed attempt. Shared fixture: `conformance/reactive_compaction/cases.json`.
 
 ---
 
@@ -2324,9 +3084,66 @@ Before this change every call of a response ran concurrently with no cap, so two
 one file could race. A host that relied on unlabelled tools running in parallel marks them
 `readOnly` or gives them a predicate.
 
+### Stop-reason recovery (change `add-stop-reason-recovery`, opt-in)
+
+`ClientOptions.stopRecovery` (idiomatic spelling per port: `stopRecovery` / `stop_recovery` /
+`StopRecovery` / `:stop-recovery`), a boolean, **default `false`**. Off, the loop is
+byte-identical to the paragraphs above. On, three response shapes that today end a run badly are
+answered with one pinned user message and another model call instead. It applies in every loop
+that runs the provider: `run` and `stream`, both styles, the resume paths and §7D agent runs.
+`translate` (§11) and the in-process client are unaffected (they have no loop / no stop reason).
+
+Each response is classified **in this order**; the first rule that matches acts:
+
+1. **Malformed tool call** — the response has tool calls and at least one has arguments that are
+   not a JSON object. OpenAI: `function.arguments` is a non-empty string (after trimming
+   whitespace) that does not parse as JSON, or parses to anything but an object. Anthropic:
+   `input` is present and not an object (non-streaming), or the accumulated `partial_json` is
+   non-empty (after trimming) and does not parse to an object (streaming). An empty/absent
+   argument string is `{}` and is **not** malformed. At most **1** per run. Action: **no tool of
+   that response runs**, no `tool_call`/`tool_result` stream event and no `toolCalls` record is
+   produced for it, the assistant message is **removed** from the transcript, and the user message
+   `CORRECTIVE` is appended. Once the budget is spent, a malformed call runs as before this change
+   (its arguments become `{}`).
+2. **Truncated** — no tool calls and the stop reason is OpenAI `finish_reason: "length"` or
+   Anthropic `stop_reason: "max_tokens"`. At most **3** per run. Action: the partial assistant
+   message **stays** in the transcript, its text is carried, and the user message `CONTINUE` is
+   appended. Once the budget is spent, the run ends as before with the carried text.
+3. **Empty answer** — no tool calls, any other stop reason, and the response text is empty after
+   trimming whitespace (the observed case is a thinking-only `end_turn`: reasoning blocks and no
+   text; a reasoning model that hides its reasoning is indistinguishable and is treated the same).
+   At most **1** per run. Action: the assistant message is **removed** from the transcript and the
+   user message `NUDGE` is appended. Once spent, the run ends as before.
+
+Otherwise the loop proceeds exactly as without the option.
+
+**Carried text.** Text of a truncated response that was continued is carried; the run's final
+`text` (and `done.result.text` in a stream) is the carried text followed by the final response's
+text, concatenated with no separator. The carry resets to empty whenever a response's tools run.
+A stream emits the `text` deltas of every response as they arrive, so in a run where no tool
+ran its deltas concatenate to the same string (as today, text streamed before a tool turn is not
+part of the final `text`).
+
+**Accounting.** Every recovery call is an ordinary turn: it fires `beforeLLM`/`afterLLM`, counts in
+`turns` and usage, and is bounded by `maxTurns` (a recovery never extends `maxTurns`). A recovery is taken only when a turn remains: on the
+last permitted turn every rule is skipped and the run ends exactly as without the option. Budgets are
+per `run`/`stream` call and are not shared between calls of a conversation.
+
+**The appended user message** is `{ "role": "user", "content": TEXT }` in both styles (a plain
+string content). The three texts are byte-exact, ASCII, no trailing newline:
+
+```
+NUDGE      = "Your previous response contained no answer. Continue and give your answer."
+CONTINUE   = "Your previous response was cut off at the output token limit. Continue exactly where it stopped, without repeating anything."
+CORRECTIVE = "Your previous tool call could not be used: its arguments were not a valid JSON object. Call the tool again with arguments that are a single valid JSON object matching its input schema."
+```
+
+Fixture: `conformance/stop_recovery/cases.json` (scripted responses ⇒ expected appended messages,
+turn count and final text), replayed by every port's suite.
+
 ### Hooks (lifecycle middleware)
 
-`ClientOptions.hooks` — four optional, async-capable callbacks around the loop. Each may
+`ClientOptions.hooks` — five optional, async-capable callbacks around the loop. Each may
 observe; the noted ones may mutate or short-circuit.
 
 - `beforeLLM({ messages, tools, model, turn })` → optionally return `{ messages?, tools? }`
@@ -2357,6 +3174,34 @@ observe; the noted ones may mutate or short-circuit.
 - `afterTool({ name, args, result, id, turn })` → return `{ result }` to transform the output
   (redact, annotate).
 
+- `afterRound({ turn, final, text, messages })` → optionally return `{ inject: [string…] }` (change
+  `add-round-boundary-hook`, issue #192). The **round-boundary** seam: it fires once at the end of
+  each loop round, in run and stream, every style, both entry points:
+  - **non-final round** (the model called tools): after **all** of that round's tool results are
+    appended to the transcript, before the next round's `beforeLLM`. `final: false`, `text: ""`.
+  - **final round** (the model answered with no tool call): only when **a turn remains**
+    (`turn + 1 < maxTurns`). `final: true`, `text` = that round's answer text. If it returns a
+    non-empty `inject`, the loop **continues** — the round's answer stays in the transcript, the
+    stream emits no `usage`/`done` for it, and the next round is requested. Empty/absent ⇒ the run
+    ends exactly as without the hook.
+  - Each `inject` string is appended, in order, as one plain-text **user** message
+    (`{role:"user", content:"<string>"}`, same shape for every style) — the transcript, the
+    `ConversationStore` save and `RunResult.messages` all carry it. Empty strings are skipped.
+  - With `stopRecovery` on, recovery is classified first: a response answered with a recovery
+    message is not a round end and fires no `afterRound`. On a final round `text` is the full answer
+    (carried text + this response's text); if `afterRound` continues the loop, the carry resets.
+  - It does **not** fire on a §10 pending halt or a thrown error. A non-final round fires even when
+    it is the last allowed turn; its injection is appended and the run then ends at `maxTurns`
+    exactly as before (`incomplete` when there is no answer). `turn` is the 0-based round index
+    (same as `beforeLLM`). `messages` is the working transcript (read-only by contract).
+  - A failing `afterRound` propagates like a failing `beforeLLM`: the run/stream fails, no further
+    request is sent. `translate` (§11) never fires it (no round). An ACP model source never fires it — the
+    agent owns its own loop (an in-process model runs the normal loop and does fire it).
+  - Absent ⇒ byte-identical behaviour. Why not `beforeLLM`: `beforeLLM` can replace the transcript
+    but cannot tell a round boundary from the first call, cannot see the round's answer, and cannot
+    keep a loop going once the model stops — the loop has already returned. Todo reminders and
+    sub-agent notices need exactly those two things.
+
 These are what make it programmable as an agent: permissions/guardrails (deny in `beforeTool`),
 caching, arg rewriting, and observability (cost/latency in `afterLLM`).
 
@@ -2373,9 +3218,14 @@ the thread's transcript is loaded as history before the stream, and saved back t
 `ConversationStore` when the `done` event fires (§ Conversation memory). No `id` ⇒ stateless.
 
 - `{ type: "text", delta }` — assistant text token deltas
+- `{ type: "thought", delta, via }` — the agent's reasoning text, only from an in-process stream
+  source (ACP `agent_thought_chunk`, `via:"acp"`); never part of the answer or `RunResult.text`
 - `{ type: "tool_call", id, name, args }` — a tool about to run
 - `{ type: "tool_result", id, name, output, isError }` — after it ran
 - `{ type: "usage", usage }` — token usage
+- `{ type: "retry", attempt, max, delayMs, status?, reason }` — the LLM request failed retryably and
+  the loop is about to wait `delayMs` and try again (§ Resilience, "Retry event")
+- `{ type: "fallback", from, to }` — only with `fallbackModels` (§8 Resilience): the call is switching from model `from` to `to` after overload
 - `{ type: "done", result }` — the final `RunResult`
 
 OpenAI: `stream:true` + `stream_options.include_usage`, SSE deltas (assemble `tool_calls` by
@@ -2393,13 +3243,28 @@ the host. `generate(request) -> { content } | { toolCalls }` returns exactly one
 encodes tool arguments unless already a string. Tool calls cross flat: `{id?, name, arguments}`.
 
 Messages are always **OpenAI-shaped** (there is no wire to be neutral about). Failures are **final
-by default** — no wire means no transient failure to retry. The streaming path **raises**, because a
-`generate` returns a whole answer and a single-chunk stream is indistinguishable from a real one by
-content or delta count; the exception is Clojure, which has no streaming entry point to refuse from.
+by default** — no wire means no transient failure to retry. With only a plain `generate`, the
+streaming path **raises**, because a `generate` returns a whole answer and a single-chunk stream is
+indistinguishable from a real one by content or delta count; the exception is Clojure, which has no
+streaming entry point to refuse from.
+
+**Streaming generate (all eight ports).** The host MAY instead (or also) supply a streaming generate
+— Go `GenerateStream(ctx, req, emit)`, js `generateStream(req, emit)`, python
+`generate_stream(req, emit)`, java/C# `GenerateStream`, elixir `:generate_stream`, clojure
+`:generate-stream`, rust builder — that reports the turn as it happens through `emit(event)` and
+returns the same response as `generate`. With it, the client streams for real: each non-empty
+`text` event becomes a text delta **as it is emitted** (never buffered to the end of the turn);
+every other event (`thought`, `tool_call`, `tool_result`) goes straight to the stream consumer and
+is **never executed** by the loop. When the generate returns, returned tool calls are executed as
+usual; returned `content` is emitted as one delta only if no text was emitted; then usage and
+`done`. A non-streaming call with only a streaming generate calls it with a no-op `emit`. Clojure has
+no stream entry point: its `run` forwards the events to `:on-event` as they are emitted.
+Conformance: `conformance/acp-client/cases.json` `stream.inProcess` — the generate blocks after each
+delta until the consumer has received it, so a buffering implementation deadlocks and fails.
 The injectable transport (Gap 2) is unchanged and remains the answer for proxy, mTLS and
 record-replay — this is a second constructor over it, not a second seam.
 
-#### ACP model source — host hooks (golang-first; other ports pending, `openspec/changes/add-go-host-asks`)
+#### ACP model source — host hooks (onPermission/onUpdate/streaming: all eight ports; cancellation: all but elixir and clojure, `openspec/changes/add-go-host-asks` 2.6e)
 
 An ACP source (one warm `session/prompt` per turn over a child agent; ADR 0031) MAY take three
 opt-in hooks. With none set its behaviour is unchanged: `session/request_permission` is answered
@@ -2413,12 +3278,18 @@ with the first allow-kind option, and only `agent_message_chunk` text forms the 
 - **Cancellation** — a ctx-taking generate sends the `session/cancel` *notification* (no id) when
   its context is cancelled, waits up to the request timeout for the turn's reply, and returns the
   cancellation error. The process and session stay warm.
-- **Streaming** — a streaming generate emits `agent_message_chunk` → `{type:"text", delta}`,
+- **Streaming (all eight ports)** — a streaming generate emits, as each `session/update` is read,
+  `agent_message_chunk` → `{type:"text", delta}`, `agent_thought_chunk` → `{type:"thought", delta, via:"acp"}`,
   `tool_call` → `{type:"tool_call", id, name: title, args: rawInput, via:"acp"}`, and a
   `completed`/`failed` `tool_call_update` → `{type:"tool_result", id, name, output, isError, via:"acp"}`.
-  An in-process client given a streaming generate (Go: `InProcessOptions.GenerateStream`) streams
-  instead of refusing: text events become the stream's text deltas, other events pass straight to
-  the consumer and are **never executed** by the loop (the agent already ran them).
+  Agents often send `rawInput` and the full `title` only on a later `tool_call_update` (#188): an
+  update carrying a non-empty `rawInput` object emits `{type:"tool_call_args", id, name, args: rawInput,
+  via:"acp"}` (before any `tool_result` that same update produces), and an update's non-empty `title`
+  becomes the call's name for every later event of that id. An update with neither emits nothing.
+  Conformance: `conformance/acp-client/cases.json` `stream.acpToolUpdate`.
+  An in-process client given a streaming generate streams instead of refusing: text events become
+  the stream's text deltas, other events pass straight to the consumer and are **never executed** by
+  the loop (the agent already ran them).
 
 ### Resilience (retries + timeout/cancel)
 
@@ -2458,7 +3329,63 @@ skipping remaining retries. **Absent `onError` ⇒ the default classifier `retry
 "fail"`, i.e. byte-identical to the paragraph above.** There is **no `"suspend"` tier** — a failure
 is not a user action, so it never becomes a §10 `Pending`; suspension stays a user-action pause
 (§10). A `"fail"` result never carries `status:"pending"`. Aborts (timeout/cancel) bypass `onError`
-and are never retried.
+and are never retried. A context-overflow `400`/`413` is not retried here; with
+`compactOnOverflow` set it is answered by reactive compaction instead (§7F.1).
+
+**`x-should-retry` override.** A non-ok LLM response carrying the header `x-should-retry`
+(name case-insensitive) whose trimmed value is `true` or `false` (value case-insensitive) sets
+`retryable` to that value **before** `onError` runs — it overrides the default status
+classification in both directions (a `400` with `x-should-retry: true` is retried; a `503` with
+`x-should-retry: false` is terminal). Any other value, or no header, leaves the default
+classification unchanged. `onError` still has the final say, and `retries` still bounds every
+retry. Applies to `run`/`ask` and `stream` alike. It is never consulted on a network error.
+
+**Retry event (streaming only).** When `stream()` is about to retry the LLM request — the
+classifier said `"retry"` and the budget is not spent — it emits, **before** waiting,
+`{ type: "retry", attempt, max, delayMs, status?, reason }`:
+`attempt` is the 1-based number of the retry about to happen (the zero-based failed attempt + 1),
+`max` is the configured `retries`, `delayMs` is the exact wait the loop is about to sleep (an
+honoured `Retry-After` in milliseconds, otherwise the backoff-with-jitter value actually drawn),
+`status` is the HTTP status (absent on a network error), and `reason` is `"HTTP <status>"` or
+`"network"`. A host renders it as "Retrying in Ns · attempt A/M". No event is emitted for a
+failure that is not retried (terminal, `"fail"`, or budget spent), for aborts, or by
+`run`/`ask` (non-streaming output is unchanged). Field spelling is per-port idiom
+(`delay_ms` / `DelayMs` / `:delay-ms`). An in-process client has no wire and emits none.
+
+**`fallbackModels` — opt-in model fallback chain on overload (optional; change `add-model-fallback-chain`).**
+An ordered list of model ids (idiomatic per port: js `fallbackModels`, python `fallback_models`,
+Go `FallbackModels`, java `fallbackModels(List<String>)`, C# `FallbackModels`, elixir
+`:fallback_models`, clojure `:fallback-models`, rust `fallback_models(Vec<String>)`). It is the
+**model-only first slice** of `openspec/changes/add-llm-upstream-failover` (same `baseUrl`, `style`,
+credentials and transport — only the model changes), and follows that design's D1/D5/D6 verbatim.
+Pinned behaviour, identical in all eight ports:
+
+- **Chain.** For each model call the chain is `[turnModel, ...fallbackModels]`, where `turnModel` is
+  the model that call would send today (the configured model, or that turn's `beforeLLM` override).
+  Entries that are empty or equal to a model already earlier in the chain are skipped. `beforeLLM` is
+  **not** re-run per fallback: the fallback list is itself the operator's explicit, ordered choice.
+- **Trigger = overload, exactly `503` and `529`.** The retry budget (`retries`, `Retry-After`,
+  `onError`) is spent on the current model first, unchanged. Only when that budget is exhausted and
+  the **final** attempt's HTTP status is `503` or `529` does the call advance to the next model, with
+  a **fresh** retry budget. Nothing else advances: `429` (a rate limit — the same model will serve
+  later), other 5xx, network errors, `4xx`, aborts/timeouts, and any attempt `onError` classified
+  `"fail"` surface exactly as today. Worst case `(1 + retries) × chain length` attempts.
+- **Per call, not sticky.** Every model call (each turn) starts again at `turnModel`; no cooldown or
+  cross-call memory (v1).
+- **Exhausted chain** ⇒ the last model's error surfaces exactly as a non-fallback client's would.
+- **Reporting.** The model that actually served is "the model transmitted" for §8 Hooks reporting:
+  the `afterLLM` event's `model`, that turn's `llm` metric event, `RunResult.model` and the `run`
+  metric event carry it.
+- **Streaming.** Before switching, `stream` emits `{ type: "fallback", from, to }` (both model ids);
+  `run`/`ask` emit nothing new. Overload is an HTTP status received before any token, so a fallback
+  always precedes the call's first delta; a failure after the first token never falls back.
+- **Kill switch.** When the environment variable **`TOOLNEXUS_DISABLE_MODEL_FALLBACK`** is `1` or
+  `true` (case-insensitive), read at each model call, the chain is ignored. Any other value or unset
+  ⇒ the option applies.
+- **Absent / empty `fallbackModels` ⇒ byte-identical** to today. In-process and ACP model sources
+  (no wire, no HTTP status) ignore it.
+- **Model faithfulness (§8 Right-size routing) still holds:** the configured model is transmitted
+  verbatim first; a fallback is an operator-configured, reported substitution, never a silent one.
 
 **Cancellation** beyond `timeoutMs`/abort: the per-port cancellation contract used by the
 agent runtime's `interrupt` is tabled in §7D — ports differ only in abort latency, never in
@@ -2749,7 +3676,7 @@ classifier = createClassifier({
   style,              // "systemone" | "llm" | "custom" | "static"   (default "systemone")
   baseUrl,            // default "https://api.typesafe.ai/v1"; OpenRouter: "https://openrouter.ai/api/v1"
   model,              // default "jev-latest"
-  apiKeyEnv?,         // the NAME of an env var; default "TYPESAFE_API_KEY"
+  apiKeyEnv?,         // the NAME of an env var; default: the backend's own variable, own host only (§8B Key to host)
   headers?,           // values expand ${ENV_VAR} at call time; never logged
   …                   // full table below
 })
@@ -2948,9 +3875,12 @@ configured one client has configured the other. Idiomatic names per port, as eve
 | option | default | notes / §8 counterpart |
 |---|---|---|
 | `style` | `"systemone"` | `"systemone" \| "llm" \| "custom" \| "static"`. Same slot as the client's `style`; the values differ because the wires differ |
+| `backend` | `"typesafe"` | `typesafe \| openrouter \| cloudflare \| vercel \| openai \| custom` — sets baseUrl, model and apiKeyEnv as a unit (table below) |
+| `supports` | the backend row | `{images}`; overrides the table; required with `custom` |
+| `cache` | — | opt-in `{get, set}` answer cache (below); absent ⇒ none |
 | `baseUrl` | `https://api.typesafe.ai/v1` | same as §8. OpenRouter (`https://openrouter.ai/api/v1`) serves this wire today; self-hosted and open-weights implementations speak it too |
 | `model` | `"jev-latest"` | **pin it** (e.g. `jev-1.13.0`) once thresholds are tuned. `Decision.model` echoes what actually answered, which may be more specific |
-| `apiKeyEnv` | `"TYPESAFE_API_KEY"` | the **name** of the env var, not the value — read at call time and never logged. §8's `apiKey` takes a value; this option deliberately does not |
+| `apiKeyEnv` | the backend's own variable | the **name** of the env var, not the value — read at call time and never logged. Named by the caller, it is sent to wherever `baseUrl` points; left unset, the backend's own variable is sent **only to that backend's own host** (§8B *Key to host*). §8's `apiKey` takes a value; this option deliberately does not |
 | `headers` | — | extra headers; values expand `${ENV_VAR}` from the environment at call time and are **never logged**, identically to remote-MCP headers (§2) |
 | `httpClient` / `transport` | default | the §8 Gap 2 injectable transport. Scope is the classifier path only |
 | `timeout` | 10 s | per request, not per run — a classifier has no loop to bound |
@@ -2995,6 +3925,124 @@ section**, and constructing one alters no request the client loop makes. This is
 not asserted.
 
 ---
+
+### Backends, images, cache and validation (change `add-classifier-backends`, ADR 0038)
+
+Every default below is a **proposed default, owner to confirm**
+(`openspec/changes/add-classifier-backends/design.md`, PD-1…PD-15). Fixtures:
+`examples/judge/backends/`.
+
+**Backend table** — data in every port; `supports` overrides the image column per classifier;
+explicit `baseUrl`/`model`/`apiKeyEnv` still win. `${NAME}` in `baseUrl` expands at call time and
+error text names the endpoint **unexpanded**.
+
+| backend | baseUrl | model | apiKeyEnv | wire | images | image header |
+|---|---|---|---|---|---|---|
+| `typesafe` | `https://api.typesafe.ai/v1` | `jev-latest` | `TYPESAFE_API_KEY` | systemone | yes | yes |
+| `openrouter` | `https://openrouter.ai/api/v1` | `typesafe/jev-1.14` | `OPENROUTER_API_KEY` | systemone | yes | yes |
+| `cloudflare` | `https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/ai/run` | `typesafe/jev` | `CLOUDFLARE_JEV_API_KEY` | cloudflare | model contains `clef` | no |
+| `vercel` | `https://ai-gateway.vercel.sh/typesafe/v1` | `typesafe-ai/jev` | `AI_GATEWAY_API_KEY` | systemone | no | yes |
+| `openai` | `https://api.openai.com/v1` | `gpt-6-luna` | `OPENAI_API_KEY` | decisions | yes | no |
+| `custom` | required | `jev-latest` | *(none)* | systemone | required (`supports`) | yes |
+
+Three wires: `systemone`, `cloudflare`, and `decisions` (OpenAI's Decisions API, below). Unknown backend:
+`classifier: unknown backend "<b>" (want "typesafe", "openrouter", "cloudflare", "vercel", "openai" or "custom")`;
+custom without declarations: `classifier: backend "custom" requires baseUrl and supports`.
+
+**Key to host** (security, issue #155; the §8 client's *API key by host* rule applied to the classifier).
+A caller-named `apiKeyEnv` is read and sent as `Authorization: Bearer …` to wherever `baseUrl`
+points. Otherwise the backend's own variable is read **only when the dialled endpoint (after `${NAME}`
+expansion) is that backend's own host over https** — the host of the table's `baseUrl`, compared
+case-insensitively, userinfo and port ignored for matching, plus `*.openrouter.ai` for `openrouter`.
+Any other host, plain http, and always `custom` (no default variable), send **no** key, and no error:
+a keyless self-hosted server is legal, and credentials can still travel in `headers`. No
+cross-backend fallback. Shared fixture: `examples/judge/backends/key-routing.json` (a capture server
+per port asserts the `Authorization` of every request).
+
+**Cloudflare wire** — `POST {baseUrl}` (no suffix) with
+`{"input":{"images"?,"questions","state"},"model"}`; reply `{success, result}`, `result` may be
+`{"state":"Completed","result":…}`. `success` not `true` ⇒ `classifier: cloudflare: envelope not successful` followed by `: <code> <message>` of `errors[0]` when present (code and message each omitted when absent; code rendered as written; nothing else of the envelope), through the same redaction and 200-character cap as any backend's reported cause — Cloudflare reports a missing balance, a bad model and a malformed request alike as HTTP 200 with `success:false`;
+another run state ⇒ `classifier: cloudflare: run state "<s>"`.
+
+**Decisions wire** (backend `openai`, issue #157, change `add-classifier-openai-decisions`). Recorded
+from OpenAI's API reference (2026-11-08). `POST {baseUrl}/decisions` with `{"input","model","questions"}`.
+`questions` is a **list in ASCII caller-key order**, and caller keys are **not** sent (no `name`). The
+answers come back in order and are read by position.
+- `noul` ⇒ `{"type":"predicate","instructions"}`; criteria, when present, are appended to the
+  instructions as `"\n\nTrue means: <true>\nFalse means: <false>"`.
+- `choice` ⇒ `{"type":"choice","instructions","choices":[{"value":<id>,"description"?}]}`, ids in ASCII
+  order, an empty description omitted. The wire takes 2–255 options.
+- `score` ⇒ `{"type":"score","instructions","levels":[{"label"}]}`, in rubric order.
+- `input`: a string state verbatim; any other state as its canonical JSON text. With images (lifted and
+  checked as above), one message `[{"role":"user","content":[{"type":"input_text","text"},
+  {"type":"input_image","image_url":"data:image/<fmt>;base64,…"}…]}]`, images in collection order.
+- Before any request: a raw question ⇒ `ClassifierUnsupported` (`classifier: <backend> (<model>) does not
+  support raw question type "<t>"`); a one-option choice ⇒ `classifier: question "<key>": the decisions
+  wire needs 2..255 choice options, got 1`; more than 400 questions ⇒ `classifier: the decisions wire
+  takes at most 400 questions, got <n>`.
+- Reply `{model, answers:[…], usage}` is normalised to the System One shape, then decoded, validated,
+  cached and metered as any other. `probability` ⇒ `noul`. `choice` keeps `choice`, `confidence` and
+  `probabilities` keyed by value, with booleans as `"true"`/`"false"`. `score` keeps `score` and
+  `confidence`, with `probabilities` keyed by the 0-based level `value` and `legend` from the question.
+  The decision is `calibrated: false`: Decisions models are not System One models, and no calibration
+  claim is made. `usage` keeps `input_tokens` / `output_tokens`.
+- A `refusal` answer ⇒ `classifier: decisions: question "<key>" was refused`, an error and never a "no".
+  The other errors are `classifier: decisions: <n> answers for <m> questions`, `classifier: decisions:
+  answer "<key>" is a <t> answer, not <want>` and `classifier: decisions: malformed reply`.
+- No native batch: the API takes one `input` per request, so `states().evaluate` keeps its fan-out.
+  Gateways serving the same wire (OpenRouter `api/alpha/decisions`, Vercel) work as `backend:"openai"`
+  with a `baseUrl` override and a caller-named `apiKeyEnv`. They have no preset row until a live probe
+  proves them.
+Shared fixture: `examples/judge/backends/openai-decisions.json`.
+
+**Images** (style `systemone` only; `static`/`custom`/`llm` get the state verbatim). A state with no
+content part is sent verbatim. Otherwise walk it depth-first, object keys in ASCII order, arrays in
+order: an image part with inline data becomes a reference string (the enclosing key if unused,
+else the smallest unused `image<n>`, `n ≥ 1`) and an asset
+`{"type":"image","format":"png"|"jpeg","data_base64"}` in a top-level `assets` map (cloudflare:
+data URLs in `input.images`, in collection order); a text part becomes its text; any other part is
+an error. Before any request: images on a backend without image support ⇒ `ClassifierUnsupported`
+(`classifier: <backend> (<model>) does not support images`); then per image PNG/JPEG only, ≤ 16 MiB,
+each side 280–1568 px (read from the PNG IHDR / first JPEG SOF), then ≤ 32 MiB per request — these
+errors start `classifier: image "<ref>": `. Never resized, never described as text.
+`TypeSafe-Danger-Zone-Images: true` is sent only when assets are present **and** the backend row says
+so; host headers win.
+
+**Value builders.** `classifier.state(v).evaluate(questions…)` = `evaluate` + fail-closed
+validation. `classifier.states(v…).evaluate(questions…)` → one `{decision | error}` per state, in
+order, ≤ 16 in flight; one failure never fails the batch; a duplicate question name fails before
+any request; no states ⇒ empty list. `evaluateBatch` is unchanged.
+
+**Cache** (opt-in `cache: {get(key) → string?, set(key, string)}`, systemone style only, nothing
+when absent; `MemoryCache(ttl, max)` ships). Per **request**: joint calibration across a split
+question set is unproven. Only validated replies are stored. Keys, with `canon` the canonical JSON
+above and `E` the configured `baseUrl` unexpanded:
+
+```
+modelKey    = sha256hex(canon({"endpoint":E,"kind":"model","model":<requested>}))      -> served model
+decisionKey = sha256hex(canon({"assets"?:A,"endpoint":E,"kind":"decision","model":<served>,
+                               "questions":Q,"state":<state as sent>}))                 -> reply body
+```
+
+A hit sends nothing and sets `decision.cached` and the event's `cached`. When an alias starts
+serving another model, the next live call re-points `modelKey`; otherwise the TTL is the guard. A
+cutover gate (ADR 0038 D8) runs with no cache.
+
+**Helpers.** `validateDecision(questions, decision)` — first failure, in order: missing answer
+(question keys ASCII), unexpected answer (ASCII), then per key: type mismatch, noul ∉ [0,1], choice
+not offered / probability key not offered / probability ∉ [0,1] / non-empty sum outside 1 ± 0.02 /
+confidence ∉ [0,1], score ∉ [0, levels−1] / same probability rules over level indices / confidence;
+messages start `classifier: invalid decision: ` and name `"<key>"`. `Thresholds{yes 0.8, no 0.2,
+minConfidence 0.6}` — inclusive (`p ≥ yes`, `p ≤ no`, `confidence ≥ minConfidence`), no near-uniform
+demotion; `Bands` unchanged. `chunkQuestions(questions, size)` — ASCII key order, `size ≥ 1`.
+
+**Metric** — every `classifier.evaluate` event carries `questions` (count), `questionsHash`
+(sha256 hex of `canonicalRequest(model, questions)`) and `cached`.
+
+**Open union.** A raw question `{type, instructions, criteria?}` is sent as written (type
+non-empty, no limits); an answer of an unknown type decodes to a raw answer `{type, value}`.
+
+**`style: "llm"` is deprecated**, kept byte-identical as an alias for at least one minor release.
 
 ### Batch — `evaluateBatch(states, questions)`
 
@@ -3146,6 +4194,90 @@ Idiom (behaviour identical; constructor and method spelling follow each port):
 
 - Conformance: `examples/judge/batteries/*.json` (recorded `static` calls → verdict) and
   `user-text-cases.json`.
+
+## 8C. Vendor agents through the in-process seam (ADR 0041)
+
+toolnexus does not ship a client per coding agent. It ships three vendor-neutral pieces; driving a
+particular agent (which binary, which flags, which login, which quirks) is a **recipe** in the docs,
+written by the caller on top of them. No public API names a vendor. Status: **all eight ports**.
+
+1. **The seam** — `createInProcessClient({ generate? , generateStream?, … })` (§8 "In-process
+   models"), including the streaming generate: text events become stream deltas as emitted;
+   `thought`/`tool_call`/`tool_result` events pass straight to the consumer and are never executed.
+2. **A plain ACP client** — the §8 ACP model source (`loadACP`), whose `generate`/`generateStream`
+   plug straight into (1).
+3. **The toolkit as an MCP server for an agent** — `toolkit.asMcpServer(config?)`.
+
+### ACP client (`loadACP`) — passthrough, not policy
+
+`ACPOptions` = the existing §8 options (`command`, `args`, `env`, `cwd`, permission hook, timeouts,
+`onUpdate`) plus:
+
+- **`mcpServers`** — a list of JSON objects sent as `session/new` `mcpServers` **verbatim and in
+  order**: toolnexus does not validate, rename, reshape or pick between http/stdio forms. Absent ⇒ `[]`.
+- **`sessionMeta`** — a JSON object sent as `session/new` `_meta`; the key is absent when not set.
+- **`clientCapsMeta`** — a JSON object sent as `initialize` `clientCapabilities._meta`; absent when not set.
+- **`model`** — passed through unchanged after `session/new`: `session/set_config_option
+  {sessionId, configId:"model", value}`, and if the agent rejects that, `session/set_model
+  {sessionId, modelId}`; both failing fails `loadACP`. toolnexus never lists or validates models.
+- `args` and `env` reach the spawned agent untouched; `env` values are never logged.
+
+Changing mode or model on a **running** client (#197) — no restart, same process, same `sessionId`:
+
+- **`setMode(mode)`** — sends `session/set_mode {sessionId, modeId: mode}` (the same request the
+  `mode` option sends once at load). The agent's error fails the call; the client stays usable.
+- **`setModel(model)`** — exactly the `model` option's logic: `session/set_config_option
+  {sessionId, configId:"model", value: model}`, and if the agent rejects that, `session/set_model
+  {sessionId, modelId: model}`; both failing fails the call (both errors in the message), the client
+  stays usable.
+- Values pass through unchanged — toolnexus never lists or validates modes or models. The request is
+  sent at once, not queued behind a running turn; when the change takes effect is the agent's call.
+  On a closed client both fail with the closed-client error.
+- Idiom: golang `SetMode(ctx, mode)` / `SetModel(ctx, model)`; js `setMode` / `setModel` (async);
+  python `set_mode` / `set_model` (sync, like its `generate`); java `setMode` / `setModel`; csharp `SetModeAsync` /
+  `SetModelAsync`; elixir `set_mode/2` / `set_model/2` (`:ok | {:error, reason}`); clojure
+  `set-mode!` / `set-model!`; rust `set_mode` / `set_model` (async, `Result`).
+
+Wire behaviour:
+
+- `initialize` sends `clientCapabilities {fs:{readTextFile:false,writeTextFile:false},terminal:false}`
+  (+ `_meta` when given).
+- The agent is spawned without a shell in its own process group (ports without process groups kill
+  the process tree); `close()` ends the group.
+- A pending request fails with `agent exited before replying to <method>` as soon as the agent's
+  stdout closes — never by waiting out a timeout.
+- An agent→client **request** toolnexus does not implement (`fs/*`, `terminal/*`, …) is answered with
+  JSON-RPC error `-32601` so the agent never waits on it.
+- Each turn is one `session/prompt`; only `agent_message_chunk` text is the answer.
+  **Streaming** (`generateStream`): `agent_message_chunk` → `{type:"text", delta}` as each update is
+  read; `agent_thought_chunk` → `{type:"thought", delta, via:"acp"}`; `tool_call` /
+  completed-or-failed `tool_call_update` → `tool_call` / `tool_result` with `via:"acp"`; an update
+  carrying `rawInput` → `tool_call_args` (§8, ACP host hooks).
+- Permission requests go to the caller's permission hook (default: first allow-kind option, as in §8).
+  Which agent tools to allow is policy, and policy belongs to the caller.
+
+### `toolkit.asMcpServer(config?) -> { url, token, close() }`
+
+Serves the toolkit for a local agent to call, built on the §7C server (same tool mapping, same
+`MCPServeConfig {name?, version?, tools?}` filter; tool names verbatim — the `skill` tool stays `skill`).
+
+- Listens on `127.0.0.1:<ephemeral>`; `url` = `http://127.0.0.1:<port>/mcp`. Other paths ⇒ 404.
+- `token` = 32 random bytes, lowercase hex (64 chars), fresh per call, never logged. Every request
+  must carry `Authorization: Bearer <token>`, else **401** with `WWW-Authenticate: Bearer`
+  (constant-time compare).
+- With a valid token, `POST /mcp` is the stateless §7C streamable-HTTP endpoint; any other method
+  ⇒ **405** (a stateless endpoint has no server-sent stream to hold open).
+- `close()` stops the listener; idempotent.
+
+The caller builds whatever `mcpServers` entry its agent accepts, e.g. ACP http:
+`{"type":"http","name":"toolnexus","url":url,"headers":[{"name":"Authorization","value":"Bearer "+token}]}`.
+
+**Not in the library** (recipes in the docs): per-vendor launch styles or enums, one-shot CLI
+transports and reply parsing, prompt preambles or system hints, permission allow-lists keyed on
+vendor tool titles, isolation flags, stdio↔HTTP bridges, model lists.
+
+Conformance: `conformance/acp-client/cases.json` — `stream.inProcess`, `stream.acpDrip`,
+`passthrough`, `liveSwitch`, `agentExit`, `unknownRequest`, `asMcpServer`.
 
 ## 9. Go CLI (`toolnexus`)
 
@@ -3552,6 +4684,13 @@ answer.data.isError  : boolean         // optional, pairs with `output`
   providers require.
 - A call for which the host supplied no result gets an explicit **error** `tool_result`
   rather than an absent slot, because an unanswered tool call is rejected by the provider.
+- **A declined answer carries its reason** (issue #125). `answer.ok == false` (e.g.
+  `answerDeclined(id, reason)`) resolves **every** outstanding call of the halted turn with an
+  error `tool_result` whose content is exactly `relay declined for <name>: <reason>` — the same
+  text as the inline relay path — with `reason` defaulting to `declined` and `<name>` falling back
+  to the call id. Any `data` on a declined answer is ignored; it is never the
+  `"no result supplied on resume"` filler, and the resume does not fail. Fixture:
+  `conformance/resume_decline/cases.json`.
 - The resume continues from the transcript and appends **no new user turn**.
 - Because `Request` and `Answer` are plain serializable data, resume works across a
   process boundary: persist both, restart, resume with a fresh client.

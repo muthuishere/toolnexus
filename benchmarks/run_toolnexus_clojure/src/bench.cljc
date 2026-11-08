@@ -132,7 +132,7 @@
         ;; ---- cold init: toolkit build (MCP connect + discovery) + client ----
         t0      (time/mono-ms)
         tk      (build-toolkit config repo mcp-py)
-        agent   (client/create-client {:base-url mock :style "openai" :model "mock-model"})
+        agent   (client/create-client {:base-url mock :style "openai" :model "mock-model" :api-key "sk-mock-not-a-real-key"})
         init-ms (time/elapsed-ms t0)
 
         tools   (count (toolnexus/tool-names tk))]

@@ -9,7 +9,15 @@
 //!   cancel      waits for session/cancel, then ends the turn with stopReason cancelled
 //!   fsrequest   asks the client for fs/read_text_file before answering
 //!   echo        replies with the prompt text as one chunk
-//! session/new rejects a relative cwd with -32602, like `devin acp`.
+//! session/new rejects a relative cwd with -32602.
+//! Conformance flags (conformance/acp-client/cases.json), read from the env:
+//!   TN_FAKE_RECORD=<file>     append every received request as `{method,params}` JSON lines
+//!   TN_FAKE_REJECT_MODE       reject session/set_mode with -32602 "unknown mode"
+//!   TN_FAKE_NO_CONFIG_OPTION  reject session/set_config_option (set_model is accepted)
+//!   TN_FAKE_EXIT_ON_PROMPT    exit without replying on session/prompt
+//!   TN_FAKE_FS_REQUEST        on session/prompt ask fs/read_text_file first; answer "ok"
+//!                             if it came back as JSON-RPC error -32601
+//!   TN_FAKE_DRIP              on session/prompt: thought "pondering", then three chunks 200ms apart
 
 use std::io::{BufRead, Write};
 
@@ -46,7 +54,79 @@ fn main() {
         };
         let id = msg.get("id").cloned();
         let method = msg.get("method").and_then(|m| m.as_str()).unwrap_or("");
+        if let Ok(path) = std::env::var("TN_FAKE_RECORD") {
+            let mut f = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+                .unwrap();
+            writeln!(
+                f,
+                "{}",
+                serde_json::json!({"method": method, "params": msg.get("params")})
+            )
+            .unwrap();
+        }
+        let flag = |k: &str| std::env::var(k).is_ok_and(|v| !v.is_empty());
+        if method == "session/prompt" && flag("TN_FAKE_EXIT_ON_PROMPT") {
+            std::process::exit(0);
+        }
+        if method == "session/prompt" && flag("TN_FAKE_DRIP") {
+            chunk(session, "agent_thought_chunk", "pondering");
+            for (i, c) in ["drip-1 ", "drip-2 ", "drip-3"].iter().enumerate() {
+                if i > 0 {
+                    std::thread::sleep(std::time::Duration::from_millis(200));
+                }
+                chunk(session, "agent_message_chunk", c);
+            }
+            send(serde_json::json!({"jsonrpc":"2.0","id":id,"result":{"stopReason":"end_turn"}}));
+            continue;
+        }
+        if method == "session/prompt" && flag("TN_FAKE_TOOLUPDATE") {
+            // The updates of conformance stream.acpToolUpdate (issue #188).
+            for u in [
+                serde_json::json!({"sessionUpdate":"tool_call","toolCallId":"t1","title":"Write","kind":"edit","status":"pending"}),
+                serde_json::json!({"sessionUpdate":"tool_call_update","toolCallId":"t1","status":"in_progress","title":"Write /tmp/a.txt","rawInput":{"file_path":"/tmp/a.txt","content":"hi"}}),
+                serde_json::json!({"sessionUpdate":"tool_call_update","toolCallId":"t1","status":"in_progress"}),
+                serde_json::json!({"sessionUpdate":"tool_call_update","toolCallId":"t1","status":"completed","content":[{"type":"content","content":{"type":"text","text":"wrote"}}]}),
+            ] {
+                update(session, u);
+            }
+            chunk(session, "agent_message_chunk", "done");
+            send(serde_json::json!({"jsonrpc":"2.0","id":id,"result":{"stopReason":"end_turn"}}));
+            continue;
+        }
+        if method == "session/prompt" && flag("TN_FAKE_FS_REQUEST") {
+            let rid = next_out_id;
+            next_out_id += 1;
+            send(
+                serde_json::json!({"jsonrpc":"2.0","id":rid,"method":"fs/read_text_file","params":{"sessionId":session,"path":"/etc/hosts"}}),
+            );
+            let mut ok = false;
+            while let Some(Ok(l)) = lines.next() {
+                let Ok(m) = serde_json::from_str::<serde_json::Value>(&l) else {
+                    continue;
+                };
+                if m.get("id") == Some(&serde_json::json!(rid)) {
+                    ok = m.pointer("/error/code") == Some(&serde_json::json!(-32601));
+                    break;
+                }
+            }
+            chunk(
+                session,
+                "agent_message_chunk",
+                if ok { "ok" } else { "bad" },
+            );
+            send(serde_json::json!({"jsonrpc":"2.0","id":id,"result":{"stopReason":"end_turn"}}));
+            continue;
+        }
         match method {
+            "session/set_config_option" if flag("TN_FAKE_NO_CONFIG_OPTION") => send(
+                serde_json::json!({"jsonrpc":"2.0","id":id,"error":{"code":-32601,"message":"Method not found"}}),
+            ),
+            "session/set_config_option" | "session/set_model" => {
+                send(serde_json::json!({"jsonrpc":"2.0","id":id,"result":{}}))
+            }
             "initialize" => {
                 std::thread::sleep(std::time::Duration::from_millis(init_delay));
                 send(
@@ -68,6 +148,9 @@ fn main() {
                     );
                 }
             }
+            "session/set_mode" if flag("TN_FAKE_REJECT_MODE") => send(
+                serde_json::json!({"jsonrpc":"2.0","id":id,"error":{"code":-32602,"message":"unknown mode"}}),
+            ),
             "session/set_mode" => send(serde_json::json!({"jsonrpc":"2.0","id":id,"result":{}})),
             "session/prompt" => {
                 let text = msg

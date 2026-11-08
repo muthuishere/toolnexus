@@ -59,17 +59,25 @@ const reEscape = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
 
 type Recorded = { method: string; path: string; headers: http.IncomingHttpHeaders; body: Buffer }
 
-/** Serves script[] in order (last entry repeats); records every request. */
+/**
+ * Fake provider: serves script[] in order, last entry repeats; records every request.
+ * `reset()` starts a new generation: every response closes its connection (no pooling), so any request
+ * still arriving on a connection opened before it (e.g. a poll the client aborted at its deadline) is dropped, so it can
+ * never be recorded into — and shift the script position of — the next face's requests.
+ */
 async function fakeServer(script: any[]) {
   const requests: Recorded[] = []
   let url = ""
+  let gen = 0
   const server = http.createServer((req, res) => {
+    const reqGen = (req.socket as any).__gen
     const chunks: Buffer[] = []
     req.on("data", (c) => chunks.push(c))
     req.on("end", () => {
+      if (reqGen !== gen) { req.socket.destroy(); return }
       requests.push({ method: req.method!, path: req.url!, headers: req.headers, body: Buffer.concat(chunks) })
       const entry = sub(script[Math.min(requests.length - 1, script.length - 1)], { "{server}": url })
-      const headers: Record<string, string> = { ...(entry.body !== undefined ? { "content-type": "application/json" } : {}) }
+      const headers: Record<string, string> = { ...(entry.body !== undefined ? { "content-type": "application/json" } : {}), connection: "close" }
       for (const [k, v] of Object.entries(entry.headers ?? {})) headers[k.toLowerCase()] = String(v)
       res.writeHead(entry.status, headers)
       if (entry.bodyBase64 !== undefined) res.end(Buffer.from(entry.bodyBase64, "base64"))
@@ -77,12 +85,15 @@ async function fakeServer(script: any[]) {
       else res.end(JSON.stringify(entry.body))
     })
   })
+  server.on("connection", (s) => {
+    ;(s as any).__gen = gen
+  })
   await new Promise<void>((r) => server.listen(0, "127.0.0.1", r))
   url = `http://127.0.0.1:${(server.address() as any).port}`
   return {
     url,
     requests,
-    reset: () => { requests.length = 0 },
+    reset: () => { gen++; requests.length = 0 },
     close: () => { server.closeAllConnections?.(); return new Promise((r) => server.close(r)) },
   }
 }

@@ -1,0 +1,887 @@
+---
+title: "Recipe — one CLI process per turn"
+description: "A complete, copy-pasteable recipe in all eight ports that turns any prompt-in, text-out CLI (claude -p, codex exec, …) into a tool-calling model: render the request, run the process, parse the reply into text or tool calls. Toolnexus runs the tools."
+---
+
+import { Tabs, TabItem, Aside } from '@astrojs/starlight/components';
+
+<Aside type="tip" title="Why you need this">
+Some CLIs have no ACP mode, or you do not want a long-lived agent process: you want one answer per
+call, from a subscription you already pay for. Treat the CLI as a plain model. Each turn,
+`generate` writes the whole request (tools + transcript + a reply contract) to the CLI's stdin,
+and parses what comes back into either a final answer or tool calls. **Toolnexus runs the tools**,
+so the CLI never needs MCP, and its own tools can be switched off entirely.
+</Aside>
+
+## How it works
+
+1. **Render.** Turn `request.tools` and `request.messages` into one prompt, ending with the
+   reply contract: *reply with only `{"tool_calls":[{"name","arguments"}]}` or `{"content":"…"}`*.
+2. **Run.** Spawn the CLI with the prompt on stdin, wait, read stdout. A non-zero exit is an error
+   (final, not retried, as for every in-process client).
+3. **Parse.** Take the outermost `{…}` from the reply. `tool_calls` becomes `toolCalls`, `content`
+   becomes the answer, anything else is treated as the answer as-is.
+
+Toolnexus then executes the calls and calls `generate` again with the results in the transcript,
+until the CLI answers with `content`. Every turn is a fresh process, so the CLI holds no state:
+the transcript you render **is** the memory.
+
+<Aside type="note" title="What this costs">
+One process start per turn, and the full transcript re-sent each turn. Measured on the live runs
+below, a two-turn tool call took about 5 s with `claude -p` and 15 s with `codex exec`. For long
+sessions with many tool calls, an [ACP agent](/toolnexus/in-process-client/acp-agent/) keeps one warm
+process instead.
+</Aside>
+
+## The recipe
+
+Two files per language: the recipe (copy it as-is) and a `main` that uses it. Pass the CLI command
+as arguments, for example:
+
+```sh
+# Claude Code, lean: no settings, no MCP, no slash commands, no session files, no built-in tools
+claude -p --disable-slash-commands --strict-mcp-config --setting-sources "" --no-session-persistence --tools ""
+
+# Codex: no MCP servers, no AGENTS.md, nothing persisted, prompt read from stdin ("-")
+codex exec --skip-git-repo-check --ephemeral -c 'mcp_servers={}' -c project_doc_max_bytes=0 -
+```
+
+{/* recipe:one-shot-cli/main */}
+<Tabs syncKey="lang">
+<TabItem label="JavaScript">
+```js title="oneshot.mjs"
+import { spawnSync } from "node:child_process"
+import { createInProcessClient } from "toolnexus"
+
+// Render the whole request as one prompt: tools, transcript, and the reply contract.
+function render({ messages, tools = [] }) {
+  const lines = ["You are the model inside a tool-calling loop. Tools you may call:"]
+  for (const t of tools) lines.push(`- ${t.function.name}: ${t.function.description} args=${JSON.stringify(t.function.parameters)}`)
+  lines.push("", "Conversation:")
+  const called = {} // tool_call_id -> tool name, so results read "[tool add] 5"
+  for (const m of messages) {
+    if (m.role === "tool") lines.push(`[tool ${called[m.tool_call_id] ?? m.tool_call_id}] ${m.content}`)
+    else if (m.tool_calls) {
+      for (const c of m.tool_calls) called[c.id] = c.function.name
+      lines.push(`[assistant called] ${JSON.stringify(m.tool_calls.map((c) => c.function))}`)
+    }
+    else lines.push(`[${m.role}] ${typeof m.content === "string" ? m.content : JSON.stringify(m.content)}`)
+  }
+  lines.push("", 'Reply with ONLY one JSON object: {"tool_calls":[{"name":"...","arguments":{...}}]} to call tools,',
+    'or {"content":"..."} with the final answer. No prose, no code fences.')
+  return lines.join("\n")
+}
+
+// Pull the first {...} out of the reply, tolerating fences or chatter around it.
+function parse(out) {
+  const json = out.slice(out.indexOf("{"), out.lastIndexOf("}") + 1)
+  try {
+    const r = JSON.parse(json)
+    if (Array.isArray(r.tool_calls) && r.tool_calls.length) return { toolCalls: r.tool_calls.map((c) => ({ name: c.name, arguments: c.arguments ?? {} })) }
+    if (typeof r.content === "string") return { content: r.content }
+  } catch {}
+  return { content: out.trim() } // not our contract: treat it as the answer
+}
+
+// One process per turn. The prompt goes in on stdin; the reply comes back on stdout.
+export function oneShotClient({ command, args = [], model = command, timeoutMs = 300_000 }) {
+  return createInProcessClient({
+    model,
+    generate: (req) => {
+      const r = spawnSync(command, args, { input: render(req), encoding: "utf8", timeout: timeoutMs, maxBuffer: 64 << 20 })
+      if (r.status !== 0) throw new Error(`${command} exited ${r.status}: ${r.stderr || r.error}`)
+      return parse(r.stdout)
+    },
+  })
+}
+```
+```js title="main.mjs"
+import { createToolkit, defineTool } from "toolnexus"
+import { oneShotClient } from "./oneshot.mjs"
+const add = defineTool({ name: "add", description: "Add two numbers.",
+  inputSchema: { type: "object", properties: { a: { type: "number" }, b: { type: "number" } }, required: ["a", "b"] },
+  run: ({ a, b }) => `${a + b}` })
+const tk = await createToolkit({ builtins: false, extraTools: [add] })
+const [command, ...args] = process.argv.slice(2)
+const r = await oneShotClient({ command, args }).run("Use the add tool to add 19 and 23, then tell me the sum.", { toolkit: tk })
+console.log("text:", JSON.stringify(r.text), "toolCalls:", JSON.stringify(r.toolCalls))
+```
+</TabItem>
+<TabItem label="Python">
+```python title="oneshot.py"
+import json
+import subprocess
+from toolnexus import create_in_process_client
+
+
+def render(req):
+    """Render the whole request as one prompt: tools, transcript, and the reply contract."""
+    lines = ["You are the model inside a tool-calling loop. Tools you may call:"]
+    for t in req.get("tools") or []:
+        f = t["function"]
+        lines.append(f"- {f['name']}: {f.get('description', '')} args={json.dumps(f.get('parameters', {}))}")
+    lines += ["", "Conversation:"]
+    called = {}  # tool_call_id -> tool name, so results read "[tool add] 5"
+    for m in req["messages"]:
+        if m["role"] == "tool":
+            lines.append(f"[tool {called.get(m.get('tool_call_id'), m.get('tool_call_id'))}] {m['content']}")
+        elif m.get("tool_calls"):
+            for c in m["tool_calls"]:
+                called[c["id"]] = c["function"]["name"]
+            lines.append(f"[assistant called] {json.dumps([c['function'] for c in m['tool_calls']])}")
+        else:
+            c = m.get("content")
+            lines.append(f"[{m['role']}] {c if isinstance(c, str) else json.dumps(c)}")
+    lines += ["", 'Reply with ONLY one JSON object: {"tool_calls":[{"name":"...","arguments":{...}}]} to call tools,',
+              'or {"content":"..."} with the final answer. No prose, no code fences.']
+    return "\n".join(lines)
+
+
+def parse(out):
+    """Pull the first {...} out of the reply, tolerating fences or chatter around it."""
+    try:
+        r = json.loads(out[out.index("{"): out.rindex("}") + 1])
+        if r.get("tool_calls"):
+            return {"tool_calls": [{"name": c["name"], "arguments": c.get("arguments") or {}} for c in r["tool_calls"]]}
+        if isinstance(r.get("content"), str):
+            return {"content": r["content"]}
+    except ValueError:
+        pass
+    return {"content": out.strip()}  # not our contract: treat it as the answer
+
+
+def one_shot_client(command, *, model=None, timeout=300):
+    """One process per turn. The prompt goes in on stdin; the reply comes back on stdout."""
+    def generate(req):  # sync: toolnexus calls it on a worker thread
+        r = subprocess.run(command, input=render(req), capture_output=True, text=True, timeout=timeout)
+        if r.returncode != 0:
+            raise RuntimeError(f"{command[0]} exited {r.returncode}: {r.stderr}")
+        return parse(r.stdout)
+
+    return create_in_process_client(model=model or command[0], generate=generate)
+```
+```python title="main.py"
+import asyncio, sys
+from toolnexus import create_toolkit, define_tool
+from oneshot import one_shot_client
+
+def add(a: float, b: float) -> str:
+    """Add two numbers."""
+    return str(int(a + b))
+
+async def main():
+    tk = await create_toolkit(builtins=False, extra_tools=[define_tool(add, name="add")])
+    r = await one_shot_client(sys.argv[1:]).run("Use the add tool to add 19 and 23, then tell me the sum.", tk)
+    print("text:", repr(r.text), "calls:", r.tool_calls)
+asyncio.run(main())
+```
+</TabItem>
+<TabItem label="Go">
+The function is passed as `GenerateStream` only to get the run's `ctx`, so cancelling the run kills the process; it emits nothing.
+
+```go title="oneshot.go"
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"os/exec"
+	"strings"
+	"time"
+
+	tn "github.com/muthuishere/toolnexus/golang"
+)
+
+// render turns the whole request into one prompt: tools, transcript, and the reply contract.
+func render(req tn.InProcessRequest) string {
+	var b strings.Builder
+	b.WriteString("You are the model inside a tool-calling loop. Tools you may call:\n")
+	for _, t := range req.Tools {
+		f, _ := t.(map[string]any)["function"].(map[string]any)
+		params, _ := json.Marshal(f["parameters"])
+		fmt.Fprintf(&b, "- %v: %v args=%s\n", f["name"], f["description"], params)
+	}
+	b.WriteString("\nConversation:\n")
+	called := map[string]any{} // tool_call_id -> tool name, so results read "[tool add] 5"
+	for _, raw := range req.Messages {
+		m, _ := raw.(map[string]any)
+		calls, _ := m["tool_calls"].([]any)
+		switch {
+		case m["role"] == "tool":
+			name := called[fmt.Sprint(m["tool_call_id"])]
+			fmt.Fprintf(&b, "[tool %v] %v\n", name, m["content"])
+		case len(calls) > 0:
+			fns := []any{}
+			for _, c := range calls {
+				cm, _ := c.(map[string]any)
+				fn, _ := cm["function"].(map[string]any)
+				called[fmt.Sprint(cm["id"])] = fn["name"]
+				fns = append(fns, fn)
+			}
+			j, _ := json.Marshal(fns)
+			fmt.Fprintf(&b, "[assistant called] %s\n", j)
+		default:
+			fmt.Fprintf(&b, "[%v] %v\n", m["role"], m["content"])
+		}
+	}
+	b.WriteString("\nReply with ONLY one JSON object: {\"tool_calls\":[{\"name\":\"...\",\"arguments\":{...}}]} to call tools,\n" +
+		"or {\"content\":\"...\"} with the final answer. No prose, no code fences.\n")
+	return b.String()
+}
+
+// parse pulls the first {...} out of the reply, tolerating fences or chatter around it.
+func parse(out string) tn.InProcessResponse {
+	var r struct {
+		ToolCalls []struct {
+			Name      string         `json:"name"`
+			Arguments map[string]any `json:"arguments"`
+		} `json:"tool_calls"`
+		Content *string `json:"content"`
+	}
+	i, j := strings.Index(out, "{"), strings.LastIndex(out, "}")
+	if i >= 0 && j > i && json.Unmarshal([]byte(out[i:j+1]), &r) == nil {
+		if len(r.ToolCalls) > 0 {
+			calls := make([]tn.InProcessToolCall, 0, len(r.ToolCalls))
+			for _, c := range r.ToolCalls {
+				calls = append(calls, tn.InProcessToolCall{Name: c.Name, Arguments: c.Arguments})
+			}
+			return tn.InProcessResponse{ToolCalls: calls}
+		}
+		if r.Content != nil {
+			return tn.InProcessResponse{Content: *r.Content}
+		}
+	}
+	return tn.InProcessResponse{Content: strings.TrimSpace(out)} // not our contract: treat it as the answer
+}
+
+// OneShotClient runs one process per turn: prompt on stdin, reply on stdout.
+func OneShotClient(command []string, timeout time.Duration) *tn.Client {
+	return tn.CreateInProcessClient(tn.InProcessOptions{
+		Model: command[0],
+		GenerateStream: func(ctx context.Context, req tn.InProcessRequest, _ func(tn.StreamEvent)) (tn.InProcessResponse, error) {
+			ctx, cancel := context.WithTimeout(ctx, timeout)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, command[0], command[1:]...)
+			cmd.Stdin = strings.NewReader(render(req))
+			var stderr strings.Builder
+			cmd.Stderr = &stderr
+			out, err := cmd.Output()
+			if err != nil {
+				return tn.InProcessResponse{}, fmt.Errorf("%s: %w: %s", command[0], err, stderr.String())
+			}
+			return parse(string(out)), nil
+		},
+	})
+}
+```
+```go title="main.go"
+package main
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"strconv"
+	"time"
+
+	tn "github.com/muthuishere/toolnexus/golang"
+)
+
+type addArgs struct {
+	A float64 `json:"a"`
+	B float64 `json:"b"`
+}
+
+func main() {
+	ctx := context.Background()
+	add := tn.NativeToolReflect("add", "Add two numbers.", func(_ context.Context, in addArgs) (string, error) {
+		return strconv.FormatFloat(in.A+in.B, 'f', -1, 64), nil
+	})
+	tk, err := tn.CreateToolkit(ctx, tn.Options{Builtins: false, ExtraTools: []tn.Tool{add}})
+	if err != nil {
+		panic(err)
+	}
+	r, err := OneShotClient(os.Args[1:], 5*time.Minute).Run(ctx, "Use the add tool to add 19 and 23, then tell me the sum.", tk)
+	if err != nil {
+		panic(err)
+	}
+	fmt.Printf("text: %q calls: %+v\n", r.Text, r.ToolCalls)
+}
+```
+</TabItem>
+<TabItem label="Java">
+```java title="OneShot.java"
+import io.github.muthuishere.toolnexus.InProcess;
+import io.github.muthuishere.toolnexus.LlmClient;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
+
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.io.UncheckedIOException;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
+
+/** One CLI process per turn: the prompt goes in on stdin; the reply comes back on stdout. */
+@SuppressWarnings("unchecked")
+public final class OneShot {
+    private static final ObjectMapper JSON = new ObjectMapper();
+
+    private static String json(Object v) {
+        try { return JSON.writeValueAsString(v); } catch (IOException e) { throw new UncheckedIOException(e); }
+    }
+
+    // Render the whole request as one prompt: tools, transcript, and the reply contract.
+    static String render(InProcess.Request req) {
+        List<String> lines = new ArrayList<>(List.of("You are the model inside a tool-calling loop. Tools you may call:"));
+        for (Object o : req.tools) {
+            Map<String, Object> f = (Map<String, Object>) ((Map<String, Object>) o).get("function");
+            lines.add("- " + f.get("name") + ": " + f.get("description") + " args=" + json(f.get("parameters")));
+        }
+        lines.add("");
+        lines.add("Conversation:");
+        Map<Object, Object> called = new HashMap<>(); // tool_call_id -> tool name, so results read "[tool add] 5"
+        for (Object o : req.messages) {
+            Map<String, Object> m = (Map<String, Object>) o;
+            Object content = m.get("content");
+            if ("tool".equals(m.get("role"))) {
+                lines.add("[tool " + called.getOrDefault(m.get("tool_call_id"), m.get("tool_call_id")) + "] " + content);
+            } else if (m.get("tool_calls") != null) {
+                List<Object> fns = new ArrayList<>();
+                for (Object c : (List<Object>) m.get("tool_calls")) {
+                    Map<String, Object> fn = (Map<String, Object>) ((Map<String, Object>) c).get("function");
+                    called.put(((Map<String, Object>) c).get("id"), fn.get("name"));
+                    fns.add(fn);
+                }
+                lines.add("[assistant called] " + json(fns));
+            } else {
+                lines.add("[" + m.get("role") + "] " + (content instanceof String s ? s : json(content)));
+            }
+        }
+        lines.add("");
+        lines.add("Reply with ONLY one JSON object: {\"tool_calls\":[{\"name\":\"...\",\"arguments\":{...}}]} to call tools,");
+        lines.add("or {\"content\":\"...\"} with the final answer. No prose, no code fences.");
+        return String.join("\n", lines);
+    }
+
+    // Pull the first {...} out of the reply, tolerating fences or chatter around it.
+    static InProcess.Response parse(String out) {
+        int start = out.indexOf('{'), end = out.lastIndexOf('}');
+        if (start >= 0 && end > start) {
+            try {
+                Map<String, Object> r = JSON.readValue(out.substring(start, end + 1), Map.class);
+                if (r.get("tool_calls") instanceof List<?> calls && !calls.isEmpty()) {
+                    List<InProcess.ToolCall> tcs = new ArrayList<>();
+                    for (Object c : calls) {
+                        Map<String, Object> call = (Map<String, Object>) c;
+                        Object args = call.get("arguments");
+                        tcs.add(new InProcess.ToolCall((String) call.get("name"), args == null ? Map.of() : args));
+                    }
+                    return InProcess.Response.toolCalls(tcs.toArray(InProcess.ToolCall[]::new));
+                }
+                if (r.get("content") instanceof String s) return InProcess.Response.content(s);
+            } catch (IOException | ClassCastException ignored) { }
+        }
+        return InProcess.Response.content(out.strip()); // not our contract: treat it as the answer
+    }
+
+    public static LlmClient client(List<String> command) { return client(command, command.get(0), 300_000); }
+
+    public static LlmClient client(List<String> command, String model, long timeoutMs) {
+        return InProcess.createClient(new InProcess.Options().model(model).generate(req -> {
+            try {
+                Process p = new ProcessBuilder(command).start();
+                CompletableFuture<byte[]> out = CompletableFuture.supplyAsync(() -> readAll(p.getInputStream()));
+                CompletableFuture<byte[]> err = CompletableFuture.supplyAsync(() -> readAll(p.getErrorStream()));
+                try (OutputStream in = p.getOutputStream()) { in.write(render(req).getBytes(StandardCharsets.UTF_8)); }
+                if (!p.waitFor(timeoutMs, TimeUnit.MILLISECONDS)) {
+                    p.destroyForcibly();
+                    throw new IOException(command.get(0) + " timed out after " + timeoutMs + " ms");
+                }
+                if (p.exitValue() != 0)
+                    throw new IOException(command.get(0) + " exited " + p.exitValue() + ": "
+                            + new String(err.join(), StandardCharsets.UTF_8));
+                return parse(new String(out.join(), StandardCharsets.UTF_8));
+            } catch (IOException e) {
+                throw new UncheckedIOException(e);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new RuntimeException(e);
+            }
+        }));
+    }
+
+    private static byte[] readAll(InputStream s) {
+        try (s) { return s.readAllBytes(); } catch (IOException e) { return new byte[0]; }
+    }
+}
+```
+```java title="Main.java"
+// run (Java 22+, multi-file source launcher): java -cp 'lib/*' Main.java python3 tools/mock-llm/fake_cli.py
+//      (lib/ = toolnexus-0.28.0.jar + its runtime deps; OneShot.java sits next to this file)
+import io.github.muthuishere.toolnexus.LlmClient;
+import io.github.muthuishere.toolnexus.NativeTool;
+import io.github.muthuishere.toolnexus.Toolkit;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
+
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+
+public class Main {
+    @SuppressWarnings("unchecked")
+    public static void main(String[] argv) throws Exception {
+        ObjectMapper json = new ObjectMapper();
+        // Parsed from JSON so key order (and so the rendered prompt) matches every other port.
+        Map<String, Object> schema = json.readValue("{\"type\":\"object\",\"properties\":{\"a\":{\"type\":\"number\"},"
+                + "\"b\":{\"type\":\"number\"}},\"required\":[\"a\",\"b\"]}", Map.class);
+        NativeTool add = NativeTool.of("add", "Add two numbers.", schema,
+                args -> String.valueOf(((Number) args.get("a")).intValue() + ((Number) args.get("b")).intValue()));
+        try (Toolkit tk = Toolkit.create(new Toolkit.Options().builtins(false).extraTools(add))) {
+            LlmClient.RunResult r = OneShot.client(List.of(argv))
+                    .run("Use the add tool to add 19 and 23, then tell me the sum.", tk);
+            List<Map<String, Object>> calls = r.toolCalls.stream()
+                    .map(c -> {
+                        Map<String, Object> m = new LinkedHashMap<>();
+                        m.put("name", c.name); m.put("args", c.args); m.put("output", c.output); m.put("isError", c.isError);
+                        return m;
+                    }).toList();
+            System.out.println("text: " + json.writeValueAsString(r.text) + " toolCalls: " + json.writeValueAsString(calls));
+        }
+    }
+}
+```
+</TabItem>
+<TabItem label="C#">
+```csharp title="OneShot.cs"
+using System.Diagnostics;
+using System.Text.Json;
+using System.Text.Json.Nodes;
+using Toolnexus;
+
+public static class OneShot
+{
+    // JSON.stringify-style escaping, so the prompt text matches the other languages byte for byte.
+    static readonly JsonSerializerOptions Js = new() { Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
+
+    // Render the whole request as one prompt: tools, transcript, and the reply contract.
+    public static string Render(InProcess.Request req)
+    {
+        var lines = new List<string> { "You are the model inside a tool-calling loop. Tools you may call:" };
+        foreach (var t in req.Tools.Select(o => JsonSerializer.SerializeToNode(o)!["function"]!))
+            lines.Add($"- {t["name"]}: {t["description"]} args={t["parameters"]?.ToJsonString(Js)}");
+        lines.AddRange(["", "Conversation:"]);
+        var called = new Dictionary<string, string>(); // tool_call_id -> tool name, so results read "[tool add] 5"
+        foreach (var m in req.Messages.Select(o => JsonSerializer.SerializeToNode(o)!))
+        {
+            var role = (string)m["role"]!;
+            if (role == "tool")
+            {
+                var id = (string)m["tool_call_id"]!;
+                lines.Add($"[tool {called.GetValueOrDefault(id, id)}] {m["content"]}");
+            }
+            else if (m["tool_calls"] is JsonArray calls)
+            {
+                foreach (var c in calls) called[(string)c!["id"]!] = (string)c["function"]!["name"]!;
+                lines.Add($"[assistant called] {new JsonArray(calls.Select(c => c!["function"]!.DeepClone()).ToArray()).ToJsonString(Js)}");
+            }
+            else lines.Add($"[{role}] {(m["content"] is JsonValue v && v.TryGetValue<string>(out var s) ? s : m["content"]?.ToJsonString(Js))}");
+        }
+        lines.AddRange(["", """Reply with ONLY one JSON object: {"tool_calls":[{"name":"...","arguments":{...}}]} to call tools,""",
+            """or {"content":"..."} with the final answer. No prose, no code fences."""]);
+        return string.Join("\n", lines);
+    }
+
+    // Pull the first {...} out of the reply, tolerating fences or chatter around it.
+    public static InProcess.Response Parse(string output)
+    {
+        try
+        {
+            int start = output.IndexOf('{'), end = output.LastIndexOf('}');
+            var r = JsonNode.Parse(output[start..(end + 1)])!;
+            if (r["tool_calls"] is JsonArray { Count: > 0 } calls)
+                return new InProcess.Response { ToolCalls = calls.Select(c => new InProcess.ToolCall
+                    { Name = (string)c!["name"]!, Arguments = c["arguments"]?.ToJsonString() ?? "{}" }).ToList() };
+            if (r["content"] is JsonValue v && v.TryGetValue<string>(out var content)) return InProcess.Response.FromContent(content);
+        }
+        catch (Exception) { }
+        return InProcess.Response.FromContent(output.Trim()); // not our contract: treat it as the answer
+    }
+
+    // One process per turn. The prompt goes in on stdin; the reply comes back on stdout.
+    public static LlmClient Client(string command, IReadOnlyList<string> args, string? model = null, int timeoutMs = 300_000) =>
+        InProcess.CreateClient(new InProcess.Options
+        {
+            Model = model ?? command,
+            Generate = req =>
+            {
+                var psi = new ProcessStartInfo(command) { RedirectStandardInput = true, RedirectStandardOutput = true, RedirectStandardError = true };
+                foreach (var a in args) psi.ArgumentList.Add(a);
+                using var p = Process.Start(psi)!;
+                var stdout = p.StandardOutput.ReadToEndAsync();
+                var stderr = p.StandardError.ReadToEndAsync();
+                p.StandardInput.Write(Render(req));
+                p.StandardInput.Close();
+                if (!p.WaitForExit(timeoutMs)) { p.Kill(true); throw new TimeoutException($"{command} timed out"); }
+                if (p.ExitCode != 0) throw new InvalidOperationException($"{command} exited {p.ExitCode}: {stderr.Result}");
+                return Parse(stdout.Result);
+            },
+        });
+}
+```
+```csharp title="Program.cs"
+// usage: dotnet run -- <cli that reads a prompt on stdin>   (dotnet add package Toolnexus; OneShot.cs alongside)
+using System.Text.Json;
+using Toolnexus;
+
+var add = NativeTool.Of("add", "Add two numbers.",
+    new Dictionary<string, object?>
+    {
+        ["type"] = "object",
+        ["properties"] = new Dictionary<string, object?> { ["a"] = new { type = "number" }, ["b"] = new { type = "number" } },
+        ["required"] = new[] { "a", "b" },
+    },
+    args => $"{Convert.ToDouble(args["a"]?.ToString()) + Convert.ToDouble(args["b"]?.ToString())}");
+await using var tk = await Toolkit.CreateAsync(new Toolkit.Options { Builtins = false, ExtraTools = [add] });
+var r = await OneShot.Client(args[0], args[1..]).RunAsync("Use the add tool to add 19 and 23, then tell me the sum.", tk);
+Console.WriteLine($"text: {JsonSerializer.Serialize(r.Text)} toolCalls: {JsonSerializer.Serialize(r.ToolCalls.Select(c => new { name = c.Name, args = c.Args, output = c.Output }))}");
+```
+</TabItem>
+<TabItem label="Elixir">
+`System.cmd` cannot feed stdin, so the prompt goes through a temp file and `sh -c '… < file'`. There is no per-turn timeout here; wrap the call in a `Task` with a timeout if you need one.
+
+```elixir title="oneshot.exs"
+defmodule OneShot do
+  @moduledoc "One CLI process per turn: the prompt goes in on stdin, the reply comes back on stdout."
+
+  # Render the whole request as one prompt: tools, transcript, and the reply contract.
+  def render(%{messages: messages} = req) do
+    tools = for t <- req.tools || [], f = t["function"],
+                do: "- #{f["name"]}: #{f["description"]} args=#{JSON.encode!(f["parameters"])}"
+
+    {convo, _called} =
+      Enum.flat_map_reduce(messages, %{}, fn m, called ->
+        cond do
+          m["role"] == "tool" ->
+            {["[tool #{called[m["tool_call_id"]] || m["tool_call_id"]}] #{m["content"]}"], called}
+
+          m["tool_calls"] ->
+            called = Enum.reduce(m["tool_calls"], called, &Map.put(&2, &1["id"], &1["function"]["name"]))
+            {["[assistant called] " <> JSON.encode!(Enum.map(m["tool_calls"], & &1["function"]))], called}
+
+          true ->
+            c = if is_binary(m["content"]), do: m["content"], else: JSON.encode!(m["content"])
+            {["[#{m["role"]}] #{c}"], called}
+        end
+      end)
+
+    Enum.join(
+      ["You are the model inside a tool-calling loop. Tools you may call:"] ++ tools ++
+        ["", "Conversation:"] ++ convo ++
+        ["", ~s(Reply with ONLY one JSON object: {"tool_calls":[{"name":"...","arguments":{...}}]} to call tools,),
+         ~s(or {"content":"..."} with the final answer. No prose, no code fences.)],
+      "\n")
+  end
+
+  # Pull the outermost {...} out of the reply, tolerating fences or chatter around it.
+  def parse(out) do
+    json =
+      case {:binary.match(out, "{"), :binary.matches(out, "}") |> List.last()} do
+        {{s, _}, {e, _}} when e > s -> binary_part(out, s, e - s + 1)
+        _ -> ""
+      end
+
+    case JSON.decode(json) do
+      {:ok, %{"tool_calls" => [_ | _] = calls}} ->
+        %{tool_calls: Enum.map(calls, &%{name: &1["name"], arguments: &1["arguments"] || %{}})}
+
+      {:ok, %{"content" => c}} when is_binary(c) ->
+        %{content: c}
+
+      _ ->
+        %{content: String.trim(out)} # not our contract: treat it as the answer
+    end
+  end
+
+  # System.cmd cannot feed stdin, and a Port cannot half-close it to send EOF, so the prompt
+  # goes through a temp file that `sh` redirects into the command's stdin.
+  def client(command, args, model \\ nil) do
+    Toolnexus.Client.create_in_process(
+      model: model || command,
+      generate: fn req ->
+        path = Path.join(System.tmp_dir!(), "oneshot-#{System.unique_integer([:positive])}.txt")
+        File.write!(path, render(req))
+
+        try do
+          case System.cmd("sh", ["-c", ~s(f="$1"; shift; exec "$@" < "$f"), "sh", path, command | args]) do
+            {out, 0} -> parse(out)
+            {out, code} -> raise "#{command} exited #{code}: #{out}"
+          end
+        after
+          File.rm(path)
+        end
+      end
+    )
+  end
+end
+```
+```elixir title="main.exs"
+# usage: elixir main.exs <cli> [args...]    (oneshot.exs sits next to this file)
+Mix.install([{:toolnexus, "~> 0.28"}])
+Code.require_file("oneshot.exs", __DIR__)
+
+add =
+  Toolnexus.define_tool(
+    name: "add",
+    description: "Add two numbers.",
+    input_schema: %{"type" => "object", "properties" => %{"a" => %{"type" => "number"}, "b" => %{"type" => "number"}}, "required" => ["a", "b"]},
+    execute: fn %{"a" => a, "b" => b} -> "#{a + b}" end
+  )
+
+tk = Toolnexus.create_toolkit!(builtins: false, extra_tools: [add])
+[command | args] = System.argv()
+r = Toolnexus.Client.run(OneShot.client(command, args), "Use the add tool to add 19 and 23, then tell me the sum.", tk)
+IO.puts("text: #{JSON.encode!(r.text)} toolCalls: #{JSON.encode!(r.tool_calls)}")
+```
+</TabItem>
+<TabItem label="Clojure">
+koine's JSON writer sorts object keys, so the rendered tool schemas differ in key order from the other ports; the prompt's wording is the same.
+
+```clojure title="oneshot.clj"
+;; One CLI process per turn, as an in-process client. Loaded by main.clj.
+;; JSON + subprocess come from koine, which toolnexus already depends on (no extra deps).
+(ns oneshot
+  (:require [clojure.string :as str]
+            [koine.json :as json]
+            [koine.process :as proc]
+            [toolnexus.client :as client]))
+
+;; Render the whole request as one prompt: tools, transcript, and the reply contract.
+(defn- render [{:keys [messages tools]}]
+  (let [called (atom {}) ; tool_call_id -> tool name, so results read "[tool add] 5"
+        lines  (transient ["You are the model inside a tool-calling loop. Tools you may call:"])]
+    (doseq [{f :function} tools]
+      (conj! lines (str "- " (:name f) ": " (:description f) " args=" (json/write-str (:parameters f)))))
+    (conj! lines "") (conj! lines "Conversation:")
+    (doseq [m messages]
+      (cond
+        (= "tool" (:role m))
+        (conj! lines (str "[tool " (get @called (:tool_call_id m) (:tool_call_id m)) "] " (:content m)))
+        (seq (:tool_calls m))
+        (do (doseq [c (:tool_calls m)] (swap! called assoc (:id c) (get-in c [:function :name])))
+            (conj! lines (str "[assistant called] " (json/write-str (mapv :function (:tool_calls m))))))
+        :else
+        (conj! lines (str "[" (:role m) "] " (if (string? (:content m)) (:content m) (json/write-str (:content m)))))))
+    (conj! lines "")
+    (conj! lines "Reply with ONLY one JSON object: {\"tool_calls\":[{\"name\":\"...\",\"arguments\":{...}}]} to call tools,")
+    (conj! lines "or {\"content\":\"...\"} with the final answer. No prose, no code fences.")
+    (str/join "\n" (persistent! lines))))
+
+;; Pull the outermost {...} out of the reply, tolerating fences or chatter around it.
+(defn- parse [out]
+  (or (try
+        (let [r (json/read-str (subs out (str/index-of out "{") (inc (str/last-index-of out "}"))))]
+          (cond
+            (and (sequential? (:tool_calls r)) (seq (:tool_calls r)))
+            {:tool-calls (mapv (fn [c] {:name (:name c) :arguments (or (:arguments c) {})}) (:tool_calls r))}
+            (string? (:content r)) {:content (:content r)}))
+        (catch Throwable _ nil))
+      {:content (str/trim out)})) ; not our contract: treat it as the answer
+
+;; One process per turn. The prompt goes in on stdin; the reply comes back on stdout.
+(defn one-shot-client [{:keys [command model timeout-ms] :or {timeout-ms 300000}}]
+  (client/create-in-process-client
+   {:model (or model (first command))
+    :generate (fn [req]
+                (let [r (proc/sh (vec command) {:in (render req) :timeout-ms timeout-ms})]
+                  (when-not (= 0 (:exit r))
+                    (throw (ex-info (str (first command) " exited " (:exit r) ": " (:err r)) {:result r})))
+                  (parse (:out r))))}))
+```
+```clojure title="main.clj"
+;; deps.edn: {:paths ["."] :deps {net.clojars.muthuishere/toolnexus {:mvn/version "0.28.0"}}}
+;; run:      clojure -M -m main claude -p        (any CLI that reads a prompt on stdin)
+(ns main
+  (:require [koine.json :as json]
+            [oneshot :refer [one-shot-client]]
+            [toolnexus.client :as client]
+            [toolnexus.core :as tn]
+            [toolnexus.native :as native]))
+
+(def add
+  (native/native-tool
+   {:name "add" :description "Add two numbers."
+    :input-schema {:type "object" :properties {:a {:type "number"} :b {:type "number"}} :required ["a" "b"]}
+    :run (fn [{:keys [a b]}] (str (+ a b)))}))
+
+(defn -main [& command]
+  (let [tk (tn/build {:builtins false :tools [add]})
+        r  (client/run (one-shot-client {:command command})
+                       "Use the add tool to add 19 and 23, then tell me the sum." {:toolkit tk})]
+    (println "text:" (json/write-str (:text r)) "toolCalls:" (json/write-str (:tool-calls r)))
+    (shutdown-agents)))
+```
+</TabItem>
+<TabItem label="Rust">
+```rust title="oneshot.rs"
+// One CLI process per turn: the whole request goes in on stdin, the reply comes back on stdout.
+use std::collections::HashMap;
+use std::io::Write;
+use std::process::{Command, Stdio};
+use std::sync::Arc;
+
+use serde_json::{Value, json};
+use toolnexus::client::{
+    Client, InProcessOptions, InProcessRequest, InProcessResponse, InProcessToolCall,
+    create_in_process_client,
+};
+
+// Render the whole request as one prompt: tools, transcript, and the reply contract.
+fn render(req: &InProcessRequest) -> String {
+    let mut lines = vec!["You are the model inside a tool-calling loop. Tools you may call:".to_string()];
+    for t in &req.tools {
+        let f = &t["function"];
+        lines.push(format!("- {}: {} args={}", f["name"].as_str().unwrap_or_default(),
+            f["description"].as_str().unwrap_or_default(), f["parameters"]));
+    }
+    lines.extend(["".into(), "Conversation:".into()]);
+    let mut called: HashMap<String, String> = HashMap::new(); // tool_call_id -> tool name
+    for m in &req.messages {
+        if m["role"] == "tool" {
+            let id = m["tool_call_id"].as_str().unwrap_or_default();
+            let name = called.get(id).map_or(id, String::as_str);
+            lines.push(format!("[tool {name}] {}", text(&m["content"])));
+        } else if let Some(calls) = m["tool_calls"].as_array() {
+            for c in calls {
+                called.insert(text(&c["id"]), text(&c["function"]["name"]));
+            }
+            let fns: Vec<&Value> = calls.iter().map(|c| &c["function"]).collect();
+            lines.push(format!("[assistant called] {}", json!(fns)));
+        } else {
+            lines.push(format!("[{}] {}", text(&m["role"]), text(&m["content"])));
+        }
+    }
+    lines.extend(["".into(),
+        r#"Reply with ONLY one JSON object: {"tool_calls":[{"name":"...","arguments":{...}}]} to call tools,"#.into(),
+        r#"or {"content":"..."} with the final answer. No prose, no code fences."#.into()]);
+    lines.join("\n")
+}
+
+fn text(v: &Value) -> String {
+    v.as_str().map_or_else(|| v.to_string(), String::from)
+}
+
+// Pull the outermost {...} out of the reply, tolerating fences or chatter around it.
+fn parse(out: &str) -> InProcessResponse {
+    let json = match (out.find('{'), out.rfind('}')) {
+        (Some(a), Some(b)) if b > a => &out[a..=b],
+        _ => "",
+    };
+    if let Ok(r) = serde_json::from_str::<Value>(json) {
+        if let Some(calls) = r["tool_calls"].as_array().filter(|c| !c.is_empty()) {
+            let tool_calls = calls.iter().map(|c| InProcessToolCall {
+                id: String::new(),
+                name: text(&c["name"]),
+                arguments: if c["arguments"].is_null() { json!({}) } else { c["arguments"].clone() },
+            }).collect();
+            return InProcessResponse { tool_calls, ..Default::default() };
+        }
+        if let Some(content) = r["content"].as_str() {
+            return InProcessResponse { content: content.into(), ..Default::default() };
+        }
+    }
+    InProcessResponse { content: out.trim().into(), ..Default::default() } // not our contract: it is the answer
+}
+
+pub fn one_shot_client(command: String, args: Vec<String>) -> Client {
+    let model = command.clone();
+    let generate = Arc::new(move |req: InProcessRequest| {
+        let (command, args) = (command.clone(), args.clone());
+        Box::pin(async move {
+            // spawn_blocking: the child process blocks; keep the async runtime free.
+            tokio::task::spawn_blocking(move || {
+                let mut child = Command::new(&command).args(&args)
+                    .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped())
+                    .spawn().map_err(|e| format!("{command}: {e}"))?;
+                child.stdin.take().ok_or("no stdin")?.write_all(render(&req).as_bytes()).map_err(|e| e.to_string())?;
+                let out = child.wait_with_output().map_err(|e| e.to_string())?;
+                if !out.status.success() {
+                    return Err(format!("{command} exited {}: {}", out.status, String::from_utf8_lossy(&out.stderr)));
+                }
+                Ok(parse(&String::from_utf8_lossy(&out.stdout)))
+            })
+            .await
+            .map_err(|e| e.to_string())?
+        }) as _
+    });
+    create_in_process_client(InProcessOptions { model, generate: Some(generate), ..Default::default() })
+}
+```
+```rust title="main.rs"
+// Cargo.toml:
+//   toolnexus = "0.25"
+//   tokio = { version = "1", features = ["full"] }
+//   serde_json = "1"
+// run: cargo run -- python3 tools/mock-llm/fake_cli.py      (any CLI that reads stdin and prints a reply)
+mod oneshot;
+
+use serde_json::json;
+use toolnexus::{BuiltinsConfig, ToolkitOptions, create_toolkit, define_tool};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let schema = json!({"type": "object", "properties": {"a": {"type": "number"}, "b": {"type": "number"}}, "required": ["a", "b"]});
+    let add = define_tool("add", "Add two numbers.", Some(schema), |a, _ctx| async move {
+        Ok::<_, String>((a["a"].as_f64().unwrap_or(0.0) + a["b"].as_f64().unwrap_or(0.0)).to_string())
+    });
+    let tk = create_toolkit(ToolkitOptions { builtins: Some(BuiltinsConfig::off()), extra_tools: vec![add], ..Default::default() }).await?;
+    let argv: Vec<String> = std::env::args().skip(1).collect();
+    let (command, args) = argv.split_first().ok_or("usage: main <cli> [args...]")?;
+    let r = oneshot::one_shot_client(command.clone(), args.to_vec())
+        .run("Use the add tool to add 19 and 23, then tell me the sum.", &tk).await?;
+    println!("text: {} toolCalls: {}", json!(r.text), json!(r.tool_calls));
+    Ok(())
+}
+```
+</TabItem>
+</Tabs>
+{/* /recipe */}
+
+## What was verified
+
+| | how |
+|---|---|
+| all eight recipes | compiled and run on Toolnexus 0.25.0 against a fake CLI ([`fake_cli.py`](https://github.com/muthuishere/toolnexus/blob/main/tools/mock-llm/fake_cli.py): replies with a `tool_calls` object, then with `content` once it sees `[tool add] …` in the prompt). Each made one `add(19, 23)` call and answered "The sum is 42." The Java prompt was diffed against the JavaScript one: identical |
+| Go, live (0.25.0) | `claude -p` with the lean flags above: called `add(19, 23)` through Toolnexus, answered "The sum of 19 and 23 is 42." |
+| JavaScript, Python, live (0.24.0) | `claude -p` with the lean flags above (Claude Code 2.1.318), same call and answer in ~5 s; JavaScript also with `codex exec` (codex-cli 0.160.0): "The sum is 42." in ~15 s |
+
+## Per-CLI notes
+
+<Aside type="note" title="Verified on the versions below, 2026-11-05; may change">
+CLI flags move between releases. Re-check `--help` before relying on these.
+</Aside>
+
+| CLI (verified on) | command | flags and what they turn off | what still loads | context per trivial turn |
+|---|---|---|---|---|
+| **Claude Code** (2.1.318) | `claude -p` (prompt on stdin, answer on stdout) | `--disable-slash-commands` (no skills / slash commands), `--strict-mcp-config` (only MCP from `--mcp-config`, here none), `--setting-sources ""` (no user / project / local settings, hooks, plugins), `--no-session-persistence` (nothing written to disk), `--tools ""` (no built-in tools; Toolnexus runs yours) | Claude Code's base system prompt; subscription login (keychain) | **36,535** default → **21,076** with the first four flags → **2,959** adding `--tools ""` |
+| **Codex** (codex-cli 0.160.0) | `codex exec … -` (prompt on stdin) | `--skip-git-repo-check` (run outside a repo), `--ephemeral` (no session files), `-c mcp_servers={}`, `-c project_doc_max_bytes=0` (no AGENTS.md); also available: `--disable apps --disable plugins --disable hooks`, `-c skills.include_instructions=false`, `-m <model>` | codex's base prompt and its built-in tools (no verified knob removes them); its progress goes to stderr, only the final message to stdout | 26,905 → 17,204 (codex-acp 0.16.0 research, same knobs) |
+
+Any other CLI fits as long as it reads a prompt and prints an answer. If it only takes the prompt
+as an argument, pass `render(req)` as the last argument instead of stdin (mind the OS argument
+length limit for long transcripts).
+
+<Aside type="caution" title="It is a prompt contract, not a protocol">
+The CLI model is asked to reply in JSON; nothing forces it to. `parse` falls back to treating the
+reply as the final answer, which ends the run instead of looping forever. If a model keeps
+answering in prose, tighten the contract text, or ask the CLI for structured output if it has a
+flag for it (Claude Code: `--output-format json` wraps the reply, it does not constrain it).
+</Aside>

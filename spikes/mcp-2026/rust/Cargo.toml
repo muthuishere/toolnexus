@@ -1,0 +1,39 @@
+[package]
+name = "mcp2026"
+version = "0.0.1"
+edition = "2024"
+rust-version = "1.85"
+description = "In-house MCP 2026-07-28 client + server spike (Rust). No MCP SDK."
+license = "MIT"
+publish = false
+autoexamples = true
+
+[workspace]
+
+[[bin]]
+name = "spike"
+path = "src/bin/spike.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
+bytes = "1"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "cookies"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"] }
+rsa = { version = "0.9", features = ["sha2"] }
+sha2 = "0.10"
+base64 = "0.22"
+rand = "0.8"
+url = "2"
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+
+[dev-dependencies]
+regex = "1"
+
+[profile.dev.package."*"]
+opt-level = 3

@@ -6,12 +6,23 @@
 import { readFileSync } from "node:fs"
 import { Client } from "@modelcontextprotocol/sdk/client/index.js"
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
-import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js"
-import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js"
+import { AjvJsonSchemaValidator } from "@modelcontextprotocol/sdk/validation/ajv"
+import type { jsonSchemaValidator } from "@modelcontextprotocol/sdk/validation"
+import { AdoptedStdioTransport } from "./mcp2026/stdio.js"
 import type { Tool as McpToolDef, ElicitRequest, ElicitResult } from "@modelcontextprotocol/sdk/types.js"
 import { ElicitRequestSchema } from "@modelcontextprotocol/sdk/types.js"
 import { type JSONSchema, type Tool, type ToolContext, type ToolHints, type ToolResult, type McpStatus, type Request, type Answer, sanitize } from "./types.js"
 import { type ContentPart, summarizePart } from "./content.js"
+import type { SkillDef } from "./skill.js"
+import { type AuthConfig, type ModernServer, type Load2026Options } from "./mcp2026/source.js"
+import { PendingError, type OAuth, type TokenStore } from "./mcp2026/auth.js"
+export { Token, MemoryTokenStore, type TokenStore } from "./mcp2026/auth.js"
+export type { AuthConfig } from "./mcp2026/source.js"
+
+// Loaded on first use, not at import: the 2026 client is only needed once a config is loaded,
+// and the SDK's remote transports (streamable-HTTP, SSE) only when a remote server falls back.
+let mcp2026: Promise<typeof import("./mcp2026/source.js")> | undefined
+const loadMcp2026 = () => (mcp2026 ??= import("./mcp2026/source.js"))
 
 // ---------------------------------------------------------------------------
 // MCP elicitation bridge (§10). A server can ask US for input mid-`tools/call`
@@ -56,6 +67,10 @@ export interface LocalServer {
    * builtins/skills filter (nil/empty ⇒ all; ≥1 true ⇒ allowlist; only-false ⇒ drop-list; unknown
    * ⇒ ignore+warn). Applied to the listed defs before sanitize/prefix. */
   tools?: Record<string, boolean>
+  /** §2.8 lazy tool search: expose `<server>_search_tools` + `<server>_call_tool` instead of every tool. */
+  toolSearch?: boolean
+  /** §2.8 what this server is for (shown by search_tools). */
+  description?: string
 }
 
 export interface RemoteServer {
@@ -67,6 +82,11 @@ export interface RemoteServer {
   timeout?: number
   /** §2 Gap 7. Per-server tool allowlist (see LocalServer.tools). */
   tools?: Record<string, boolean>
+  /** §2.8 lazy tool search (see LocalServer.toolSearch). */
+  toolSearch?: boolean
+  description?: string
+  /** §2A OAuth 2.1 client settings. Absent ⇒ a 401 still triggers the flow (CIMD if the AS supports it). */
+  auth?: AuthConfig
 }
 
 export type ServerConfig = LocalServer | RemoteServer
@@ -254,6 +274,23 @@ async function paginateTools(client: Client, timeout: number): Promise<McpToolDe
   throw new Error(`MCP list exceeded ${MAX_LIST_PAGES} pages`)
 }
 
+/** §2 `tools/call` result → ToolResult (shared by the 2026 path and the frozen fallback). */
+export function mapCallToolResult(result: any, server: string): ToolResult {
+  // Parts are collected BEFORE any branch returns: the isError and structuredContent
+  // short-circuits both read `content[]` on the way past, so neither reintroduces the
+  // silent drop this mapping exists to remove (§2).
+  const parts = mcpContentToParts(result.content)
+  const withParts = (r: ToolResult): ToolResult => (parts ? { ...r, parts } : r)
+  if (result.isError) {
+    return withParts({ output: formatToolErrorContent(result.content), isError: true, metadata: { server } })
+  }
+  if (result.structuredContent !== undefined && result.structuredContent !== null) {
+    return withParts({ output: JSON.stringify(result.structuredContent), isError: false, metadata: { server } })
+  }
+  const text = joinTextContent(result.content)
+  return withParts({ output: text || describeMcpParts(parts), isError: false, metadata: { server } })
+}
+
 function convertTool(server: string, def: McpToolDef, client: Client, timeout: number): Tool {
   const inputSchema: JSONSchema = {
     ...(def.inputSchema as object),
@@ -277,19 +314,7 @@ function convertTool(server: string, def: McpToolDef, client: Client, timeout: n
           // token that matches no in-flight request are dropped by the SDK, so they never reset.
           { onprogress: () => {}, resetTimeoutOnProgress: true, signal: ctx?.signal, timeout: ctx?.timeout ?? timeout },
         )
-        // Parts are collected BEFORE any branch returns: the isError and structuredContent
-        // short-circuits both read `content[]` on the way past, so neither reintroduces the
-        // silent drop this mapping exists to remove (§2).
-        const parts = mcpContentToParts(result.content)
-        const withParts = (r: ToolResult): ToolResult => (parts ? { ...r, parts } : r)
-        if (result.isError) {
-          return withParts({ output: formatToolErrorContent(result.content), isError: true, metadata: { server } })
-        }
-        if (result.structuredContent !== undefined && result.structuredContent !== null) {
-          return withParts({ output: JSON.stringify(result.structuredContent), isError: false, metadata: { server } })
-        }
-        const text = joinTextContent(result.content)
-        return withParts({ output: text || describeMcpParts(parts), isError: false, metadata: { server } })
+        return mapCallToolResult(result, server)
       } catch (e) {
         return { output: e instanceof Error ? e.message : String(e), isError: true, metadata: { server } }
       }
@@ -307,6 +332,8 @@ export interface McpSource {
    * source is closed.
    */
   resourceTools(): Tool[]
+  /** §2.7 skills served by 2026 servers (skills extension); the toolkit adds them to the `skill` tool. */
+  skills: SkillDef[]
 }
 
 /** One server's outcome, reported by `loadMcp`'s `onServer` the moment that server finishes. */
@@ -331,8 +358,19 @@ export function mcpHints(a: { readOnlyHint?: boolean; destructiveHint?: boolean;
 }
 
 interface ServerConn {
-  client: Client
-  timeout: number
+  listResources(signal?: AbortSignal): Promise<any[]>
+  readResource(uri: string, signal?: AbortSignal): Promise<any[]>
+}
+
+function sdkConn(client: Client, timeout: number): ServerConn {
+  return {
+    listResources: async (signal) => ((await client.listResources({}, { timeout, signal })) as any).resources ?? [],
+    readResource: async (uri, signal) => ((await client.readResource({ uri }, { timeout, signal })) as any).contents ?? [],
+  }
+}
+
+function modernConn(s: ModernServer): ServerConn {
+  return { listResources: (signal) => s.listResources(signal), readResource: (uri, signal) => s.readResource(uri, signal) }
 }
 
 function resourceTools(servers: Map<string, ServerConn>): Tool[] {
@@ -369,8 +407,7 @@ function resourceTools(servers: Map<string, ServerConn>): Tool[] {
       for (const name of targets) {
         const c = conn(name)
         try {
-          const res: any = await c.client.listResources({}, { timeout: c.timeout, signal: ctx?.signal })
-          for (const r of res.resources ?? []) {
+          for (const r of await c.listResources(ctx?.signal)) {
             let line = `${name} ${r.uri}`
             if (r.name) line += ` — ${r.name}`
             if (r.mimeType) line += ` (${r.mimeType})`
@@ -411,9 +448,8 @@ function resourceTools(servers: Map<string, ServerConn>): Tool[] {
       }
       if (!uri) return { output: "read_mcp_resource: uri is required", isError: true }
       try {
-        const res: any = await c.client.readResource({ uri }, { timeout: c.timeout, signal: ctx?.signal })
         const parts: string[] = []
-        for (const rc of res.contents ?? []) {
+        for (const rc of await c.readResource(uri, ctx?.signal)) {
           if (typeof rc.text === "string") parts.push(rc.text)
           else if (typeof rc.blob === "string") parts.push(`[binary ${rc.mimeType ?? ""}, ${rc.blob.length} base64 chars]`)
         }
@@ -430,8 +466,23 @@ function resourceTools(servers: Map<string, ServerConn>): Tool[] {
  *  exists. Separated from connect so the caller ALWAYS holds a closeable reference — even if the
  *  connect is later abandoned by a timeout/abort, `client.close()` still terminates any spawned
  *  stdio child (no orphaned processes on cancellation). */
+/**
+ * The SDK's default validator, built on first use instead of per Client. Building an Ajv instance
+ * (meta-schemas + formats) costs ~2-3 ms on every connect, yet it is only consulted when a tool
+ * declares an `outputSchema`. Same validator, same results — just not paid for up front.
+ */
+class LazyAjvValidator implements jsonSchemaValidator {
+  private inner?: AjvJsonSchemaValidator
+  getValidator<T>(schema: Parameters<jsonSchemaValidator["getValidator"]>[0]) {
+    return (this.inner ??= new AjvJsonSchemaValidator()).getValidator<T>(schema)
+  }
+}
+
 function newMcpClient(waitFor?: (request: Request) => Promise<Answer>): Client {
-  const client = new Client({ name: "toolnexus", version: "0.1.0" }, { capabilities: waitFor ? { elicitation: {} } : {} })
+  const client = new Client(
+    { name: "toolnexus", version: "0.1.0" },
+    { capabilities: waitFor ? { elicitation: {} } : {}, jsonSchemaValidator: new LazyAjvValidator() },
+  )
   if (waitFor) {
     client.setRequestHandler(ElicitRequestSchema, async (request) =>
       answerToElicitResult(await waitFor(elicitationToRequest(request.params))),
@@ -441,15 +492,20 @@ function newMcpClient(waitFor?: (request: Request) => Promise<Answer>): Client {
 }
 
 /** Connect an existing client's transport (remote streamable-HTTP with SSE fallback, or local stdio). */
-async function connectTransport(client: Client, cfg: ServerConfig): Promise<void> {
+async function connectTransport(client: Client, cfg: ServerConfig, auth?: FallbackAuth): Promise<void> {
   if (isRemote(cfg)) {
     const url = new URL(cfg.url)
     const expanded = expandEnvHeaders(cfg.headers)
     const requestInit = expanded ? { headers: expanded } : undefined
+    const fetch = auth ? bearerFetch(cfg.url, auth) : undefined
+    const [{ StreamableHTTPClientTransport }, { SSEClientTransport }] = await Promise.all([
+      import("@modelcontextprotocol/sdk/client/streamableHttp.js"),
+      import("@modelcontextprotocol/sdk/client/sse.js"),
+    ])
     try {
-      await client.connect(new StreamableHTTPClientTransport(url, { requestInit }))
+      await client.connect(new StreamableHTTPClientTransport(url, { requestInit, ...(fetch ? { fetch } : {}) }))
     } catch {
-      await client.connect(new SSEClientTransport(url, { requestInit }))
+      await client.connect(new SSEClientTransport(url, { requestInit, ...(fetch ? { fetch } : {}) }))
     }
   } else {
     const local = cfg as LocalServer
@@ -466,14 +522,94 @@ async function connectTransport(client: Client, cfg: ServerConfig): Promise<void
   }
 }
 
+interface FallbackAuth {
+  oauth: OAuth
+  waitFor?: (request: Request) => Promise<Answer>
+}
+
+/**
+ * §2A.1a frozen fallback + OAuth: the SDK transport's fetch attaches the current bearer token
+ * (refreshing as needed); a 401/403 challenge runs the same OAuth flow once, then the request is
+ * re-sent. A pause is answered through waitFor, else the request fails ("authorization pending").
+ */
+function bearerFetch(resource: string, a: FallbackAuth): typeof globalThis.fetch {
+  return async (input: any, init?: any) => {
+    for (let attempt = 0; ; attempt++) {
+      const headers = new Headers(init?.headers)
+      const tok = await a.oauth.bearer(resource)
+      if (tok) headers.set("Authorization", "Bearer " + tok)
+      const res = await globalThis.fetch(input, { ...init, headers })
+      const www = res.headers.get("www-authenticate") ?? ""
+      if (attempt > 0 || (res.status !== 401 && res.status !== 403) || !www) return res
+      try {
+        await a.oauth.challenge(resource, res.status, www, tok, async () => ({}))
+      } catch (e) {
+        if (!(e instanceof PendingError)) throw e
+        if (!a.waitFor) throw new Error("authorization pending")
+        const ans = await a.waitFor({ ...e.pending })
+        if (!ans?.ok) throw new Error(`authorization denied: ${ans?.reason ?? "cancelled"}`)
+        const cb = ans.data?.callbackUrl
+        if (typeof cb !== "string") throw new Error("authorization answer carries no data.callbackUrl")
+        await a.oauth.resume(e.pending.id, cb)
+      }
+    }
+  }
+}
+
+/** Options shared by loadMcp / listMcpTools for the 2026 path and OAuth (§2A.1a). */
+export interface McpLoadOptions {
+  waitFor?: (request: Request) => Promise<Answer>
+  signal?: AbortSignal
+  /** Where OAuth tokens live (default: in memory, per load). */
+  tokenStore?: TokenStore
+  /** How `auto` OAuth mode opens the authorization URL (default: the OS opener). */
+  openUrl?: (url: string) => unknown | Promise<unknown>
+  /** Final exposed names to drop; on a tool-search server they are also hidden from search/call. */
+  disableTools?: string[]
+}
+
+type Connected =
+  | { kind: "modern"; server: ModernServer }
+  | { kind: "sdk"; client: Client; defs: McpToolDef[] }
+
+/**
+ * Discover first (§2.2): a 2026 server is used directly; an old one (§2.2a) gets the frozen SDK
+ * path, with the OAuth bearer attached for remote servers. Throws ⇒ the server failed.
+ */
+async function connectServer(name: string, cfg: ServerConfig, timeout: number, opts: McpLoadOptions, store: TokenStore, sdkClient: () => Client, onSdk: (c: Client) => void): Promise<Connected> {
+  const { newOAuth, probe } = await loadMcp2026()
+  const o: Load2026Options = { waitFor: opts.waitFor, tokenStore: store, openUrl: opts.openUrl, signal: opts.signal, disableTools: opts.disableTools }
+  const remote = isRemote(cfg)
+  const oauth = remote ? newOAuth(cfg.auth, o, store) : undefined
+  const p = await probe(
+    {
+      name, timeout, tools: cfg.tools, toolSearch: cfg.toolSearch === true, description: cfg.description,
+      remote: remote ? { url: cfg.url, headers: expandEnvHeaders(cfg.headers), oauth: oauth! } : undefined,
+      local: remote ? undefined : {
+        argv: (cfg as LocalServer).command,
+        env: { ...process.env, ...((cfg as LocalServer).environment ?? (cfg as LocalServer).env ?? {}) },
+        cwd: (cfg as LocalServer).cwd,
+      },
+    },
+    o,
+  )
+  if (p.kind === "modern") return p
+  const client = sdkClient()
+  onSdk(client)
+  const connecting = p.reuse
+    ? client.connect(new AdoptedStdioTransport(p.reuse.child, p.reuse.leftover)) // §2.2a: same child, no respawn
+    : connectTransport(client, cfg, oauth ? { oauth, waitFor: opts.waitFor } : undefined)
+  await raceTimeout(connecting, timeout, opts.signal)
+  const defs = await raceTimeout(paginateTools(client, timeout), timeout, opts.signal)
+  return { kind: "sdk", client, defs }
+}
+
 /** Connect to every enabled server, list + convert tools. Failures are isolated.
  *  §2 Gap 3: an optional `signal` bounds each connect/list by the server timeout and aborts the
  *  whole load promptly on parent cancellation. */
 export async function loadMcp(
   input: string | object,
-  opts?: {
-    waitFor?: (request: Request) => Promise<Answer>
-    signal?: AbortSignal
+  opts?: McpLoadOptions & {
     /**
      * Called once per server the moment it is connected, failed or found disabled (SPEC §4C),
      * so a host can register a fast server's tools while a slow one is still connecting.
@@ -486,8 +622,10 @@ export async function loadMcp(
   const config = parseMcpConfig(input)
   const tools: Tool[] = []
   const status: Record<string, McpStatus> = {}
-  const clients: Client[] = []
+  const clients: { close(): Promise<void> }[] = []
   const servers = new Map<string, ServerConn>()
+  const skills: SkillDef[] = []
+  const store = (await loadMcp2026()).defaultTokenStore({ tokenStore: opts?.tokenStore })
   const waitFor = opts?.waitFor
   const signal = opts?.signal
   const onServer = opts?.onServer
@@ -512,22 +650,29 @@ export async function loadMcp(
         return
       }
       const timeout = cfg.timeout ?? DEFAULT_TIMEOUT
-      // Create the client up front so a timed-out/aborted connect still has a closeable handle
-      // (its stdio child is killed by close() — never orphaned).
-      const client = newMcpClient(waitFor)
+      // The fallback SDK client is created before its connect so a timed-out/aborted connect
+      // still has a closeable handle (its stdio child is killed by close() — never orphaned).
+      let client: Client | undefined
       try {
-        await raceTimeout(connectTransport(client, cfg), timeout, signal)
-        const defs = await raceTimeout(paginateTools(client, timeout), timeout, signal)
-        const kept = applyToolsFilter(name, defs, (cfg as { tools?: Record<string, boolean> }).tools)
-        const converted = kept.map((def) => convertTool(name, def, client, timeout))
+        const c = await connectServer(name, cfg, timeout, opts ?? {}, store, () => newMcpClient(waitFor), (cl) => (client = cl))
+        let converted: Tool[]
+        if (c.kind === "modern") {
+          converted = c.server.tools()
+          skills.push(...c.server.skills)
+          clients.push(c.server)
+          servers.set(name, modernConn(c.server))
+        } else {
+          const kept = applyToolsFilter(name, c.defs, (cfg as { tools?: Record<string, boolean> }).tools)
+          converted = kept.map((def) => convertTool(name, def, c.client, timeout))
+          clients.push(c.client)
+          servers.set(name, sdkConn(c.client, timeout))
+        }
         tools.push(...converted)
-        clients.push(client)
-        servers.set(name, { client, timeout })
         status[name] = "connected"
         report({ name, status: "connected", tools: converted })
       } catch (e) {
         status[name] = "failed"
-        await client.close().catch(() => {})
+        await (client as Client | undefined)?.close().catch(() => {})
         // Parent cancellation/deadline aborts the whole load (§2 Gap 3, A1); a per-server timeout
         // within budget isolates just this server.
         if (signal?.aborted) throw e
@@ -558,6 +703,7 @@ export async function loadMcp(
       await Promise.all(clients.map((c) => c.close().catch(() => {})))
     },
     resourceTools: () => resourceTools(servers),
+    skills,
   }
 }
 
@@ -579,11 +725,12 @@ export interface McpInventory {
  * §2 Gap 6. Connect to every enabled server, list tool definitions, and DISCONNECT before
  * returning — no toolkit, no execute wiring, nothing left running. Failure isolation as in loadMcp.
  */
-export async function listMcpTools(input: string | object, opts?: { signal?: AbortSignal }): Promise<McpInventory> {
+export async function listMcpTools(input: string | object, opts?: McpLoadOptions): Promise<McpInventory> {
   const config = parseMcpConfig(input)
   const toolsByServer: Record<string, ToolInfo[]> = {}
   const status: Record<string, McpStatus> = {}
   const signal = opts?.signal
+  const store = (await loadMcp2026()).defaultTokenStore({ tokenStore: opts?.tokenStore })
 
   await Promise.all(
     Object.entries(config).map(async ([name, cfg]) => {
@@ -592,11 +739,12 @@ export async function listMcpTools(input: string | object, opts?: { signal?: Abo
         return
       }
       const timeout = cfg.timeout ?? DEFAULT_TIMEOUT
-      // Client created up front so an aborted/timed-out connect is still closed (no orphaned child).
-      const client = newMcpClient()
+      // The fallback client is created before its connect so an aborted/timed-out connect is still closed.
+      let client: Client | undefined
       try {
-        await raceTimeout(connectTransport(client, cfg), timeout, signal)
-        const defs = await raceTimeout(paginateTools(client, timeout), timeout, signal)
+        const c = await connectServer(name, cfg, timeout, { ...opts, waitFor: opts?.waitFor }, store, () => newMcpClient(), (cl) => (client = cl))
+        const defs: any[] = c.kind === "modern" ? c.server.rawDefs() : c.defs
+        if (c.kind === "modern") await c.server.close().catch(() => {})
         toolsByServer[name] = defs.map((d) => ({
           name: d.name,
           description: d.description ?? "",
@@ -609,10 +757,10 @@ export async function listMcpTools(input: string | object, opts?: { signal?: Abo
         status[name] = "connected"
       } catch (e) {
         status[name] = "failed"
-        if (signal?.aborted) { await client.close().catch(() => {}); throw e }
+        if (signal?.aborted) { await (client as Client | undefined)?.close().catch(() => {}); throw e }
         console.warn(`[toolnexus] MCP server "${name}" failed: ${e instanceof Error ? e.message : String(e)}`)
       } finally {
-        await client.close().catch(() => {})
+        await (client as Client | undefined)?.close().catch(() => {})
       }
     }),
   )

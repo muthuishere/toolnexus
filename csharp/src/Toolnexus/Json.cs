@@ -27,7 +27,14 @@ public static class Json
     {
         try
         {
-            return JsonSerializer.Serialize(Normalize(value), Compact);
+            // Fast path: write the plain CLR model straight to a Utf8JsonWriter instead of
+            // copying it (Normalize) and serializing the copy polymorphically by reflection.
+            // Same bytes: anything outside the plain model goes through the old path per value, and
+            // MaxDepth 63 fails exactly where the serializer's default depth limit (64) did.
+            var buf = new System.Buffers.ArrayBufferWriter<byte>(256);
+            using (var w = new Utf8JsonWriter(buf, new JsonWriterOptions { Encoder = Compact.Encoder, MaxDepth = 63 }))
+                WriteFast(w, value);
+            return System.Text.Encoding.UTF8.GetString(buf.WrittenSpan);
         }
         catch
         {
@@ -188,6 +195,35 @@ public static class Json
             case JsonValueKind.Undefined:
             default:
                 return null;
+        }
+    }
+
+    private static void WriteFast(Utf8JsonWriter w, object? value)
+    {
+        switch (value)
+        {
+            case null: w.WriteNullValue(); break;
+            case string s: w.WriteStringValue(s); break;
+            case bool b: w.WriteBooleanValue(b); break;
+            case long l: w.WriteNumberValue(l); break;
+            case int i: w.WriteNumberValue(i); break;
+            case Dictionary<string, object?> d:
+                w.WriteStartObject();
+                foreach (var (k, v) in d)
+                {
+                    w.WritePropertyName(k);
+                    WriteFast(w, v);
+                }
+                w.WriteEndObject();
+                break;
+            case List<object?> list:
+                w.WriteStartArray();
+                foreach (var item in list) WriteFast(w, item);
+                w.WriteEndArray();
+                break;
+            default:
+                JsonSerializer.Serialize(w, Normalize(value), Compact);
+                break;
         }
     }
 

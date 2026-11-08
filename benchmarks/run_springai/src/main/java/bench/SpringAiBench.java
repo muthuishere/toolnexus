@@ -1,6 +1,7 @@
 package bench;
 
 import io.modelcontextprotocol.client.McpSyncClient;
+import org.springaicommunity.agent.tools.SkillsTool;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.model.ChatModel;
 import org.springframework.ai.chat.prompt.Prompt;
@@ -26,6 +27,10 @@ import java.util.Map;
  * so the "init" figure below is Spring Boot context-ready time INCLUDING MCP
  * discovery (not a toolkit-only build). The per-request figure is the clean,
  * directly-comparable number. JVM warmup handled by warmup iterations.
+ *
+ * BENCH_CONFIG=skills additionally registers spring-ai-agent-utils' SkillsTool
+ * over the shared examples/skills folder (hello-world), the Spring analogue of
+ * toolnexus's `full` config (MCP tools + the `skill` tool). Default = mcp only.
  */
 @SpringBootApplication
 public class SpringAiBench {
@@ -54,14 +59,22 @@ public class SpringAiBench {
                 callbacks.addAll(Arrays.asList(provider.getToolCallbacks()));
             }
         }
+        String config = env("BENCH_CONFIG", "mcp");
+        if (config.equals("skills")) {
+            callbacks.add(SkillsTool.builder()
+                    .addSkillsDirectory(System.getenv("BENCH_REPO") + "/examples/skills")
+                    .build());
+        }
         System.err.println("[bench] tool callbacks discovered: " + callbacks.size()
                 + " names=" + callbacks.stream().map(ToolCallback::getToolDefinition).toList());
         ToolCallback[] cbArray = callbacks.toArray(new ToolCallback[0]);
-        OpenAiChatOptions opts = OpenAiChatOptions.builder()
+        var opts = OpenAiChatOptions.builder()
                 .model("mock-model")
                 .toolCallbacks(cbArray)
-                .internalToolExecutionEnabled(true)
                 .build();
+        // Spring AI 2.0 moved the tool-execution loop out of ChatModel.call into
+        // ChatClient, so the 2.x runner drives the loop through ChatClient.
+        ChatClient chat = ChatClient.create(model); // model name comes from application.properties
         double initMs = (System.nanoTime() - t0) / 1_000_000.0;
         int toolCount = callbacks.size();
 
@@ -69,20 +82,20 @@ public class SpringAiBench {
         // which was dropping the runtime tool callbacks). OpenAiChatModel runs the
         // internal tool-calling loop when internalToolExecutionEnabled is true.
         for (int i = 0; i < warmup; i++) {
-            model.call(new Prompt(question, opts)).getResult().getOutput().getText();
+            chat.prompt(question).toolCallbacks(cbArray).call().content();
         }
 
         List<Double> lat = new ArrayList<>();
         String finalText = "";
         for (int i = 0; i < runs; i++) {
             long s = System.nanoTime();
-            finalText = model.call(new Prompt(question, opts))
-                    .getResult().getOutput().getText();
+            finalText = chat.prompt(question).toolCallbacks(cbArray).call().content();
             lat.add((System.nanoTime() - s) / 1_000_000.0);
         }
 
         StringBuilder sb = new StringBuilder();
-        sb.append("BENCHJSON {\"framework\":\"spring-ai-java\",\"language\":\"java\",");
+        sb.append("BENCHJSON {\"framework\":\"spring-ai-java")
+          .append(config.equals("skills") ? "-skills" : "").append("\",\"language\":\"java\",");
         sb.append("\"init_ms\":").append(round(initMs)).append(",");
         sb.append("\"tool_count\":").append(toolCount).append(",");
         sb.append("\"latencies_ms\":[");

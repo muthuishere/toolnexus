@@ -1,0 +1,14 @@
+# Local-only Keycloak for the MCP 2026-07-28 OAuth spike. Dev mode, bound to 127.0.0.1.
+# Credentials here are throwaway test values for a container that never leaves localhost.
+services:
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.8.1
+    command: ["start-dev", "--import-realm", "--http-port=8180", "--features=cimd,resource-indicators"]
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: admin-test-only
+      KC_HEALTH_ENABLED: "true"
+    ports:
+      - "127.0.0.1:8180:8180"
+    volumes:
+      - ./realm-toolnexus.json:/opt/keycloak/data/import/realm-toolnexus.json:ro

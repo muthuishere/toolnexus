@@ -234,3 +234,34 @@ defmodule Toolnexus.HookError do
     %__MODULE__{hook: opts[:hook], reason: reason, message: "#{opts[:hook]} hook failed: #{text}"}
   end
 end
+
+defmodule Toolnexus.ContextOverflowError do
+  @moduledoc """
+  Reactive compaction (SPEC §7F.1, `:compact_on_overflow`) could not make the prompt fit.
+
+  Raised instead of the `Toolnexus.ProviderError` an overflow would otherwise surface as,
+  when the breaker trips (`compactions = 3`) or the hook made no progress (returned nothing,
+  or a transcript that was not strictly shorter). `status` and `body` are the last provider
+  error's, with the same redaction as `Toolnexus.ProviderError`. Never a §10 Pending.
+  """
+  defexception [:compactions, :status, :body, :message]
+
+  @type t :: %__MODULE__{
+          compactions: non_neg_integer(),
+          status: non_neg_integer() | nil,
+          body: term(),
+          message: String.t()
+        }
+
+  @impl true
+  def exception(opts) when is_list(opts) do
+    n = opts[:compactions] || 0
+
+    %__MODULE__{
+      compactions: n,
+      status: opts[:status],
+      body: opts[:body],
+      message: "context overflow: #{n} reactive compaction(s) did not make the prompt fit"
+    }
+  end
+end

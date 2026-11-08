@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
+exec java -cp "$(cat "$ROOT/interop/mcp2026/.build/clojure/classpath")" clojure.main -m toolnexus.interop.mcp2026-client "$@"

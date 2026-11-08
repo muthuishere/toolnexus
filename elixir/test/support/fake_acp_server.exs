@@ -23,6 +23,11 @@
 #                 output while filtering to agent_message_chunk stays clean.
 #   slow        - sleeps before replying, so a test can prove turns on one
 #                 session are serialised (never sent concurrently).
+#   seam        - conformance/acp-client/cases.json: records the params of
+#                 initialize / session/new / set_config_option / set_model and
+#                 replies to a prompt with them as JSON, honouring the fakeEnv
+#                 flags TN_FAKE_DRIP, TN_FAKE_NO_CONFIG_OPTION, TN_FAKE_REJECT_MODE,
+#                 TN_FAKE_EXIT_ON_PROMPT and TN_FAKE_FS_REQUEST.
 #
 # Launch (Jason comes from the project's build):
 #   elixir -pa _build/test/lib/jason/ebin test/support/fake_acp_server.exs <scenario>
@@ -30,7 +35,7 @@
 defmodule FakeAcpServer do
   def run do
     scenario = List.first(System.argv()) || "echo"
-    loop(scenario, %{new_count: 0, prompt_n: 0, history: [], new_params: %{}})
+    loop(scenario, %{new_count: 0, prompt_n: 0, history: [], new_params: %{}, rec: %{}})
   end
 
   defp loop(scenario, state) do
@@ -49,19 +54,57 @@ defmodule FakeAcpServer do
     end
   end
 
-  defp handle(_scenario, %{"method" => "initialize", "id" => id}, state) do
+  defp handle(_scenario, %{"method" => "initialize", "id" => id} = msg, state) do
     reply(id, %{"protocolVersion" => 1, "agentCapabilities" => %{"loadSession" => false}})
-    %{state | new_count: state.new_count}
+    record(state, "initialize", msg)
+  end
+
+  defp handle("seam", %{"method" => "session/set_config_option", "id" => id} = msg, state) do
+    if System.get_env("TN_FAKE_NO_CONFIG_OPTION") == "1" do
+      send_msg(%{
+        "jsonrpc" => "2.0",
+        "id" => id,
+        "error" => %{"code" => -32601, "message" => "Method not found"}
+      })
+    else
+      reply(id, %{})
+    end
+
+    record(state, "session/set_config_option", msg)
+  end
+
+  defp handle("seam", %{"method" => "session/set_model", "id" => id} = msg, state) do
+    if System.get_env("TN_FAKE_NO_SET_MODEL") == "1" do
+      send_msg(%{
+        "jsonrpc" => "2.0",
+        "id" => id,
+        "error" => %{"code" => -32601, "message" => "Method not found"}
+      })
+    else
+      reply(id, %{})
+    end
+
+    record(state, "session/set_model", msg)
   end
 
   defp handle(_scenario, %{"method" => "session/new", "id" => id} = msg, state) do
     reply(id, %{"sessionId" => "sess-1"})
+    state = record(state, "session/new", msg)
     %{state | new_count: state.new_count + 1, new_params: msg["params"] || %{}}
   end
 
-  defp handle(_scenario, %{"method" => "session/set_mode", "id" => id}, state) do
-    reply(id, %{})
-    state
+  defp handle(_scenario, %{"method" => "session/set_mode", "id" => id} = msg, state) do
+    if System.get_env("TN_FAKE_REJECT_MODE") == "1" do
+      send_msg(%{
+        "jsonrpc" => "2.0",
+        "id" => id,
+        "error" => %{"code" => -32602, "message" => "unknown mode"}
+      })
+    else
+      reply(id, %{})
+    end
+
+    record(state, "session/set_mode", msg)
   end
 
   defp handle(scenario, %{"method" => "session/prompt", "id" => id, "params" => params}, state) do
@@ -83,7 +126,85 @@ defmodule FakeAcpServer do
 
   defp handle(_scenario, _msg, state), do: state
 
+  # Last params per method, plus "_counts" — how many times each was received.
+  defp record(state, method, msg) do
+    counts = Map.update(state.rec["_counts"] || %{}, method, 1, &(&1 + 1))
+    %{state | rec: state.rec |> Map.put(method, msg["params"]) |> Map.put("_counts", counts)}
+  end
+
   # ---- scenarios --------------------------------------------------------
+
+  defp dispatch("seam", id, _text, state) do
+    cond do
+      System.get_env("TN_FAKE_EXIT_ON_PROMPT") == "1" ->
+        System.halt(0)
+
+      System.get_env("TN_FAKE_DRIP") == "1" ->
+        emit_notification(%{
+          "sessionUpdate" => "agent_thought_chunk",
+          "content" => %{"type" => "text", "text" => "pondering"}
+        })
+
+        for c <- ["drip-1 ", "drip-2 ", "drip-3"] do
+          emit_chunk(c)
+          Process.sleep(200)
+        end
+
+        reply(id, %{"stopReason" => "end_turn"})
+
+      System.get_env("TN_FAKE_TOOLUPDATE") == "1" ->
+        # conformance/acp-client stream.acpToolUpdate (#188)
+        for u <- [
+              %{
+                "sessionUpdate" => "tool_call",
+                "toolCallId" => "t1",
+                "title" => "Write",
+                "kind" => "edit",
+                "status" => "pending"
+              },
+              %{
+                "sessionUpdate" => "tool_call_update",
+                "toolCallId" => "t1",
+                "status" => "in_progress",
+                "title" => "Write /tmp/a.txt",
+                "rawInput" => %{"file_path" => "/tmp/a.txt", "content" => "hi"}
+              },
+              %{
+                "sessionUpdate" => "tool_call_update",
+                "toolCallId" => "t1",
+                "status" => "in_progress"
+              },
+              %{
+                "sessionUpdate" => "tool_call_update",
+                "toolCallId" => "t1",
+                "status" => "completed",
+                "content" => [
+                  %{"type" => "content", "content" => %{"type" => "text", "text" => "wrote"}}
+                ]
+              }
+            ],
+            do: emit_notification(u)
+
+        emit_chunk("done")
+        reply(id, %{"stopReason" => "end_turn"})
+
+      System.get_env("TN_FAKE_FS_REQUEST") == "1" ->
+        send_msg(%{
+          "jsonrpc" => "2.0",
+          "id" => "fs-1",
+          "method" => "fs/read_text_file",
+          "params" => %{"sessionId" => "sess-1", "path" => "/etc/hosts"}
+        })
+
+        code = await_error_code("fs-1")
+        emit_chunk(if code == -32601, do: "ok", else: "bad:#{inspect(code)}")
+        reply(id, %{"stopReason" => "end_turn"})
+
+      true ->
+        emit_chunk(Jason.encode!(state.rec))
+        reply(id, %{"stopReason" => "end_turn"})
+    end
+  end
 
   defp dispatch("stale", id, text, state) do
     marker = "SUPERSEDES-ALL-PRIOR:"
@@ -182,6 +303,22 @@ defmodule FakeAcpServer do
         case Jason.decode!(line) do
           %{"id" => ^want_id} -> :ok
           _ -> await_permission_reply(want_id)
+        end
+    end
+  end
+
+  defp await_error_code(want_id) do
+    case read_line() do
+      :eof ->
+        nil
+
+      "" ->
+        await_error_code(want_id)
+
+      line ->
+        case Jason.decode!(line) do
+          %{"id" => ^want_id} = m -> get_in(m, ["error", "code"])
+          _ -> await_error_code(want_id)
         end
     end
   end

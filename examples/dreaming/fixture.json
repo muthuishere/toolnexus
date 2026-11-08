@@ -1,0 +1,319 @@
+{
+  "$schema": "toolnexus-dreaming-fixture/v1",
+  "description": "SPEC §7E 'Dreaming' — the built-in dreamer preset. BUILD GATE (Mt. Moon): a home whose MEMORY.md holds a claim the transcript contradicts; one dreamer pass with the scripted model fixes it, memory/log.md gains exactly one entry naming it, and a NEXT fromDir session answers differently. Hermetic: a scripted in-process LLM, a virtual clock.",
+  "dreamPrompt": "You are dreaming: an offline pass over your own memory. Memory exists so that a future session decides better. MEMORY.md is a short index loaded at the start of every session; notes (memory target \"note:<slug>\") hold the detail; the transcripts (transcript_search) are the ground truth of what actually happened.\nWork in this order:\n1. Verify: read MEMORY.md and the notes it points to (memory read, memory list) and check each claim against the transcripts. Fix or remove a claim only when it is contradicted by the transcripts; a claim they do not mention stays (transcripts may be pruned).\n2. Demote: move detail out of MEMORY.md into a note and leave a one-line [[slug]] pointer, so the index stays short.\n3. Merge: fold duplicate or conflicting notes into one.\n4. Repair links: point every [[slug]] at an existing note or create it; give every note an index line.\n5. Log: if you changed anything, append exactly one entry with memory add, target \"note:log\", text starting \"dream: \" and naming every change and why.\nIf nothing needs changing, write nothing and reply HEARTBEAT_OK.",
+  "home": {
+    "SOUL.md": "You are Ava, a Pokemon route guide.",
+    "MEMORY.md": "- Starter is Bulbasaur.\n- Mt. Moon exit is south.\n"
+  },
+  "store": {
+    "note": "Stub store: list() returns ids in this order, get(id) returns messages.",
+    "conversations": [
+      {
+        "id": "s1",
+        "messages": [
+          {
+            "role": "user",
+            "content": "Where is the exit of Mt. Moon?"
+          },
+          {
+            "role": "assistant",
+            "content": null,
+            "tool_calls": [
+              {
+                "id": "c1",
+                "type": "function",
+                "function": {
+                  "name": "map",
+                  "arguments": "{\"query\":\"Mt. Moon map\"}"
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "tool_call_id": "c1",
+            "content": "Map: the Mt. Moon exit is on the north wall."
+          },
+          {
+            "role": "user",
+            "content": "ok go"
+          },
+          {
+            "role": "assistant",
+            "content": "Took the north passage. Mt. Moon exit is north."
+          }
+        ]
+      }
+    ]
+  },
+  "mockLLM": {
+    "style": "openai",
+    "routing": "The dreamer is recognised by its system prompt containing 'You are dreaming:' (the first words of dreamPrompt) — never by model id, because the dreamer's model is 'inherit'. Every other call is routed by request model id.",
+    "scripts": {
+      "dreamer-fix": [
+        {
+          "whenToolMsgs": 0,
+          "toolCalls": [
+            {
+              "name": "memory",
+              "args": {
+                "action": "read",
+                "target": "self"
+              }
+            }
+          ]
+        },
+        {
+          "whenToolMsgs": 1,
+          "toolCalls": [
+            {
+              "name": "transcript_search",
+              "args": {
+                "query": "mt. moon exit"
+              }
+            }
+          ]
+        },
+        {
+          "whenToolMsgs": 2,
+          "rule": "if tool msg 1 contains 'Mt. Moon exit is south' AND tool msg 2 contains 'exit is north' then toolCalls below, else text 'HEARTBEAT_OK'",
+          "toolCalls": [
+            {
+              "name": "memory",
+              "args": {
+                "action": "replace",
+                "target": "self",
+                "text": "Mt. Moon exit is south",
+                "with": "Mt. Moon exit is north"
+              }
+            }
+          ]
+        },
+        {
+          "whenToolMsgs": 3,
+          "toolCalls": [
+            {
+              "name": "memory",
+              "args": {
+                "action": "add",
+                "target": "note:log",
+                "text": "dream: MEMORY.md \"Mt. Moon exit is south\" -> \"Mt. Moon exit is north\" (contradicted by transcript s1#4)"
+              }
+            }
+          ]
+        },
+        {
+          "whenToolMsgs": ">=4",
+          "text": "dreamed: 1 change"
+        }
+      ],
+      "dreamer-idle": [
+        {
+          "always": true,
+          "text": "HEARTBEAT_OK"
+        }
+      ],
+      "m-navigator": [
+        {
+          "always": true,
+          "text": "<if system prompt contains 'Mt. Moon exit is north' then 'Head north out of Mt. Moon.' else 'Head south out of Mt. Moon.'>"
+        }
+      ],
+      "m-quiet": [
+        {
+          "always": true,
+          "text": "HEARTBEAT_OK"
+        }
+      ]
+    }
+  },
+  "expect": {
+    "D1_mtMoonBuildGate": {
+      "before": {
+        "model": "m-navigator",
+        "prompt": "How do I leave Mt. Moon?",
+        "text": "Head south out of Mt. Moon."
+      },
+      "pass": {
+        "how": "dreamer(home,{store}).run(HEARTBEAT_PROMPT) with script dreamer-fix",
+        "replyText": "dreamed: 1 change"
+      },
+      "after": {
+        "files": {
+          "MEMORY.md": "- Starter is Bulbasaur.\n- Mt. Moon exit is north.\n",
+          "memory/log.md": "- dream: MEMORY.md \"Mt. Moon exit is south\" -> \"Mt. Moon exit is north\" (contradicted by transcript s1#4)\n"
+        },
+        "nextSession": {
+          "model": "m-navigator",
+          "prompt": "How do I leave Mt. Moon?",
+          "text": "Head north out of Mt. Moon."
+        }
+      }
+    },
+    "D2_nothingToDoIsSilent": {
+      "cases": [
+        {
+          "how": "a fresh home, one pass with script dreamer-idle",
+          "replyContains": "HEARTBEAT_OK"
+        },
+        {
+          "how": "AFTER D1, a second pass with script dreamer-fix (the claim is already correct, so step 3 replies HEARTBEAT_OK)",
+          "replyContains": "HEARTBEAT_OK"
+        }
+      ],
+      "filesUnchanged": true,
+      "logUnchanged": true
+    },
+    "D3_dreamerToolsExactly": {
+      "personaTools": [
+        "bash",
+        "read"
+      ],
+      "dreamerTools": [
+        "memory",
+        "transcript_search"
+      ],
+      "dreamerMemoryHasNotes": true
+    },
+    "D3b_dreamerSoul": {
+      "DREAM.md": "Focus on routes.\n",
+      "instructions": "  Be brief.  ",
+      "soul": "## HEARTBEAT.md\n\nYou are dreaming: an offline pass over your own memory. Memory exists so that a future session decides better. MEMORY.md is a short index loaded at the start of every session; notes (memory target \"note:<slug>\") hold the detail; the transcripts (transcript_search) are the ground truth of what actually happened.\nWork in this order:\n1. Verify: read MEMORY.md and the notes it points to (memory read, memory list) and check each claim against the transcripts. Fix or remove a claim only when it is contradicted by the transcripts; a claim they do not mention stays (transcripts may be pruned).\n2. Demote: move detail out of MEMORY.md into a note and leave a one-line [[slug]] pointer, so the index stays short.\n3. Merge: fold duplicate or conflicting notes into one.\n4. Repair links: point every [[slug]] at an existing note or create it; give every note an index line.\n5. Log: if you changed anything, append exactly one entry with memory add, target \"note:log\", text starting \"dream: \" and naming every change and why.\nIf nothing needs changing, write nothing and reply HEARTBEAT_OK.\n\nFocus on routes.\n\nBe brief.",
+      "soulWithoutExtras": "## HEARTBEAT.md\n\nYou are dreaming: an offline pass over your own memory. Memory exists so that a future session decides better. MEMORY.md is a short index loaded at the start of every session; notes (memory target \"note:<slug>\") hold the detail; the transcripts (transcript_search) are the ground truth of what actually happened.\nWork in this order:\n1. Verify: read MEMORY.md and the notes it points to (memory read, memory list) and check each claim against the transcripts. Fix or remove a claim only when it is contradicted by the transcripts; a claim they do not mention stays (transcripts may be pruned).\n2. Demote: move detail out of MEMORY.md into a note and leave a one-line [[slug]] pointer, so the index stays short.\n3. Merge: fold duplicate or conflicting notes into one.\n4. Repair links: point every [[slug]] at an existing note or create it; give every note an index line.\n5. Log: if you changed anything, append exactly one entry with memory add, target \"note:log\", text starting \"dream: \" and naming every change and why.\nIf nothing needs changing, write nothing and reply HEARTBEAT_OK.",
+      "defaultName": "<basename(home)>-dreamer",
+      "storeWithoutListThrows": true,
+      "missingStoreThrows": true
+    },
+    "D4_fromDirDream": {
+      "how": "startAgent(fromDir(home,{model:'m-quiet',dream:{everyMs:50,store}}), run, {everyMs:1000}); advance the virtual clock 50 ms; the dreamer (script dreamer-fix) runs on the same runtime",
+      "after": {
+        "files": {
+          "MEMORY.md": "- Starter is Bulbasaur.\n- Mt. Moon exit is north.\n",
+          "memory/log.md": "- dream: MEMORY.md \"Mt. Moon exit is south\" -> \"Mt. Moon exit is north\" (contradicted by transcript s1#4)\n"
+        }
+      },
+      "dreamRepliesNeverReachOnBeat": true
+    },
+    "D5_absentDreamIsUnchanged": {
+      "how": "fromDir(home) without dream, startAgent with everyMs 50, advance 200 ms with script m-quiet",
+      "filesUnchanged": true,
+      "runtimeSpawnsOnlyThePersona": true
+    },
+    "D6_dreamerNameCollision": {
+      "how": "A persona from fromDir(home, {name: 'ava', dream: {...}}) whose agent tree already holds an agent named 'ava-dreamer' (e.g. a team member). startAgent must throw this error before anything is spawned or scheduled; nothing keeps running.",
+      "personaName": "ava",
+      "error": "startAgent: dreamer name collision: ava-dreamer is already registered"
+    },
+    "D7_dreamGuard": {
+      "how": "Write `files` into a fresh home dir. Build dreamer(home,{store}); call its tools[0] (memory) directly with each case's args, in order, comparing output and isError. Afterwards the home holds exactly the paths of `files`, and each path in `filesAfter` has that content. Then the plain memoryTool(home,{notes:true}) — no guard — still accepts the `plainToolStillWrites` call (isError false).",
+      "files": {
+        "SOUL.md": "You are Ava, a Pokemon route guide.",
+        "MEMORY.md": "- Mt. Moon exit is north.\n",
+        "USER.md": "- Prefers Bulbasaur.\n",
+        "memory/log.md": "- dream: older entry\n"
+      },
+      "cases": [
+        {
+          "name": "log-replace-refused",
+          "args": {
+            "action": "replace",
+            "target": "note:log",
+            "text": "older entry",
+            "with": "rewritten"
+          },
+          "output": "dreamer: memory/log.md is append-only",
+          "isError": true
+        },
+        {
+          "name": "log-remove-refused",
+          "args": {
+            "action": "remove",
+            "target": "note:log",
+            "text": "older entry"
+          },
+          "output": "dreamer: memory/log.md is append-only",
+          "isError": true
+        },
+        {
+          "name": "user-add-refused",
+          "args": {
+            "action": "add",
+            "target": "user",
+            "text": "Prefers Charmander."
+          },
+          "output": "dreamer: USER.md is off-limits",
+          "isError": true
+        },
+        {
+          "name": "user-replace-refused",
+          "args": {
+            "action": "replace",
+            "target": "user",
+            "text": "Bulbasaur",
+            "with": "Squirtle"
+          },
+          "output": "dreamer: USER.md is off-limits",
+          "isError": true
+        },
+        {
+          "name": "user-remove-refused",
+          "args": {
+            "action": "remove",
+            "target": "user",
+            "text": "Prefers Bulbasaur."
+          },
+          "output": "dreamer: USER.md is off-limits",
+          "isError": true
+        },
+        {
+          "name": "user-read-refused",
+          "args": {
+            "action": "read",
+            "target": "user"
+          },
+          "output": "dreamer: USER.md is off-limits",
+          "isError": true
+        },
+        {
+          "name": "log-read-allowed",
+          "args": {
+            "action": "read",
+            "target": "note:log"
+          },
+          "output": "- dream: older entry\n",
+          "isError": false
+        },
+        {
+          "name": "log-add-allowed",
+          "args": {
+            "action": "add",
+            "target": "note:log",
+            "text": "dream: newer entry"
+          },
+          "output": "ok (add → memory/log.md)",
+          "isError": false
+        }
+      ],
+      "filesAfter": {
+        "MEMORY.md": "- Mt. Moon exit is north.\n",
+        "USER.md": "- Prefers Bulbasaur.\n",
+        "memory/log.md": "- dream: older entry\n- dream: newer entry\n"
+      },
+      "plainToolStillWrites": {
+        "args": {
+          "action": "replace",
+          "target": "note:log",
+          "text": "newer entry",
+          "with": "newest entry"
+        },
+        "output": "ok (replace → memory/log.md)",
+        "isError": false
+      }
+    },
+    "D8_promptKeepsUnmentionedClaims": {
+      "dreamPromptContains": "only when it is contradicted by the transcripts",
+      "dreamPromptNotContains": "no longer support"
+    }
+  }
+}

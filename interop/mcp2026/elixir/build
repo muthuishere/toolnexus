@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# Build the Elixir interop runners: deps + MIX_ENV=test compile (test/support holds the dev AS).
+set -euo pipefail
+ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
+cd "$ROOT/elixir"
+export MIX_ENV=test
+mix deps.get >/dev/null
+mix compile

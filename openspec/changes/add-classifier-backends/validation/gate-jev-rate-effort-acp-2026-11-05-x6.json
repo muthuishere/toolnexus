@@ -1,0 +1,266 @@
+[
+  {
+    "id": "rate-effort-acp",
+    "verb": "rate",
+    "image": false,
+    "oldPath": "jevx --json --fresh --no-context",
+    "old": {
+      "verdict": "unsure",
+      "answer": {
+        "confidence": 0.56,
+        "probabilities": {
+          "0": 0.02,
+          "1": 0.25,
+          "2": 0.73
+        },
+        "score": 1.72,
+        "type": "score"
+      },
+      "model": "jev-1.14.0",
+      "latencyMs": 433
+    },
+    "toolnexus": {
+      "verdict": "large",
+      "answer": {
+        "confidence": 0.6,
+        "legend": {
+          "0": "small",
+          "1": "medium",
+          "2": "large"
+        },
+        "probabilities": {
+          "0": 0.01,
+          "1": 0.25,
+          "2": 0.74
+        },
+        "score": 1.73,
+        "type": "score"
+      },
+      "model": "jev-1.14.0",
+      "latencyMs": 395,
+      "inputTokens": 320
+    },
+    "match": false,
+    "maxDelta": 0.039999999999999925
+  },
+  {
+    "id": "rate-effort-acp",
+    "verb": "rate",
+    "image": false,
+    "oldPath": "jevx --json --fresh --no-context",
+    "old": {
+      "verdict": "unsure",
+      "answer": {
+        "confidence": 0.56,
+        "probabilities": {
+          "0": 0.01,
+          "1": 0.27,
+          "2": 0.72
+        },
+        "score": 1.71,
+        "type": "score"
+      },
+      "model": "jev-1.14.0",
+      "latencyMs": 396
+    },
+    "toolnexus": {
+      "verdict": "unsure",
+      "answer": {
+        "confidence": 0.55,
+        "legend": {
+          "0": "small",
+          "1": "medium",
+          "2": "large"
+        },
+        "probabilities": {
+          "0": 0.01,
+          "1": 0.28,
+          "2": 0.71
+        },
+        "score": 1.7,
+        "type": "score"
+      },
+      "model": "jev-1.14.0",
+      "latencyMs": 281,
+      "inputTokens": 320
+    },
+    "match": true,
+    "maxDelta": 0.010000000000000009
+  },
+  {
+    "id": "rate-effort-acp",
+    "verb": "rate",
+    "image": false,
+    "oldPath": "jevx --json --fresh --no-context",
+    "old": {
+      "verdict": "unsure",
+      "answer": {
+        "confidence": 0.58,
+        "probabilities": {
+          "0": 0.01,
+          "1": 0.26,
+          "2": 0.73
+        },
+        "score": 1.71,
+        "type": "score"
+      },
+      "model": "jev-1.14.0",
+      "latencyMs": 406
+    },
+    "toolnexus": {
+      "verdict": "unsure",
+      "answer": {
+        "confidence": 0.56,
+        "legend": {
+          "0": "small",
+          "1": "medium",
+          "2": "large"
+        },
+        "probabilities": {
+          "0": 0.02,
+          "1": 0.25,
+          "2": 0.73
+        },
+        "score": 1.72,
+        "type": "score"
+      },
+      "model": "jev-1.14.0",
+      "latencyMs": 296,
+      "inputTokens": 320
+    },
+    "match": true,
+    "maxDelta": 0.019999999999999907
+  },
+  {
+    "id": "rate-effort-acp",
+    "verb": "rate",
+    "image": false,
+    "oldPath": "jevx --json --fresh --no-context",
+    "old": {
+      "verdict": "large",
+      "answer": {
+        "confidence": 0.64,
+        "probabilities": {
+          "0": 0.01,
+          "1": 0.22,
+          "2": 0.77
+        },
+        "score": 1.76,
+        "type": "score"
+      },
+      "model": "jev-1.14.0",
+      "latencyMs": 398
+    },
+    "toolnexus": {
+      "verdict": "unsure",
+      "answer": {
+        "confidence": 0.56,
+        "legend": {
+          "0": "small",
+          "1": "medium",
+          "2": "large"
+        },
+        "probabilities": {
+          "0": 0.01,
+          "1": 0.27,
+          "2": 0.72
+        },
+        "score": 1.71,
+        "type": "score"
+      },
+      "model": "jev-1.14.0",
+      "latencyMs": 313,
+      "inputTokens": 320
+    },
+    "match": false,
+    "maxDelta": 0.07999999999999996
+  },
+  {
+    "id": "rate-effort-acp",
+    "verb": "rate",
+    "image": false,
+    "oldPath": "jevx --json --fresh --no-context",
+    "old": {
+      "verdict": "unsure",
+      "answer": {
+        "confidence": 0.55,
+        "probabilities": {
+          "0": 0.01,
+          "1": 0.28,
+          "2": 0.71
+        },
+        "score": 1.69,
+        "type": "score"
+      },
+      "model": "jev-1.14.0",
+      "latencyMs": 404
+    },
+    "toolnexus": {
+      "verdict": "unsure",
+      "answer": {
+        "confidence": 0.58,
+        "legend": {
+          "0": "small",
+          "1": "medium",
+          "2": "large"
+        },
+        "probabilities": {
+          "0": 0.01,
+          "1": 0.26,
+          "2": 0.73
+        },
+        "score": 1.71,
+        "type": "score"
+      },
+      "model": "jev-1.14.0",
+      "latencyMs": 285,
+      "inputTokens": 320
+    },
+    "match": true,
+    "maxDelta": 0.029999999999999916
+  },
+  {
+    "id": "rate-effort-acp",
+    "verb": "rate",
+    "image": false,
+    "oldPath": "jevx --json --fresh --no-context",
+    "old": {
+      "verdict": "unsure",
+      "answer": {
+        "confidence": 0.53,
+        "probabilities": {
+          "0": 0.01,
+          "1": 0.29,
+          "2": 0.7
+        },
+        "score": 1.69,
+        "type": "score"
+      },
+      "model": "jev-1.14.0",
+      "latencyMs": 384
+    },
+    "toolnexus": {
+      "verdict": "unsure",
+      "answer": {
+        "confidence": 0.56,
+        "legend": {
+          "0": "small",
+          "1": "medium",
+          "2": "large"
+        },
+        "probabilities": {
+          "0": 0.01,
+          "1": 0.27,
+          "2": 0.72
+        },
+        "score": 1.7,
+        "type": "score"
+      },
+      "model": "jev-1.14.0",
+      "latencyMs": 289,
+      "inputTokens": 320
+    },
+    "match": true,
+    "maxDelta": 0.030000000000000027
+  }
+]

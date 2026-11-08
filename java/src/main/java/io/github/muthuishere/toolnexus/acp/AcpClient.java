@@ -2,6 +2,7 @@ package io.github.muthuishere.toolnexus.acp;
 
 import io.github.muthuishere.toolnexus.InProcess;
 import io.github.muthuishere.toolnexus.Json;
+import io.github.muthuishere.toolnexus.LlmClient;
 
 import java.io.BufferedReader;
 import java.io.BufferedWriter;
@@ -66,8 +67,71 @@ public final class AcpClient implements Closeable, Function<InProcess.Request, I
     private final AtomicLong nextId = new AtomicLong();
     private final AtomicBoolean closed = new AtomicBoolean(false);
 
+    private final Map<String, String> pendingMethod = new ConcurrentHashMap<>();
     private volatile String sessionId;
     private volatile java.util.function.Consumer<Map<String, Object>> updateSink;
+    private volatile Options options = new Options();
+    private final StringBuilder stderrTail = new StringBuilder();
+
+    /** The agent's raw {@code initialize} result. */
+    public volatile Map<String, Object> initializeResult = Map.of();
+
+    /** Launch options for {@link #start(Options)} (SPEC §8C "ACP model source additions"). */
+    public static final class Options {
+        /** The full argv that starts the agent. Required. */
+        public List<String> command;
+        /** Added to the child's environment. */
+        public Map<String, String> env;
+        /** Session cwd and the child's working directory (default: this process's). */
+        public String cwd;
+        /** Round-trip bound for every request, including one prompt turn. */
+        public long timeoutMs = DEFAULT_TIMEOUT_MS;
+        /**
+         * Sent as {@code session/new} mcpServers VERBATIM and in order (SPEC §8C): toolnexus does not
+         * validate, rename or reshape the entries. Unset ⇒ {@code []}.
+         */
+        public List<Map<String, Object>> mcpServers = new ArrayList<>();
+        /** Sent as {@code session/new} {@code _meta} when set; the key is absent otherwise. Opaque. */
+        public Map<String, Object> sessionMeta;
+        /** Sent as {@code initialize} clientCapabilities._meta when set. Opaque. */
+        public Map<String, Object> clientCapsMeta;
+        /** Passed through unchanged: session/set_config_option {configId:"model"}, then session/set_model. */
+        public String model;
+        /**
+         * Decides a {@code session/request_permission}: given its params, return the optionId to
+         * select, or {@code null} to answer with the first reject-kind option (else cancelled).
+         * Unset ⇒ the first allow-kind option, as {@link #start(List)} always did.
+         */
+        public Function<Map<String, Object>, String> onPermission;
+        /** Observes every raw {@code session/update} params (on the read thread: must not block). */
+        public java.util.function.Consumer<Map<String, Object>> onUpdate;
+
+        public Options command(List<String> v) { this.command = v; return this; }
+        public Options env(Map<String, String> v) { this.env = v; return this; }
+        public Options cwd(String v) { this.cwd = v; return this; }
+        public Options timeoutMs(long v) { this.timeoutMs = v; return this; }
+        public Options mcpServers(List<Map<String, Object>> v) { this.mcpServers = v; return this; }
+        public Options sessionMeta(Map<String, Object> v) { this.sessionMeta = v; return this; }
+        public Options clientCapsMeta(Map<String, Object> v) { this.clientCapsMeta = v; return this; }
+        public Options model(String v) { this.model = v; return this; }
+        public Options onPermission(Function<Map<String, Object>, String> v) { this.onPermission = v; return this; }
+        public Options onUpdate(java.util.function.Consumer<Map<String, Object>> v) { this.onUpdate = v; return this; }
+    }
+
+    /**
+     * A failure of {@link #start(Options)}, tagged with the stage that failed: {@code start}
+     * (spawn), {@code initialize}, {@code session/new} or {@code set model}.
+     */
+    public static final class StartException extends IOException {
+        public final String stage;
+        /** The agent's captured stderr tail at the time of failure ("" when none). Never logged by toolnexus. */
+        public String stderr = "";
+
+        StartException(String stage, String message, Throwable cause) {
+            super(message, cause);
+            this.stage = stage;
+        }
+    }
 
     /**
      * When true (the default), {@code session/request_permission} is answered immediately with
@@ -101,55 +165,167 @@ public final class AcpClient implements Closeable, Function<InProcess.Request, I
         if (command == null || command.isEmpty()) {
             throw new IllegalArgumentException("toolnexus: AcpClient.start requires a non-empty command");
         }
-        ProcessBuilder pb = new ProcessBuilder(command);
+        return start(new Options().command(command).timeoutMs(timeoutMs));
+    }
+
+    /**
+     * Spawn the agent from {@code opts}, complete {@code initialize} + {@code session/new} (with
+     * {@code opts.mcpServers}), then pass {@code opts.model} through. Failures are
+     * {@link StartException}s naming the stage. The agent's stderr is captured (last 4 KiB,
+     * {@link #stderrTail()}).
+     */
+    public static AcpClient start(Options opts) throws IOException {
+        if (opts == null || opts.command == null || opts.command.isEmpty()) {
+            throw new IllegalArgumentException("toolnexus: AcpClient.start requires a non-empty command");
+        }
+        ProcessBuilder pb = new ProcessBuilder(opts.command);
         pb.redirectInput(ProcessBuilder.Redirect.PIPE);
         pb.redirectOutput(ProcessBuilder.Redirect.PIPE);
-        pb.redirectError(ProcessBuilder.Redirect.DISCARD);
-        Process process = pb.start();
+        pb.redirectError(ProcessBuilder.Redirect.PIPE);
+        if (opts.cwd != null && !opts.cwd.isEmpty()) pb.directory(new File(opts.cwd));
+        if (opts.env != null) pb.environment().putAll(opts.env);
+        Process process;
+        try {
+            process = pb.start();
+        } catch (IOException e) {
+            throw new StartException("start", "toolnexus: acp: start \"" + opts.command.get(0) + "\": "
+                    + e.getMessage(), e);
+        }
 
         AcpClient client = new AcpClient(process);
-        client.timeoutMs = timeoutMs;
+        client.options = opts;
+        client.timeoutMs = opts.timeoutMs;
+        client.drainStderr();
         try {
             client.initializeSession();
         } catch (IOException e) {
+            if (e instanceof StartException se) {
+                try {
+                    process.waitFor(500, TimeUnit.MILLISECONDS); // let a dying agent's stderr drain
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                }
+                se.stderr = client.stderrTail();
+            }
             client.close();
             throw e;
         }
         return client;
     }
 
+    /** The last 4 KiB the agent wrote to stderr. */
+    public String stderrTail() {
+        synchronized (stderrTail) {
+            return stderrTail.toString();
+        }
+    }
+
+    private void drainStderr() {
+        Thread t = new Thread(() -> {
+            try (java.io.InputStream err = process.getErrorStream()) {
+                byte[] buf = new byte[4096];
+                int n;
+                while ((n = err.read(buf)) > 0) {
+                    synchronized (stderrTail) {
+                        stderrTail.append(new String(buf, 0, n, StandardCharsets.UTF_8));
+                        if (stderrTail.length() > 4096) stderrTail.delete(0, stderrTail.length() - 4096);
+                    }
+                }
+            } catch (IOException ignored) {
+            }
+        }, "acp-client-stderr");
+        t.setDaemon(true);
+        t.start();
+    }
+
+    @SuppressWarnings("unchecked")
     private void initializeSession() throws IOException {
+        Options opts = options;
         Map<String, Object> fs = new LinkedHashMap<>();
         fs.put("readTextFile", false);
         fs.put("writeTextFile", false);
         Map<String, Object> clientCapabilities = new LinkedHashMap<>();
         clientCapabilities.put("fs", fs);
+        clientCapabilities.put("terminal", false);
+        if (opts.clientCapsMeta != null) clientCapabilities.put("_meta", opts.clientCapsMeta);
         Map<String, Object> initParams = new LinkedHashMap<>();
         initParams.put("protocolVersion", 1);
         initParams.put("clientCapabilities", clientCapabilities);
-        call("initialize", initParams);
+        Map<String, Object> init;
+        try {
+            init = call("initialize", initParams);
+        } catch (IOException e) {
+            throw new StartException("initialize", "toolnexus: acp: initialize: " + e.getMessage(), e);
+        }
+        initializeResult = init;
+        List<Object> servers = opts.mcpServers == null ? new ArrayList<>() : new ArrayList<>(opts.mcpServers);
 
-        // A real `devin acp` rejects session/new with -32602 unless cwd is ABSOLUTE and an
-        // mcpServers array (empty is fine) is present. Never produced by a fake that doesn't
-        // validate params, only by the real thing (ADR 0031 spike).
-        String cwd = new File(System.getProperty("user.dir")).getAbsoluteFile().getPath();
+        // Some agents reject session/new with -32602 unless cwd is ABSOLUTE and an mcpServers
+        // array (empty is fine) is present (ADR 0031 spike).
+        String cwd = new File(opts.cwd != null && !opts.cwd.isEmpty() ? opts.cwd : System.getProperty("user.dir"))
+                .getAbsoluteFile().getPath();
         Map<String, Object> sessionParams = new LinkedHashMap<>();
         sessionParams.put("cwd", cwd);
-        sessionParams.put("mcpServers", List.of());
-        Map<String, Object> result = call("session/new", sessionParams);
+        sessionParams.put("mcpServers", servers);
+        if (opts.sessionMeta != null) sessionParams.put("_meta", opts.sessionMeta);
+        Map<String, Object> result;
+        try {
+            result = call("session/new", sessionParams);
+        } catch (IOException e) {
+            throw new StartException("session/new", "toolnexus: acp: session/new: " + e.getMessage(), e);
+        }
         Object sid = result.get("sessionId");
         if (sid == null) {
-            throw new IOException("toolnexus: ACP session/new returned no sessionId");
+            throw new StartException("session/new", "toolnexus: ACP session/new returned no sessionId", null);
         }
         this.sessionId = String.valueOf(sid);
+
+        if (opts.model != null && !opts.model.isEmpty()) {
+            try {
+                setModel(opts.model);
+            } catch (IOException e) {
+                throw new StartException("set model", e.getMessage(), e);
+            }
+        }
     }
 
-    /** Optional: negotiate a session mode via {@code session/set_mode}. */
+    /**
+     * Sends {@code session/set_mode {sessionId, modeId}} — at load ({@code mode}) or on a running
+     * client (SPEC §8C, #197). Same process, same session; sent at once, not queued behind a turn.
+     * The agent's error fails only this call.
+     */
     public void setMode(String modeId) throws IOException {
+        if (closed.get()) throw new IOException("toolnexus: ACP client closed");
         Map<String, Object> params = new LinkedHashMap<>();
         params.put("sessionId", sessionId);
         params.put("modeId", modeId);
         call("session/set_mode", params);
+    }
+
+    /**
+     * Changes the model, passed through unchanged (SPEC §8C, #197): {@code session/set_config_option
+     * {configId:"model"}} first, then {@code session/set_model {modelId}} if the agent rejects that.
+     * Both failing fails this call (both errors in the message); the client stays usable.
+     */
+    public void setModel(String model) throws IOException {
+        if (closed.get()) throw new IOException("toolnexus: ACP client closed");
+        Map<String, Object> cfg = new LinkedHashMap<>();
+        cfg.put("sessionId", sessionId);
+        cfg.put("configId", "model");
+        cfg.put("value", model);
+        try {
+            call("session/set_config_option", cfg);
+        } catch (IOException e1) {
+            Map<String, Object> sm = new LinkedHashMap<>();
+            sm.put("sessionId", sessionId);
+            sm.put("modelId", model);
+            try {
+                call("session/set_model", sm);
+            } catch (IOException e2) {
+                throw new IOException("toolnexus: acp: set model \"" + model + "\": "
+                        + e1.getMessage() + "; " + e2.getMessage(), e2);
+            }
+        }
     }
 
     /** The ACP session id assigned by {@code session/new}, stable across every {@link #generate}. */
@@ -178,10 +354,25 @@ public final class AcpClient implements Closeable, Function<InProcess.Request, I
      * one session is one conversation, so concurrent callers are gated onto one turn at a time.
      */
     public InProcess.Response generate(InProcess.Request request) throws IOException {
+        return generateStream(request, null);
+    }
+
+    /**
+     * {@link #generate}, reporting the turn as it happens: each {@code session/update} is turned
+     * into a {@link LlmClient.StreamEvent} and handed to {@code emit} from the read loop the moment
+     * it arrives — {@code agent_message_chunk} → text, {@code agent_thought_chunk} → thought (never
+     * part of the answer), {@code tool_call} → tool_call (name = title, args = rawInput), a {@code tool_call_update}
+     * with a non-empty rawInput → tool_call_args (its title, when set, renames the call) and a
+     * completed/failed {@code tool_call_update} → tool_result; every non-text event carries
+     * {@code via = "acp"}. Plugs straight into {@link InProcess.Options#generateStream}.
+     * A null {@code emit} reports nothing.
+     */
+    public InProcess.Response generateStream(InProcess.Request request,
+                                             java.util.function.Consumer<LlmClient.StreamEvent> emit) throws IOException {
         String assembled = assemblePrompt(request);
         turnLock.lock();
         try {
-            String reply = prompt(assembled);
+            String reply = prompt(assembled, emit);
             return InProcess.Response.content(reply);
         } finally {
             turnLock.unlock();
@@ -231,25 +422,60 @@ public final class AcpClient implements Closeable, Function<InProcess.Request, I
         return Json.stringify(content);
     }
 
-    private String prompt(String text) throws IOException {
+    @SuppressWarnings("unchecked")
+    private String prompt(String text, java.util.function.Consumer<LlmClient.StreamEvent> emit) throws IOException {
         String id = "c-" + nextId.incrementAndGet();
         CompletableFuture<Map<String, Object>> future = new CompletableFuture<>();
         pending.put(id, future);
 
         StringBuilder accumulated = new StringBuilder();
+        Map<String, String> toolNames = new java.util.concurrent.ConcurrentHashMap<>();
         updateSink = params -> {
             Object update = params.get("update");
             if (!(update instanceof Map)) return;
             Map<?, ?> upd = (Map<?, ?>) update;
-            if (!"agent_message_chunk".equals(upd.get("sessionUpdate"))) return;
-            Object content = upd.get("content");
-            if (content instanceof Map<?, ?> c) {
-                Object t = c.get("text");
-                if (t != null) {
-                    synchronized (accumulated) {
-                        accumulated.append(String.valueOf(t));
+            Object kind = upd.get("sessionUpdate");
+            if ("agent_message_chunk".equals(kind)) {
+                // Only agent_message_chunk forms the reply (ADR 0031 gate item #3).
+                Object content = upd.get("content");
+                if (content instanceof Map<?, ?> c) {
+                    Object t = c.get("text");
+                    if (t != null) {
+                        synchronized (accumulated) {
+                            accumulated.append(String.valueOf(t));
+                        }
+                        String d = String.valueOf(t);
+                        if (emit != null && !d.isEmpty()) emit.accept(LlmClient.StreamEvent.text(d));
                     }
                 }
+                return;
+            }
+            if (emit == null) return;
+            String callId = upd.get("toolCallId") instanceof String sid ? sid : "";
+            String title = upd.get("title") instanceof String st ? st : "";
+            if ("agent_thought_chunk".equals(kind)) {
+                // Reported, never part of the answer.
+                if (upd.get("content") instanceof Map<?, ?> c && c.get("text") != null) {
+                    String d = String.valueOf(c.get("text"));
+                    if (!d.isEmpty()) emit.accept(LlmClient.StreamEvent.thought(d, "acp"));
+                }
+            } else if ("tool_call".equals(kind)) {
+                String name = !title.isEmpty() ? title : upd.get("kind") instanceof String k ? k : "";
+                toolNames.put(callId, name);
+                Map<String, Object> args = upd.get("rawInput") instanceof Map<?, ?> ri ? (Map<String, Object>) ri : null;
+                emit.accept(LlmClient.StreamEvent.toolCall(callId, name, args).withVia("acp"));
+            } else if ("tool_call_update".equals(kind)) {
+                // A title is remembered as the call's name for every later event of this id;
+                // a non-empty rawInput is the call's input arriving late (#188).
+                if (!title.isEmpty()) toolNames.put(callId, title);
+                String name = toolNames.getOrDefault(callId, "");
+                if (upd.get("rawInput") instanceof Map<?, ?> ri && !ri.isEmpty()) {
+                    emit.accept(LlmClient.StreamEvent.toolCallArgs(callId, name, (Map<String, Object>) ri, "acp"));
+                }
+                Object status = upd.get("status");
+                if (!"completed".equals(status) && !"failed".equals(status)) return;
+                emit.accept(LlmClient.StreamEvent.toolResult(callId, name, toolContentText(upd.get("content")),
+                        "failed".equals(status)).withVia("acp"));
             }
         };
 
@@ -259,6 +485,7 @@ public final class AcpClient implements Closeable, Function<InProcess.Request, I
         Map<String, Object> promptParams = new LinkedHashMap<>();
         promptParams.put("sessionId", sessionId);
         promptParams.put("prompt", List.of(part));
+        pendingMethod.put(id, "session/prompt");
 
         Map<String, Object> req = new LinkedHashMap<>();
         req.put("jsonrpc", "2.0");
@@ -275,10 +502,31 @@ public final class AcpClient implements Closeable, Function<InProcess.Request, I
             throw new IOException("toolnexus: ACP session/prompt timed out after " + timeoutMs
                     + "ms (an unanswered session/request_permission hangs a turn forever)");
         } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new IOException("toolnexus: ACP session/prompt interrupted", e);
+            // Cancellation (SPEC §7 ACP host hooks): the turn's thread was interrupted — the Java
+            // port's cancel seam (LlmClient.CancelToken interrupts the run thread). session/cancel
+            // is a notification (no id); the agent then ends the turn with stopReason
+            // "cancelled". Wait (bounded by timeoutMs) for that reply so the next turn never
+            // lands on a session still busy with this one. Process and session stay warm.
+            Map<String, Object> cancelParams = new LinkedHashMap<>();
+            cancelParams.put("sessionId", sessionId);
+            Map<String, Object> cancel = new LinkedHashMap<>();
+            cancel.put("jsonrpc", "2.0");
+            cancel.put("method", "session/cancel");
+            cancel.put("params", cancelParams);
+            try {
+                writeLine(cancel);
+                future.get(timeoutMs, TimeUnit.MILLISECONDS);
+            } catch (Exception ignored) {
+                // the agent is gone or never ended the turn: nothing more to wait for
+            } finally {
+                pending.remove(id);
+                Thread.currentThread().interrupt();
+            }
+            throw new LlmClient.CancelledException("toolnexus: ACP session/prompt cancelled");
         } catch (ExecutionException e) {
-            throw new IOException("toolnexus: ACP session/prompt failed", e.getCause());
+            Throwable c = e.getCause();
+            throw new IOException(c != null && c.getMessage() != null ? c.getMessage()
+                    : "toolnexus: ACP session/prompt failed", c);
         } finally {
             updateSink = null;
         }
@@ -290,6 +538,18 @@ public final class AcpClient implements Closeable, Function<InProcess.Request, I
         synchronized (accumulated) {
             return accumulated.toString();
         }
+    }
+
+    /** The text of a tool_call_update's {@code content} list ({@code [{content:{text}}]}). */
+    private static String toolContentText(Object raw) {
+        if (!(raw instanceof List<?> parts)) return "";
+        StringBuilder b = new StringBuilder();
+        for (Object p : parts) {
+            if (p instanceof Map<?, ?> m && m.get("content") instanceof Map<?, ?> c && c.get("text") instanceof String t) {
+                b.append(t);
+            }
+        }
+        return b.toString();
     }
 
     // ---- transport: readLoop + call/reply/write -------------------------------------------
@@ -310,7 +570,7 @@ public final class AcpClient implements Closeable, Function<InProcess.Request, I
         } catch (IOException ignored) {
             // stdout closed — the process exited or we're closing.
         } finally {
-            failAllPending(new IOException("toolnexus: ACP connection closed"));
+            failAllPendingExited();
         }
     }
 
@@ -322,6 +582,7 @@ public final class AcpClient implements Closeable, Function<InProcess.Request, I
 
         if (method == null && idObj != null) {
             // a reply to one of OUR requests (initialize / session/new / session/prompt / ...)
+            pendingMethod.remove(String.valueOf(idObj));
             CompletableFuture<Map<String, Object>> future = pending.remove(String.valueOf(idObj));
             if (future != null) future.complete(msg);
             return;
@@ -330,6 +591,13 @@ public final class AcpClient implements Closeable, Function<InProcess.Request, I
         if ("session/update".equals(method)) {
             java.util.function.Consumer<Map<String, Object>> sink = updateSink;
             Object params = msg.get("params");
+            java.util.function.Consumer<Map<String, Object>> observer = options.onUpdate;
+            if (observer != null && params instanceof Map) {
+                try {
+                    observer.accept((Map<String, Object>) params);
+                } catch (RuntimeException ignored) {
+                }
+            }
             if (sink != null && params instanceof Map) {
                 sink.accept((Map<String, Object>) params);
             }
@@ -341,10 +609,17 @@ public final class AcpClient implements Closeable, Function<InProcess.Request, I
             return;
         }
 
-        // any other server-initiated request this client doesn't specifically handle: reply
-        // empty rather than leave it hanging, matching the fake server's own default behavior.
-        if (idObj != null) {
-            reply(idObj, Map.of());
+        // An agent->client REQUEST this client does not implement (fs/*, terminal/* — declared
+        // unsupported in clientCapabilities): answer -32601, or the agent waits on it forever.
+        if (method != null && idObj != null) {
+            Map<String, Object> err = new LinkedHashMap<>();
+            err.put("code", -32601);
+            err.put("message", "method not found: " + method);
+            Map<String, Object> resp = new LinkedHashMap<>();
+            resp.put("jsonrpc", "2.0");
+            resp.put("id", idObj);
+            resp.put("error", err);
+            writeLine(resp);
         }
     }
 
@@ -352,6 +627,26 @@ public final class AcpClient implements Closeable, Function<InProcess.Request, I
     private void handlePermissionRequest(Object id, Map<String, Object> params) {
         if (!autoAnswerPermission) {
             return; // deliberately dropped on the floor — the caller's own timeout is what fires
+        }
+        Function<Map<String, Object>, String> host = this.options.onPermission;
+        if (host != null) {
+            String pick = null;
+            try {
+                pick = host.apply(params == null ? Map.of() : params);
+            } catch (RuntimeException ignored) {
+            }
+            if (pick == null || pick.isEmpty()) pick = firstOptionOfKind(params, "reject");
+            Map<String, Object> outcome = new LinkedHashMap<>();
+            if (pick != null) {
+                outcome.put("outcome", "selected");
+                outcome.put("optionId", pick);
+            } else {
+                outcome.put("outcome", "cancelled");
+            }
+            Map<String, Object> result = new LinkedHashMap<>();
+            result.put("outcome", outcome);
+            reply(id, result);
+            return;
         }
         String chosen = null;
         Object optionsObj = params == null ? null : params.get("options");
@@ -378,17 +673,36 @@ public final class AcpClient implements Closeable, Function<InProcess.Request, I
         reply(id, result);
     }
 
+    private static String firstOptionOfKind(Map<String, Object> params, String prefix) {
+        Object optionsObj = params == null ? null : params.get("options");
+        if (optionsObj instanceof List<?> options) {
+            for (Object o : options) {
+                if (o instanceof Map<?, ?> opt && opt.get("kind") != null
+                        && String.valueOf(opt.get("kind")).startsWith(prefix)) {
+                    return String.valueOf(opt.get("optionId"));
+                }
+            }
+        }
+        return null;
+    }
+
     private Map<String, Object> call(String method, Object params) throws IOException {
         String id = "c-" + nextId.incrementAndGet();
         CompletableFuture<Map<String, Object>> future = new CompletableFuture<>();
         pending.put(id, future);
+        pendingMethod.put(id, method);
 
         Map<String, Object> req = new LinkedHashMap<>();
         req.put("jsonrpc", "2.0");
         req.put("id", id);
         req.put("method", method);
         req.put("params", params);
-        writeLine(req);
+        try {
+            writeLine(req);
+        } catch (RuntimeException e) {
+            pending.remove(id);
+            throw new IOException("toolnexus: acp: agent exited before replying to " + method, e);
+        }
 
         Map<String, Object> msg;
         try {
@@ -400,7 +714,9 @@ public final class AcpClient implements Closeable, Function<InProcess.Request, I
             Thread.currentThread().interrupt();
             throw new IOException("toolnexus: ACP " + method + " interrupted", e);
         } catch (ExecutionException e) {
-            throw new IOException("toolnexus: ACP " + method + " failed", e.getCause());
+            Throwable c = e.getCause();
+            throw new IOException(c != null && c.getMessage() != null ? c.getMessage()
+                    : "toolnexus: ACP " + method + " failed", c);
         }
         Object error = msg.get("error");
         if (error instanceof Map<?, ?> errMap) {
@@ -431,6 +747,17 @@ public final class AcpClient implements Closeable, Function<InProcess.Request, I
         }
     }
 
+    /** Fail-fast: the agent's stdout ended, so every waiting request fails now, naming its method. */
+    private void failAllPendingExited() {
+        for (String key : new ArrayList<>(pending.keySet())) {
+            CompletableFuture<Map<String, Object>> future = pending.remove(key);
+            String m = pendingMethod.getOrDefault(key, "request");
+            if (future != null) {
+                future.completeExceptionally(new IOException("toolnexus: acp: agent exited before replying to " + m));
+            }
+        }
+    }
+
     private void failAllPending(Exception e) {
         for (String key : new ArrayList<>(pending.keySet())) {
             CompletableFuture<Map<String, Object>> future = pending.remove(key);
@@ -450,11 +777,15 @@ public final class AcpClient implements Closeable, Function<InProcess.Request, I
             stdin.close();
         } catch (IOException ignored) {
         }
+        // The whole tree: an adapter launch (`npx …`) is a tree, not one process.
+        java.util.List<ProcessHandle> tree = process.descendants().toList();
+        tree.forEach(ProcessHandle::destroy);
         process.destroy();
         try {
             if (!process.waitFor(2, TimeUnit.SECONDS)) {
                 process.destroyForcibly();
             }
+            tree.forEach(ProcessHandle::destroyForcibly);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             process.destroyForcibly();

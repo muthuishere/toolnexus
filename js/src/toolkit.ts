@@ -8,7 +8,8 @@ import { loadSkills, type SkillDef, type SkillSource } from "./skill.js"
 import { selectBuiltins, type BuiltinsConfig } from "./builtin.js"
 import { agentTools, parseAgentsConfig, type Agent } from "./a2a.js"
 import { startA2AServer, type A2AConfig, type OnTask, type ServeHandle } from "./serve.js"
-import { type MCPServeConfig, type OnCall } from "./mcpserve.js"
+import { serveLocalMcp, type LocalMcpServer, type MCPServeConfig, type OnCall } from "./mcpserve.js"
+import { createMcpHandler, type McpHandler, type McpHandlerConfig } from "./mcphandler.js"
 import { toAnthropic, toGemini, toOpenAI } from "./adapters.js"
 import type { Client } from "./client.js"
 import type { Media } from "./media.js"
@@ -48,6 +49,10 @@ export interface ToolkitOptions {
   /** §2 Gap 3. Bounds the MCP load: each connect/list is capped by the server timeout and the
    * whole load aborts promptly if this signal fires. Omit ⇒ unbounded as before. */
   signal?: AbortSignal
+  /** §2A.1a where MCP OAuth tokens live (default: in memory, per load). */
+  tokenStore?: import("./mcp2026/auth.js").TokenStore
+  /** §2A.1a how `auto` MCP OAuth opens the authorization URL (default: the OS opener). */
+  openUrl?: (url: string) => unknown | Promise<unknown>
 }
 
 export class Toolkit {
@@ -83,12 +88,13 @@ export class Toolkit {
   }
 
   static async create(opts: ToolkitOptions = {}): Promise<Toolkit> {
-    const mcp = opts.mcpConfig !== undefined ? await loadMcp(opts.mcpConfig, { waitFor: opts.waitFor, signal: opts.signal }) : undefined
+    const mcp = opts.mcpConfig !== undefined ? await loadMcp(opts.mcpConfig, { waitFor: opts.waitFor, signal: opts.signal, tokenStore: opts.tokenStore, openUrl: opts.openUrl, disableTools: opts.disableTools }) : undefined
     // Skills come from directories, in-memory data, and/or a lazy provider (§3,
     // S1). The provider is resolved here (create() is async) and merged with the
     // data list; a provider failure is isolated so other sources still load.
     let skill: SkillSource | undefined
-    if (opts.skillsDir !== undefined || opts.skills !== undefined || opts.skillProvider !== undefined) {
+    const mcpSkills = mcp?.skills ?? []
+    if (opts.skillsDir !== undefined || opts.skills !== undefined || opts.skillProvider !== undefined || mcpSkills.length > 0) {
       let providerDefs: SkillDef[] = []
       if (opts.skillProvider) {
         try {
@@ -98,7 +104,8 @@ export class Toolkit {
           providerDefs = []
         }
       }
-      const dataDefs = [...(opts.skills ?? []), ...providerDefs]
+      // §2.7 remote skills (MCP skills extension) join the same inventory, after local ones.
+      const dataDefs = [...(opts.skills ?? []), ...providerDefs, ...mcpSkills]
       // disableSkills is sugar over a skillsFilter drop-list: fold each name in as false
       // WITHOUT overriding an explicit skillsFilter entry (explicit entries win).
       const filter =
@@ -219,6 +226,26 @@ export class Toolkit {
       mcpTools: mcp ? this.tools() : undefined,
       onCall: opts.onCall,
     })
+  }
+
+  /**
+   * §7C.1 (ADR 0039). An embeddable streamable-HTTP MCP server as a Node request listener
+   * `(req, res) => void` (+ `notifyToolsChanged()`), to mount on the host's own server/router
+   * behind its own TLS, CORS and OAuth. Every policy is a hook in `cfg`; `serve()` is unchanged.
+   * Without `cfg.listTools` it exposes this toolkit's tools.
+   */
+  mcpHandler(cfg: McpHandlerConfig = {}): McpHandler {
+    return createMcpHandler(() => this.tools(), cfg)
+  }
+
+  /**
+   * SPEC §8C. Serves this toolkit for a local agent to call: the §7C MCP mapping (tool names
+   * verbatim, `skill` stays `skill`, optional `config` filter) on `127.0.0.1:<ephemeral>/mcp`
+   * behind a fresh 64-hex bearer token. The caller builds whatever `mcpServers` entry its agent
+   * accepts from `{url, token}`; `close()` stops it (idempotent).
+   */
+  asMcpServer(config?: MCPServeConfig): Promise<LocalMcpServer> {
+    return serveLocalMcp(this.tools(), config)
   }
 
   async execute(name: string, args: Record<string, unknown>, ctx?: ToolContext): Promise<ToolResult> {

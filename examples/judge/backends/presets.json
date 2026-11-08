@@ -1,0 +1,68 @@
+{
+  "why": "The backend table is data (design.md PD-2). A port whose presets drift from this file sends the wrong model id or key name to a gateway.",
+  "backends": {
+    "typesafe": {
+      "baseUrl": "https://api.typesafe.ai/v1",
+      "model": "jev-latest",
+      "apiKeyEnv": "TYPESAFE_API_KEY",
+      "wire": "systemone",
+      "imagesHeader": true,
+      "supportsImages": {
+        "jev-latest": true,
+        "jev-1.14.0": true
+      }
+    },
+    "openrouter": {
+      "baseUrl": "https://openrouter.ai/api/v1",
+      "model": "typesafe/jev-1.14",
+      "apiKeyEnv": "OPENROUTER_API_KEY",
+      "wire": "systemone",
+      "imagesHeader": true,
+      "supportsImages": {
+        "typesafe/jev-1.14": true
+      }
+    },
+    "cloudflare": {
+      "baseUrl": "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/ai/run",
+      "model": "typesafe/jev",
+      "apiKeyEnv": "CLOUDFLARE_JEV_API_KEY",
+      "wire": "cloudflare",
+      "imagesHeader": false,
+      "supportsImages": {
+        "typesafe/jev": false,
+        "@cf/cloudflare/clef": true,
+        "@cf/cloudflare/clef-flash": true
+      }
+    },
+    "vercel": {
+      "baseUrl": "https://ai-gateway.vercel.sh/typesafe/v1",
+      "model": "typesafe-ai/jev",
+      "apiKeyEnv": "AI_GATEWAY_API_KEY",
+      "wire": "systemone",
+      "imagesHeader": true,
+      "supportsImages": {
+        "typesafe-ai/jev": false
+      }
+    },
+    "openai": {
+      "baseUrl": "https://api.openai.com/v1",
+      "model": "gpt-6-luna",
+      "apiKeyEnv": "OPENAI_API_KEY",
+      "wire": "decisions",
+      "imagesHeader": false,
+      "supportsImages": {
+        "gpt-6-luna": true
+      }
+    },
+    "custom": {
+      "baseUrl": null,
+      "model": "jev-latest",
+      "apiKeyEnv": "",
+      "wire": "systemone",
+      "imagesHeader": true,
+      "supportsImages": null
+    }
+  },
+  "unknownBackendError": "classifier: unknown backend \"nope\" (want \"typesafe\", \"openrouter\", \"cloudflare\", \"vercel\", \"openai\" or \"custom\")",
+  "customError": "classifier: backend \"custom\" requires baseUrl and supports"
+}

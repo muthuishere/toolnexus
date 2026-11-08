@@ -1,0 +1,271 @@
+---
+title: "Toolkit.mcp_handler"
+description: "An embeddable MCP server you mount on your own ASGI app, with per-request hooks. — Python."
+sidebar:
+  label: "serve / mcp-handler"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Python</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7C.1</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/python/src/toolnexus/mcp_handler.py">python/src/toolnexus/mcp_handler.py</a>
+</p>
+
+```python
+class Toolkit:
+    def mcp_handler(self, cfg: McpHandlerConfig | None = None, **options) -> McpHandler
+
+class McpHandler:                       # an ASGI app
+    async def __call__(self, scope, receive, send) -> None
+    def notify_tools_changed(self) -> None
+
+def identity_from(ctx: McpContext | None = None) -> Any
+def request_from(ctx: McpContext | None = None) -> McpRequest | None
+def mcp_session_id_from(ctx: McpContext | None = None) -> str
+def mcp_request_meta_from(ctx: McpContext | None = None) -> dict | None
+```
+
+Returns a plain streamable-HTTP MCP server as an **ASGI app** — `async (scope, receive,
+send)` — for you to mount on your own router, behind your own TLS, CORS and OAuth. Every
+policy is a hook that receives an `McpContext` (identity, request, session id, the
+request's `params._meta`); hooks may be plain functions or coroutines. Inside a tool, the
+same values are read with `identity_from()` and friends. toolnexus has **no** notion of
+tenant, user, role or storage — you decide those inside the hooks.
+
+## When to use it
+
+- You already run a web app (Starlette, FastAPI, any ASGI server) and want `/mcp` on it,
+  behind the authentication you already have.
+- Different callers must see different tools: `list_tools(ctx)` runs per request, for
+  `tools/list` **and** for the `tools/call` lookup, so a tool outside a caller's list is
+  never executed (`-32602 "tool not found: <name>"`).
+- A destructive tool needs a human "yes": `before_call` returns `confirm`, and the client
+  is asked via `elicitation/create` on the same POST's event stream — or, when it cannot
+  elicit, gets your own shaped result (e.g. "re-call with a nonce").
+
+## Why this and not the alternative
+
+<Aside type="tip" title="toolkit.serve(addr, mcp=…) is still the one-liner">
+`serve` owns its listener and exposes one static tool list to everyone. Reach for
+`mcp_handler` when the host owns the HTTP server, the auth, or the tool list per caller.
+</Aside>
+
+The transport is implemented in toolnexus over plain JSON-RPC — no web framework is
+required and no MCP SDK server type appears in the API, so the wire matches the other
+seven ports byte for byte (`conformance/mcp_handler/cases.json`).
+
+## Examples
+
+<Aside type="note" title="Hermetic on purpose">
+Every example drives the handler in process through `httpx.ASGITransport` — no socket,
+no network, no LLM.
+</Aside>
+
+### 1. The smallest useful call — mount it, list and call a tool
+
+```python test
+import asyncio
+import json
+
+import httpx
+
+from toolnexus import create_toolkit, define_tool
+
+
+def get_weather(city: str) -> str:
+    """Current weather for a city."""
+    return f"sunny in {city}"
+
+
+async def main():
+    tk = await create_toolkit()
+    tk.register(define_tool(get_weather, name="get_weather", description="Current weather for a city"))
+    app = tk.mcp_handler(stateless=True)
+
+    headers = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream"}
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as c:
+        listed = (await c.post("/", headers=headers, content=json.dumps(
+            {"jsonrpc": "2.0", "id": 1, "method": "tools/list"}))).json()
+        assert "get_weather" in [t["name"] for t in listed["result"]["tools"]]
+
+        called = (await c.post("/", headers=headers, content=json.dumps(
+            {"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+             "params": {"name": "get_weather", "arguments": {"city": "Chennai"}}}))).json()
+        assert called["result"]["content"][0]["text"] == "sunny in Chennai"
+        print("ok:", called["result"]["content"][0]["text"])
+
+
+asyncio.run(main())
+```
+
+### 2. The realistic case — bearer auth and a tool list per caller
+
+```python test
+import asyncio
+import json
+
+import httpx
+
+from toolnexus import Tool, ToolResult, create_toolkit, identity_from
+
+USERS = {"Bearer alice": "admin", "Bearer bob": "viewer"}
+
+
+def authenticate(req):
+    role = USERS.get(req.header("Authorization"))
+    if role is None:
+        raise PermissionError("invalid token")   # => HTTP 401
+    return role
+
+
+async def wipe(args, ctx=None):
+    return ToolResult(output=f"wiped by {identity_from()}", is_error=False)
+
+
+async def ping(args, ctx=None):
+    return ToolResult(output="pong", is_error=False)
+
+
+def list_tools(ctx):
+    tools = [Tool(name="ping", description="Ping", input_schema={"type": "object"}, source="native", execute=ping)]
+    if identity_from(ctx) == "admin":
+        tools.append(Tool(name="wipe", description="Admin only", input_schema={"type": "object"},
+                          source="native", execute=wipe))
+    return tools
+
+
+async def main():
+    app = (await create_toolkit()).mcp_handler(
+        stateless=True,
+        authenticate=authenticate,
+        www_authenticate=lambda req, err: 'Bearer resource_metadata="https://example.test/.well-known/oauth-protected-resource"',
+        list_tools=list_tools,
+    )
+
+    def rpc(method, params=None, token=None):
+        h = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream"}
+        if token:
+            h["Authorization"] = token
+        body = {"jsonrpc": "2.0", "id": 1, "method": method, **({"params": params} if params else {})}
+        return c.post("/", headers=h, content=json.dumps(body))
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as c:
+        anon = await rpc("tools/list")
+        assert anon.status_code == 401 and "resource_metadata" in anon.headers["www-authenticate"]
+
+        bob = (await rpc("tools/list", token="Bearer bob")).json()
+        assert [t["name"] for t in bob["result"]["tools"]] == ["ping"]
+
+        # Outside bob's list => tool not found, and wipe never runs.
+        denied = (await rpc("tools/call", {"name": "wipe"}, token="Bearer bob")).json()
+        assert denied["error"] == {"code": -32602, "message": "tool not found: wipe"}
+
+        alice = (await rpc("tools/call", {"name": "wipe"}, token="Bearer alice")).json()
+        assert alice["result"]["content"][0]["text"] == "wiped by admin"
+        print("ok:", denied["error"]["message"], "|", alice["result"]["content"][0]["text"])
+
+
+asyncio.run(main())
+```
+
+### 3. The full surface — gate, structured results, annotations, `on_call`
+
+```python test
+import asyncio
+import json
+
+import httpx
+
+from toolnexus import McpDecision, Tool, ToolAnnotations, ToolResult, create_toolkit
+
+
+async def delete(args, ctx=None):
+    return ToolResult(output=f"deleted {args['id']}", is_error=False)
+
+
+async def stats(args, ctx=None):
+    # Empty output + structured => the JSON of structured is the text block.
+    return ToolResult(output="", is_error=False, structured={"count": 3}, meta={"usage": {"units": 2}})
+
+
+tools = [
+    Tool(name="delete_record", description="Delete a record", source="native", execute=delete,
+         input_schema={"type": "object", "properties": {"id": {"type": "string"}, "nonce": {"type": "string"}}},
+         annotations=ToolAnnotations(title="Delete record", destructive_hint=True)),
+    Tool(name="stats", description="Counts", source="native", execute=stats, input_schema={"type": "object"},
+         output_schema={"type": "object", "properties": {"count": {"type": "integer"}}}),
+]
+
+
+def before_call(ctx, tool, args):
+    if tool.annotations and tool.annotations.destructive_hint and args.get("nonce") != "n-1":
+        return McpDecision(kind="confirm", message="Delete it?",
+                           result=ToolResult(output="re-call with nonce n-1", is_error=False))
+    return McpDecision()
+
+
+async def main():
+    events = []
+    app = (await create_toolkit()).mcp_handler(
+        stateless=True, name="records", title="Records API", version="1.0.0",
+        list_tools=lambda ctx: tools, before_call=before_call,
+        on_call=lambda ev: events.append((ev.name, ev.decision, ev.is_error)),
+    )
+    h = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream"}
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as c:
+        async def rpc(method, params=None):
+            body = {"jsonrpc": "2.0", "id": 1, "method": method, **({"params": params} if params else {})}
+            return (await c.post("/", headers=h, content=json.dumps(body))).json()
+
+        init = await rpc("initialize", {"protocolVersion": "2025-06-18"})
+        assert init["result"]["serverInfo"] == {"name": "records", "title": "Records API", "version": "1.0.0"}
+
+        listed = (await rpc("tools/list"))["result"]["tools"]
+        assert listed[0]["annotations"] == {"title": "Delete record", "destructiveHint": True}
+        assert listed[1]["outputSchema"]["properties"]["count"]["type"] == "integer"
+
+        # A stateless client cannot elicit, so confirm returns the host-shaped result.
+        first = await rpc("tools/call", {"name": "delete_record", "arguments": {"id": "7"}})
+        assert first["result"]["content"][0]["text"] == "re-call with nonce n-1"
+        again = await rpc("tools/call", {"name": "delete_record", "arguments": {"id": "7", "nonce": "n-1"}})
+        assert again["result"]["content"][0]["text"] == "deleted 7"
+
+        s = (await rpc("tools/call", {"name": "stats"}))["result"]
+        assert s == {"content": [{"type": "text", "text": '{"count":3}'}],
+                     "structuredContent": {"count": 3}, "_meta": {"usage": {"units": 2}}}
+
+    assert events == [("delete_record", "confirm", False), ("delete_record", "allow", False), ("stats", "allow", False)]
+    print("ok:", events)
+
+
+asyncio.run(main())
+```
+
+## Options
+
+`McpHandlerConfig` fields, also accepted as keywords of `mcp_handler(...)`. Every field is
+optional.
+
+| Field | Type | What it does |
+|---|---|---|
+| `name`, `title`, `version`, `instructions` | `str` | Static `serverInfo`; defaults `"toolnexus"` / `"0.1.0"`; `title` omitted when empty. |
+| `server_info` | `(ctx) -> McpServerInfo` | Resolved at `initialize`; wins over the static fields. |
+| `protocol_versions` | `list[str]` | Accepted versions, newest first, of `["2025-11-25", "2025-06-18"]`; others dropped. Default `["2025-06-18"]`. |
+| `authenticate` | `(request) -> identity` | Every HTTP request; raising ⇒ `401`. |
+| `www_authenticate` | `(request, err) -> str` | The 401's `WWW-Authenticate` header when non-empty. |
+| `list_tools` | `(ctx) -> list[Tool]` | Per request, for `tools/list` and the `tools/call` lookup. `None` ⇒ the toolkit's tools. |
+| `before_call` | `(ctx, tool, args: dict) -> McpDecision` | `allow` / `deny` / `confirm` with optional `message` and `result`; raising ⇒ deny with its text. |
+| `confirm_timeout` | `float` (seconds) | Elicitation round-trip bound, default 300. |
+| `on_call` | `(McpCallEvent) -> None` | Once per `tools/call`: `name, source, ms, is_error, err, result_bytes, decision, identity, session_id`. Exceptions isolated. |
+| `list_resources`, `read_resource` | hooks | `None` ⇒ not advertised, `-32601`. |
+| `list_prompts`, `get_prompt` | hooks | `None` ⇒ not advertised, `-32601`. |
+| `session_ids` | `generate / validate / terminate` | Replace the in-memory session set (signed ids, a DB). |
+| `stateless` | `bool` | No `Mcp-Session-Id` issued or checked; confirm never elicits. |
+| `stateless_session_id` | `str` | Stateless only: echoed as `Mcp-Session-Id` on `initialize`, never validated. |
+| `max_body_bytes` | `int` | POST body cap, default 4 MiB (`413` beyond). |
+
+## See also
+
+- [`build_mcp_server`](/api/python/serve/mcp/) — The §7C one-listener MCP profile behind `toolkit.serve(addr, mcp=…)`.
+- [`Toolkit.serve`](/api/python/serve/a2a/) — Publish an Agent Card and answer JSON-RPC over the client loop.

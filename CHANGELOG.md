@@ -8,105 +8,818 @@ GitHub Releases `vX.Y.Z` via `release.yml` (see `PUBLISHING.md`).
 
 ## Unreleased
 
-**Media generation: images, video, speech, music, transcription, voice cloning and talking-head
-video — from named clients you configure in one line, or from your own.** Until now toolnexus could
-carry an image or audio part but not make one. Now `createMedia(client)` gives your code seven verbs
-and your agent seven tools, and the provider is a small named client instead of request code:
+- **Docs site: a Toolnexus logo, favicon and a calmer home page.** The site has its own mark (three tool connectors converging on one hub that points forward: many tools, one framework) in the header, and as the favicon (SVG that follows light/dark, plus PNG/ICO fallbacks and an apple-touch icon) in place of Starlight's default. The home tab now reads "Toolnexus" instead of "toolnexus | toolnexus". The home page plays one short, CSS-only load sequence: the title and tagline rise in, the mark's connectors draw in, and faint lines draw from one point to the eight languages. With reduced motion turned on there is none, and nothing waits on scrolling to appear.
 
-- **Seven verbs, seven tools** — `image`, `video`, `speech`, `music`, `transcribe`, `cloneVoice`,
-  `talk` for your code (result `{files, text?, jobId?, status}`); `generate_image`,
-  `generate_video`, `generate_speech`, `generate_music`, `transcribe_audio`, `clone_voice`,
-  `talking_video` for your agent via `createToolkit({ media })`. Tool names never change when you
-  switch provider, so prompts and skills keep working. Media tools are concurrency-safe.
-- **Built-in clients, one config shape** — `A2EMediaClient`, `ElevenLabsMediaClient`,
-  `OpenAIMediaClient` (its `url` reaches any OpenAI-compatible server), `OpenRouterMediaClient`,
-  `FalMediaClient` (any hosted model by id through fal's queue), and two local subscription CLIs,
-  `GrokMediaClient` and `CodexMediaClient`, which run the CLI once headless and pick up the file it
-  saved. Every client takes the same `{model, models, key, url, command, loop, gather}`; the key
-  defaults to the provider's usual env var (`OPENAI_API_KEY`, `FAL_API_KEY`, …).
-- **Fallback that only falls back when it should** — `createMedia([grok, fal])` tries Grok and moves
-  to fal only when Grok is *unavailable*: out of credits (402), out of quota or billing balance (429), no key, CLI not
-  installed, or Grok's Zero Data Retention blocking video. A bad prompt or a server error is
-  returned as is, not hidden behind a second provider's bill. Errors carry a typed status, so you
-  can test for `unavailable` without reading the message.
-  A client that cannot take your arguments is skipped the same way: `createMedia([grok, openai])`
-  with `video({prompt, seconds: 5})` goes straight to OpenAI because Grok has no length setting,
-  instead of failing on the first client. Arguments are never silently dropped; if no client can
-  take them you get one `media: no client available for "video": grok: argument "seconds" not
-  supported; …` error listing every client's reason. A misspelled argument (not one of the verb's
-  canonical names) still fails at once.
-- **What a call cost, when the provider says** — results (and the tool's `metadata.usage`) carry
-  `usage` with `inputTokens` / `outputTokens` from OpenAI images, plus `costUsd` from OpenRouter.
-  Grok CLI reports tokens and `costUsd` from its headless `end` event (live-verified), with
-  `total_cost_usd_ticks` passed through unconverted as `usage.raw.total_cost_usd_ticks`. Other clients report nothing rather than an estimate. **Gap:** there
-  is no run-level total of media usage yet; `RunResult.usage` still counts LLM tokens only.
-- **Saved files keep their path and a real extension** — each `RunResult.files` entry for a saved
-  file carries its absolute `path` (never sent to the model); file names take the URL's own
-  extension, else one from the mime type (`audio/x-wav` is now `.wav`, not `.bin`). Every media
-  request sends `User-Agent: toolnexus/<version> (<port>)` unless you set one, since some CDNs
-  refuse requests without it.
-- **Files you can keep** — `gather.mode` decides what you get back: `download` (default for named
-  clients) saves every result under `gather.dir`, so a2e's URLs that expire in 3–30 days are no
-  longer your problem; `url` keeps provider URLs; `inline` returns the bytes. A `maxBytes` cap
-  (100 MiB) bounds every download, and downloads never carry your API key.
-- **Your own provider** — implement `MediaClient` (`supports` plus the verbs you have), or keep
-  writing JSON styles: `loadMediaStyle` + `styleMediaClient` is the advanced path, and the a2e
-  client is itself such a style.
-- **Grok video and privacy** — Grok's video tools refuse to run under Zero Data Retention. The Grok
-  client never changes your settings; it reports `grok: video blocked by Zero Data Retention — run
-  /privacy and opt in, …` and `createMedia` moves to your next video client. The media docs page
-  has the steps.
+- **Docs site: new "Reference" theme and the Toolnexus name.** The docs at muthuishere.github.io/toolnexus now use Source Serif 4 for headings and the hero, Source Sans 3 for text and JetBrains Mono for code, with a deep-green accent and matched light and dark themes (body text ≥ 11:1 contrast in both). Fonts are self-hosted, so the static site makes no third-party font calls. Code blocks, section rules, small-caps labels and a linked eight-language strip on the home page follow the same reference-book style. The product is written "Toolnexus" in titles and prose; package names, imports, commands and URLs stay lowercase `toolnexus`. Generated API reference pages are unchanged.
+
+**Benchmarks: one Java result (docs only).** The JVM rows were re-run on released 0.28.0 (with the in-house
+Java stdio MCP client, #204) by the same method as every other row: five alternating rounds, load below 4 at
+each start, medians (sitting `2026-11-08-quiet-0.28-java` in `benchmarks/results-2026-11.json`, replacing the
+pre-#204 JVM rows). Over MCP, toolnexus Java is **level with LangChain4j**: p50 2.15 vs 2.17 ms, RSS 141 vs
+140 MB, and it starts faster (init 174 vs 259 ms). This supersedes the 0.28.0 notes below that put Java "5%
+behind" in one sitting and ahead (1.63 vs 1.84 ms) in a separate 7-round one; that separate sitting is withdrawn.
+
+## 0.28.0 — 2026-11-08
+
+**Upgrading — read this first.**
+
+- **BREAKING (rust only):** `AcpStreamEvent` gains `ToolCallArgs` and is now `#[non_exhaustive]`; a `match`
+  on it needs a `_` arm once. Rust code that builds `ClientOptions` or `Hooks` by setting every field by
+  hand must add the new `stop_recovery` / `after_round` fields (or end the literal with `..Default::default()`).
+- **java:** Jackson 2 (`jackson-databind` 2.x) is gone; Jackson 3 is the only JSON library. If your code used
+  the Jackson 2 that toolnexus brought in transitively, declare it yourself.
+- **Default change (#191, all ports, with `stopRecovery` off):** tool arguments that are valid JSON but not an
+  object (`[1]`, `"x"`) now reach the tool as `{}`. Before, js and python passed the raw value through.
+- **rust and java:** local stdio MCP servers now run on in-house clients (rmcp / the MCP Java SDK remain for
+  remote HTTP servers and `serve`).
+- **Benchmarks:** the JavaScript speed-up claimed in the request-path work (#185) did **not** reproduce in the
+  quiet benchmark (3.43 → 3.40 ms). Java after the in-house stdio client: init 137 ms, p50 1.63 ms vs
+  LangChain4j 220 ms / 1.84 ms, in a separate 7-round sitting (not blended into the standing page's
+  5-round medians).
+
+**Java: local MCP servers run on an in-house stdio client** (java only). Pre-2026 stdio servers no longer
+go through the official MCP Java SDK session. That covers nearly every local server in use today: those
+that answer `server/discover` as an old server, plus the child respawned after a silent discover. The SDK
+put a Reactor chain and scheduler hops on every request, and built a JSON tree for every line. The new
+client writes each request straight to the child's stdin. One reader thread routes replies by id and
+hands their raw bytes to the waiting caller, which parses them straight into the same `McpSchema` result
+types. That is the shape LangChain4j and our Rust port use. Server→client requests (ping, elicitation,
+roots) are answered off the reader thread, so a server that floods requests while not reading stdin
+cannot deadlock a call. Measured on the mock-LLM benchmark (same machine, runs interleaved, medians of 7):
+cold init went from 167 ms to 137 ms, and per-request p50 went from 1.88 ms to 1.63 ms. LangChain4j's
+MCP client on the same harness: 220 ms init, 1.84 ms p50. A raw `tools/call` round trip went from ~40 µs
+to ~20 µs. Behaviour is otherwise unchanged: the same protocol versions are offered (2025-11-25, down to
+2024-11-05), with the same error texts, idle timeout, cancellation and content mapping. One addition, as
+the Rust client already does: when a call is given up on, the server now gets `notifications/cancelled`
+with `requestId` and a reason (`"request timeout"` for an idle timeout, `"cancelled"` for a caller
+cancel). A late reply to that id is dropped quietly.
+**Not changed:** remote HTTP/SSE servers and `serve` still use the SDK. 2026-07-28 servers were already
+in-house (`Mcp2026`). One visible difference: a respawned child's stderr now passes through to the host's
+stderr, as the probe child's already did, instead of going to SLF4J. Requests are written by one
+writer thread, so a server that stops reading stdin can no longer park a caller past its call timeout,
+and `close` also kills the server's children after the server itself has exited. Tracked in
+`openspec/changes/java-inhouse-stdio-mcp`.
+
+**Benchmarks re-measured for 0.28.0 (docs only).** A quiet re-run (load < 4, five interleaved rounds of 0.27.0
+against `main`, medians) replaces the standing page's numbers and adds sitting `2026-11-08-quiet-0.28` to
+`benchmarks/results-2026-11.json`. Over MCP, `main` vs 0.27.0: python p50 1.38 → 0.92 ms; java init 361 → 195 ms
+and p50 2.44 → 2.28 ms; csharp init 89 → 61 ms; rust p50 0.376 → 0.342 ms; go unchanged. Against competitors:
+Rust now beats AutoAgents on latency (0.342 vs 0.368 ms; AutoAgents still uses less memory), C# now starts faster
+than Microsoft Agent Framework, Go is level with Eino, and Java is still 5% behind LangChain4j (was 37%). **Not
+reproduced:** the request-path entry's JS figure (3.28 → ~0.55 ms); this harness shows JS unchanged (3.43 → 3.40 ms).
+Elixir and Clojure were not re-run.
+
+**Change an ACP agent's mode or model without restarting it (#197).** A running ACP client now has
+`setMode(mode)` and `setModel(model)` (Go `SetMode(ctx, mode)` / `SetModel(ctx, model)`, Python
+`set_mode` / `set_model`, C# `SetModeAsync` / `SetModelAsync`, Clojure `set-mode!` / `set-model!`).
+Before, the only way to switch mode (e.g. a shift+tab plan/act toggle) was to close the agent and
+`loadACP` again, which is slow and loses the session. `setMode` sends `session/set_mode`; `setModel`
+does exactly what the load-time `model` option does — `session/set_config_option {configId:"model"}`,
+then `session/set_model` if the agent rejects that. Same process, same session; values pass through
+unvalidated and no vendor is named. If the agent rejects the change, only that call fails and the
+client keeps working. All eight ports; SPEC §8C, conformance `liveSwitch`.
+
+**ACP tool rows now show their arguments and full title (#188).** Agents such as the Claude ACP
+adapter send a tool's `rawInput` (file path, command) and its full title only on a later
+`tool_call_update`; toolnexus read `rawInput` only from the first `tool_call`, so a host saw bare
+rows like `Write` or `Terminal`. A streaming ACP generate now emits
+`{type:"tool_call_args", id, name, args, via:"acp"}` when an update brings `rawInput`, and an
+update's title is kept, so the later `tool_result` carries `Write /tmp/a.txt` rather than `Write`.
+Additive: a consumer that ignores unknown event types sees no change. **BREAKING (rust only):**
+`AcpStreamEvent` gains a `ToolCallArgs` variant and is now `#[non_exhaustive]`, so a `match`
+needs a `_` arm once (future variants will not break again); Java
+(`StreamEvent.Kind.TOOL_CALL_ARGS`) and C# (`StreamKind.ToolCallArgs`) gain an enum member. All eight ports; SPEC §8,
+conformance `stream.acpToolUpdate`.
+
+### A streamed turn now says when it is retrying (#189)
+
+When the provider answers `429`, `529` or a `5xx`, `stream()` now emits
+`{type: "retry", attempt, max, delayMs, status?, reason}` **before** it waits, so a host can show
+"Retrying in 4s · attempt 1/2" instead of a frozen spinner. `delayMs` is the exact wait the loop
+is about to sleep — a server's `Retry-After` when it sent one, otherwise the backoff actually
+drawn. `reason` is `"HTTP 429"` or `"network"`; `status` is absent on a network error. No event
+is emitted for a failure that will not be retried, and `run`/`ask` output is unchanged.
+
+The client also obeys the **`x-should-retry: true|false`** response header (the one Anthropic
+and OpenAI send, and their own SDKs obey): it overrides the default retryable classification
+before `onError` runs, in `run`, `ask` and `stream`. `onError` still has the final say and
+`retries` still bounds every retry. Without the header nothing changes.
+
+- Additive in every port: the event type gains a `retry` kind and fields (Rust: `kind == "retry"`
+  with `attempt`, `max`, `delay_ms`, `status: Option<u16>`, `reason` on the `StreamEvent` struct;
+  no exhaustive match breaks). Clojure has no stream entry point, so the event goes to
+  `:on-event` (a run without `:on-event` emits none).
+- In-process clients have no wire and emit no retry event.
+
+Spec: `SPEC.md` § Streaming and § Resilience; `openspec/changes/add-retry-stream-event`.
+### Round-boundary hook: append a message between rounds, or keep a stopped loop going (#192)
+
+A new optional hook, `afterRound({ turn, final, text, messages })`, fires at the end of every loop
+round — after the round's tool results are in the transcript and before the next request. Return
+`{ inject: ["…"] }` and each string is appended as a user message: todo reminders, sub-agent
+notices, budget warnings, without rebuilding the transcript in `beforeLLM`.
+
+It also fires when the model **stops** (no tool call) as long as a turn remains: a non-empty
+injection there continues the loop ("you still have 2 open todos"). `maxTurns` still bounds it.
+Without the hook nothing changes. Run and stream, OpenAI and Anthropic styles, and the §7D agent
+path (hooks are forwarded verbatim). It never fires on a pending halt, an error, `translate`, or an
+ACP model source. Spec: SPEC.md §8 Hooks; change `openspec/changes/add-round-boundary-hook`.
+### Model fallback chain on overload (issue #190)
+
+A provider under load answers `529 Overloaded` or `503`, and until now the client spent its
+`retries` on the one model and then failed the run — even when a sibling model on the same endpoint
+would have answered. The new opt-in client option **`fallbackModels`** (js `fallbackModels`, python
+`fallback_models`, Go `FallbackModels`, java `fallbackModels(...)`, C# `FallbackModels`, elixir
+`:fallback_models`, clojure `:fallback-models`, rust `fallback_models(...)`) is an ordered list of
+models to switch to: once the retry budget on the current model is used up **and the last answer was
+`503` or `529`**, the same request goes to the next model with a fresh budget. `429`, other errors
+and an `onError` `"fail"` never switch models. `stream` emits `{type:"fallback", from, to}` before
+switching, and `RunResult.model`, `afterLLM` and the metric events report the model that actually
+served. Set `TOOLNEXUS_DISABLE_MODEL_FALLBACK=1` to turn it off without a redeploy. Without the
+option nothing changes. Not done: no cooldown/stickiness across calls (each turn starts at its own
+model), and in-process/ACP sources ignore the option. Spec: `SPEC.md §8`,
+`openspec/changes/add-model-fallback-chain` (the model-only slice of `add-llm-upstream-failover`).
+
+**Classifier: an `openai` backend on OpenAI's Decisions API** (issue #157). `createClassifier({backend:
+"openai"})` sends the same noul / choice / score questions to `POST https://api.openai.com/v1/decisions`
+(`gpt-6-luna`) and returns the same `Decision` as every other backend. A front end such as jevx can now
+offer an `openai` profile type without its own adapter. Every shared option applies unchanged (baseUrl,
+headers, timeout, httpClient, retries, onError, requestParams, bodyTransform, cache, onMetric).
+`OPENAI_API_KEY` goes only to `api.openai.com` over https (the #155 rule). Images go as `input_image`
+data URLs. Caller keys are still never sent: questions travel in key order and answers are read back by
+position. A `refusal` answer is an error, never a "no". Three things this wire cannot take fail before
+any request: raw questions such as `box`, a one-option choice, and more than 400 questions.
+**Not done:** decisions from this backend report `calibrated: false` until calibration is measured, so
+thresholds tuned on Jev do not transfer. The Decisions API has no batch call, so `states().evaluate`
+still fans out one request per state. There is no model catalogue (#158). OpenRouter's and Vercel's
+Decisions routes have no preset yet; they work today with a `baseUrl` override and a named `apiKeyEnv`.
+The wire was checked live against `gpt-6-luna` from Go, Python and Rust (yes/no, pick-one and
+score). Every port's mock-kit suite also covers it through `tools/mock-llm`'s `/v1/decisions`.
+Tracked in `openspec/changes/add-classifier-openai-decisions`. Shared fixture
+`examples/judge/backends/openai-decisions.json`. Docs: an "OpenAI (Decisions API)" section on the judge
+backends page and an openai recipe (yes/no, pick-one, score) in the judge cookbook, in all eight languages.
+
+### Stop-reason recovery (`stopRecovery`, opt-in)
+
+A run no longer has to end on a reply that is not an answer. Set **`stopRecovery: true`**
+(`stop_recovery` / `StopRecovery` / `:stop-recovery`) and the loop recovers from the three stop
+shapes Karya (go-agent-cli) hit in real runs (issue #191):
+
+- **Empty answer** (a thinking-only `end_turn`: reasoning, no text) — the empty reply is dropped
+  and the model is nudged once to give its answer. Before, `text` came back `""`.
+- **Truncated** (OpenAI `finish_reason: "length"`, Anthropic `stop_reason: "max_tokens"`) — the
+  partial stays and the model is asked to continue, up to 3 times; `text` is the joined answer.
+  Before, a half answer came back as if it were final.
+- **Malformed tool call** (arguments that are not a JSON object) — no tool runs, the reply is
+  dropped and the model is told once to call again with valid JSON. Before, the tool silently ran
+  with `{}`.
+
+Each recovery appends one byte-exact user message pinned in `SPEC.md` §8, so every port sends the
+same words. Recoveries are ordinary turns: they fire `beforeLLM`/`afterLLM`, count in `turns` and
+usage, and never exceed `maxTurns`. Applies to `run` and `stream`, both styles, resume paths and
+agent runs; not to `translate` or the in-process client. **Off by default** — with the option
+absent a run is byte-identical to before. Not done: no stream event or metric announces a
+recovery (watch for the pinned text in `beforeLLM`), and the budgets and texts are not
+configurable. Fixture: `conformance/stop_recovery/cases.json`; change
+`openspec/changes/add-stop-reason-recovery`.
+
+**Small behaviour change with the option off:** tool arguments that are valid JSON but not an
+object (`[1]`, `"x"`, or an Anthropic `input` that is not an object) now reach the tool as `{}`
+in every port, as malformed text already did. Before, js and python passed the raw value through
+(and the Go Anthropic loop failed the whole response on a non-object `input`).
+### Reactive compaction on context overflow (issue #194)
+
+A long agent run no longer dies the first time the provider says the prompt is too long. Set
+the new client option **`compactOnOverflow`** (a `beforeLLM`-shaped hook — usually a
+`compactor(...)` with a tighter budget than your proactive one) and the loop answers an
+overflow by compacting the transcript and re-sending the same turn. **Without the option a run
+is byte-identical to before**: the overflow still surfaces as the typed `LlmHttpError`.
+
+Why: the proactive compactor works from an estimate (`ceil(chars/4)`); only the provider knows
+whether a prompt fits, and one huge tool result can push a turn over between estimates. Karya
+(go-agent-cli) asked for this, with a breaker.
+
+- **Detection is pinned and exported** as `isContextOverflow(status, body)`: status `400` or
+  `413` **and** one of `context_length_exceeded`, `maximum context length`,
+  `prompt is too long`, `prompt_too_long`, `request_too_large`, `context window` in the
+  lowercased body. Covers OpenAI, Anthropic and OpenAI-compatible gateways; a bare 413 or a
+  429 that mentions context length is not an overflow.
+- **The breaker**: an overflow within fewer than two successful LLM calls of the last reactive
+  compaction is a *rapid refill*; after three compactions in a rapid chain the run fails with the
+  typed **`ContextOverflowError`** (`compactions`, `status`, `body`; message
+  `context overflow: <n> reactive compaction(s) did not make the prompt fit`). Overflows spaced
+  further apart reset the chain. A hook that returns nothing, or a transcript that is not
+  shorter, fails at once (`compactions` 0) instead of looping.
+- The retry does not run `beforeLLM` again and does not consume a turn. Applies to `run` and
+  `stream`, both styles, and the resume paths. SPEC §7F.1; fixture
+  `conformance/reactive_compaction/cases.json`; change `openspec/changes/add-reactive-compaction`.
+- Not done: no per-agent (`AgentDef`) option; a §7D agent run uses its client's option.
+- Not done: the single-call `translate` paths do not react to an overflow (they are not
+  loops). Resume paths are covered because they run through the same loops, but no port has a
+  dedicated resume test. In golang, `ContextOverflowError` unwraps to the last `*ProviderError`;
+  elixir and rust carry it as a separate error type, with no unwrap equivalent.
+
+### Memory hierarchy and dreaming
+
+A persona's memory can now stay small and stay true. **Everything is opt-in; a persona built
+without the new options is byte-identical to before.**
+
+- **`memoryIndexCap`** on `fromDir`: injects at most 200 lines / 25600 bytes of `MEMORY.md`
+  (whole lines, a fixed notice when cut) so a diligent persona no longer pays for an ever-growing
+  index on every turn. Disk is untouched.
+- **`notes: true`**: the `memory` tool gains `note:<slug>` targets (`memory/<slug>.md`, never
+  injected), `read` and a sorted `list`. Bad slugs (`../SOUL`, uppercase) are refused with no I/O.
+- **`transcriptSearchTool(store)`**: a read-only tool that searches stored conversations
+  (case-insensitive substring), so an agent can check what it believes against what happened.
+- **`dreamer(dir, { store })`** and **`fromDir(dir, { dream: { everyMs, store } })`**: a built-in
+  dream pass that verifies `MEMORY.md` against the transcripts, fixes or prunes claims, and
+  records every change in `memory/log.md`. No `HEARTBEAT.md` to write.
+- **A dream cannot delete correct memory without a trace.** The prompt removes a claim only when
+  the transcripts contradict it; a claim they merely do not mention stays, because transcripts get
+  pruned and silence is not evidence. The dreamer's `memory` tool refuses every action on
+  `USER.md` (`dreamer: USER.md is off-limits`) and `replace`/`remove` on `note:log`
+  (`dreamer: memory/log.md is append-only`), so a dream never edits the user model and can only
+  add to its own audit trail. Not done: no snapshot is taken before a pass — keep the home in git.
+- Transcript search folds case for ASCII letters only, now pinned by a fixture case: `É` in a
+  message is not found by `é`. A port using Unicode lowercasing fails it.
+- Memory writes are fsynced and serialised per file within a runtime, so concurrent agents no
+  longer lose each other's entries.
+- **`replace`/`remove` now change only the first match in every port.** python and java used to
+  change every occurrence; a `remove "x"` there deleted every "x" in the file.
+- The notes-off `memory` tool's description and schema are now identical in all eight ports.
+  python, go, rust, csharp and elixir had drifted ("next session" vs "NEXT session", a missing
+  `(with)`, no `target` description), so the text their models see changes slightly.
+- **`replace` inserts `with` literally everywhere.** js expanded `$&`, `$1`, `$$` in the
+  replacement (so a model writing "costs $&" got the matched text pasted in); all eight ports now
+  insert the text exactly, pinned by a fixture case.
+- Hardening from review, all eight ports: a slug with a trailing newline (`note:abc\n`) is
+  refused (elixir and csharp accepted it); `list` skips symlinks and directories and no longer
+  throws on a dangling symlink (js threw; most ports listed links); the write lock keys on the real
+  path, so a home reached through a symlink shares one lock with its real path; `limit: null`
+  is an error, not "no limit"; `tool_use` input keeps U+2028/U+2029 as-is (go and csharp escaped
+  them); `startAgent` throws `startAgent: dreamer name collision: <name>-dreamer is already
+  registered` instead of letting one agent silently shadow the other, and never leaves the
+  persona's heartbeat running when the dreamer fails to start.
+
+All eight ports; fixtures `examples/memory-hierarchy/` and `examples/dreaming/` (the "Mt. Moon"
+case: a dream pass fixes a wrong note and the next session answers differently). Docs: new
+"Dreaming" page. Not done: no cross-process write locking; no semantic search; clojure writes
+are not atomic (koine has no rename) and its lock is in-process only — SPEC §7E now lists this as a
+permitted per-port difference; clojure's note `list` uses a
+real-path check instead of lstat (koine has none), so a FIFO or socket named `x.md` would be listed; on
+a case-insensitive filesystem two spellings of one path may get two locks; a go `IndexCap` field of 0
+means "use the preset" rather than an error; rust custom conversation stores must override
+`supports_list()` to be searchable. Change: `openspec/changes/add-memory-hierarchy`.
+
+**Fix: the persona `memory` tool no longer truncates a `MEMORY.md` / `USER.md` larger than 2 MB.**
+The tool read the file through the same 2 MB cap used to build the system prompt, then wrote that
+capped text back. So once the file went over 2 MB, a single `add`, `replace` or `remove` cut it down
+to 2 MB on disk and wrote the truncation notice into it, silently losing everything after the cap.
+SPEC §7E always said the cap leaves the on-disk file untouched. Affected: **js, java and clojure**;
+the other five already edited the full file. Those three now do too, and seven ports (all but
+clojure) now write atomically (temp file + rename), so a crash mid-write cannot leave a half-written
+file; an existing file keeps its permission bits, a new one gets the usual `0666 & ~umask`. The cap still applies only when building the system prompt. Pinned by fixture key
+`H3_memoryWriteOver2MBPreservesDisk` in `examples/persona-agent/fixture.json`. Not done here:
+a `MEMORY.md` that is a symlink is now replaced by a regular file on the first write (the rename
+replaces the link), so point the home dir at the real directory rather than linking the file;
+clojure's write is not atomic yet (koine has no rename/move, so it needs adding to koine first);
+concurrent writers are addressed by the memory hierarchy entry above.
+
+**A mock model server: run any toolnexus client, classifier or media job with no key and no cost.**
+`tools/mock-llm/mock_llm.py` is one stdlib-only Python file (`python3 tools/mock-llm/mock_llm.py
+--port 8787`, base URL `http://127.0.0.1:8787/v1`, any key). It answers OpenAI chat and Anthropic
+messages (tool calls when tools are offered, then a final text; SSE streaming), echoes attachments
+back with their mime type, size and sha256 so a test can prove an image arrived, serves the System
+One, Cloudflare and OpenAI Decisions classifier wires with deterministic answers (noul 0.95, choice
+by hash, score within the rubric), serves a §7G media style covering all six verbs (async jobs with
+a poll, tiny real PNG/WAV/MP4 files), and injects 429/5xx with `Retry-After` on request. `--script`
+overrides replies. Sibling fakes cover every other source: an MCP server (stdio and HTTP, on both
+the `server/discover` path and the frozen one), an A2A agent, HTTP tool endpoints, a one-shot CLI
+for `createInProcessClient` and an ACP agent with permission, tool-call updates and
+`session/cancel`, and a fake Grok/Codex media CLI (`fake_media_cli.py`; nothing on main drives a
+media CLI yet, so it is validated against the unreleased `media-clients` branch). The in-process recipe fakes moved here from `site/recipes/in-process-client/fakes/`.
+Every port now has an integration suite that runs its real client, classifier
+and media engine against it, in its normal test command. Docs: cookbook "Run without a model".
+
+- **Not done:** the ports' suites test the System One and Cloudflare classifier wires only; the
+  OpenAI Decisions wire is served and self-tested, but the `openai` backend lives on the #157
+  branch, so port-level Decisions cases land with that change. The existing in-process unit fakes
+  stay as they are. ACP cancel is not exercised in elixir (#169) or clojure (#170), which lack it;
+  clojure has no network streaming, so its suite has no streaming case. The benchmark's own mock (`benchmarks/mock_llm.py`) is unchanged.
+
+**Faster requests and cold starts in python, js, java, csharp and rust** (`openspec/changes/speed-up-request-path`).
+Measured against a no-framework floor, most of our per-request time was waiting, not computing: a new
+TCP connection per LLM call, a thread hand-off per MCP stdio line, an OS proxy lookup per call, and SDK
+code loaded only after the MCP child was up. Fixing those, against the shared benchmark (median p50
+per request, before → after, interleaved with a clean HEAD build on one machine): python 1.35 → 0.96 ms,
+js 3.28 → ~0.55 ms, java 2.89 → 2.54 ms (0.88 ms once the JIT is warm) with init 358 → 180 ms, csharp
+init 93 → 62 ms. These numbers are from a busy machine; the standing page changes only after a quiet re-run.
+
+- **python, js:** the default LLM transport keeps the connection open. A connection the server dropped
+  while idle is replaced before use; a request that failed after it was sent is never re-sent, so a
+  model call cannot be billed twice. js follows redirects from the target and leaves a host-installed
+  undici dispatcher in charge. It steps aside, exactly as before, when a proxy env var applies or you pass
+  your own transport/`fetch`. js uses it on Node only; Bun, Deno and browsers keep the platform `fetch`.
+- **python, csharp behaviour change:** the proxy decision is cached per scheme and host, so a system
+  proxy changed while the process runs is not picked up. Python's `urllib` already read it once per process.
+- **java:** drops `jackson-databind` 2.x; Jackson 3, which the MCP SDK already needs, is the only JSON
+  library. JSON output is byte-identical (new golden test). If you used the Jackson 2 that toolnexus
+  brought in transitively, declare it yourself.
+- **rust:** stdio MCP servers now run on our own client instead of rmcp: callers write straight to the
+  child's pipe and one reader routes replies by id. A `tools/call` fell from ~30 to ~17 µs; steady-state
+  p50 0.265 → 0.22 ms, ahead of AutoAgents and level with golang (golang still leads by ~10 µs under
+  heavy load). `Client::run_ctx` now runs the turn on a tokio worker thread. Wire changes on the
+  pre-2026 stdio path, all bringing rust in line with golang and SPEC §2: `initialize` offers
+  `2025-11-25` (rmcp sent `2026-07-28`) with `clientInfo` `toolnexus`; caller cancellation now sends
+  `notifications/cancelled`; a freshly spawned server's stderr passes through (§2.3); close kills the
+  whole process group after 3 s; a tool with a non-object `inputSchema` no longer fails the whole list.
+  rmcp remains for remote (HTTP/SSE) servers and the serve side; the `rmcp/transport-child-process`
+  feature is dropped.
+- **Not done:** golang needed nothing: it measured within ~8 µs of the floor. elixir and clojure are out
+  of scope (#168 tracks clojure).
+
+## 0.27.0 — 2026-11-08
+
+**Rust: an ACP turn the agent never ends now fails after `permission_timeout`** (rust only, #124).
+Every other port bounds the whole `session/prompt` turn by the permission timeout, as SPEC §7 says
+("the turn's permission timeout still applies"). Rust bounded only the host's `on_permission`
+callback, so an agent that stalled mid-turn, or never answered, hung the turn forever. It now fails
+with `AcpError::PermissionTimeout` after `permission_timeout` (default 30 s) from the prompt being sent.
+A turn that legitimately runs longer than that needs a larger `permission_timeout`, same as in Go.
+
+**ACP: cancel a running turn in js, python, java and csharp** (#124). Before, only golang and rust could
+stop an ACP turn; the other ports either ignored cancellation or dropped the turn without telling the
+agent, which kept working. Now a cancelled turn sends the `session/cancel` notification, waits up to the
+request timeout for the agent to end the turn, and raises the cancellation error; the process and
+session stay warm for the next turn. Per port: js `generate(request, {signal})` /
+`generateStream(request, emit, {signal})` rejects with an `AbortError`; python
+`generate(request, cancel=event)` (a `threading.Event`) raises the new `ACPCancelledError`; csharp
+honours the `CancellationToken` it already took; java reacts to the thread interrupt that
+`LlmClient` cancellation already uses.
+
+- **java behaviour change:** an interrupted turn now throws `LlmClient.CancelledException` instead of
+  `IOException("...interrupted")`.
+- **Not done:** elixir (#169) and clojure (#170). In js and python, cancelling a run of
+  `createInProcessClient` does not yet reach the ACP turn — pass the signal/event to the ACP client
+  yourself; wiring it through changes the in-process seam in every port and needs an OpenSpec change.
+
+**Tool-scheduling tests are now mutation-checked in every port** (#129). Each scheduler was broken on
+purpose (unsafe calls overlapping, the cap ignored, everything serial, results in completion order) and
+the tests had to fail. Results-in-completion-order went unnoticed outside golang and csharp, so new tests
+finish calls out of order and check each output stays in emitted order. No library behaviour changed.
+Gap: in js the streaming modes are not covered by the reordering mutation.
+
+- **`mcpHandler` with the 2026-07-28 opt-in no longer rejects legacy clients that send the 2026 version
+  header** (issue #150, all eight ports). On a mount listing `2026-07-28` next to legacy versions, a request
+  carrying `MCP-Protocol-Version: 2026-07-28` but no `Mcp-Method` header and no `_meta` version was routed to
+  the 2026 wire and failed with HTTP 400 `-32020`; hosts had to rewrite the header. Such a request is now
+  served by the legacy wire, which accepts that header value when `2026-07-28` is listed. A real 2026 client
+  always sends `Mcp-Method`, so it is unaffected; 2026-only mounts are unchanged. `initialize` still answers
+  the newest listed legacy version when asked for `2026-07-28` (that wire has no `initialize`; use
+  `server/discover`), and SPEC §7C.2 and the Go `ProtocolVersions` doc now say so. No hint is added to the
+  `initialize` result: the `io.modelcontextprotocol/` `_meta` prefix is reserved by MCP.
+
+**Faster cold start for MCP in Java and C#, with no change in behaviour** (Java and C# only). Java no
+longer builds the MCP SDK's default JSON-schema validator (about 220 networknt classes) for every
+client. It is now resolved the first time a tool result is actually validated against an output
+schema. The SDK's Jackson 3 mapper is built on first use of the legacy SDK path, not when `McpSource`
+loads, and a config with only stdio servers no longer builds an OAuth token store. C# now creates
+the shared MCP `HttpClient` on the first remote request, so a host with only stdio servers does not
+load the HTTP/TLS stack at startup. Validation, auth and the wire format are unchanged. The second
+process that the Java and C# stdio probe used to spawn for older servers (the larger cost at startup)
+is gone too: #167 now reuses the probe child (see the entry below). **Not done:** Java still loads two
+Jackson stacks.
+
+- **Benchmarks (harness only, no published numbers changed):** the fake model server
+  (`benchmarks/mock_llm.py`) now speaks HTTP/1.1 keep-alive, so frameworks that pool connections
+  reuse them across LLM calls as they would against a real provider, instead of paying a TCP connect
+  per call. It also lets two frameworks that previously could not run do so: smolagents (tool results
+  arrive as role `user` and the agent stops only on a `final_answer` tool call; the mock now handles
+  both) and AutoAgents (the mock sent `input_tokens` alongside `prompt_tokens`, which AutoAgents rejects
+  as a duplicate field; usage now carries the OpenAI-standard keys only). The standing tables were
+  re-run against it on 2026-11-08 (see the docs entry below).
+**Faster load of pre-2026 stdio MCP servers: one process start instead of two.** Until now, when a
+stdio server answered the `server/discover` probe with an error (every server older than MCP
+2026-07-28 does), the client killed that process and started a second one for the old protocol. A JVM
+server paid that twice (two spawns 152 ms apart in a Java profile; 35–55 ms in C#, ~20 ms in Clojure).
+Now the same process carries on into `initialize`. A server that never answers the probe is still
+killed and restarted after `min(timeout, 5 s)`, as before. Discover-first, the 2026 path and HTTP are
+unchanged; SPEC §2.2a amended. Shared fixture `examples/mcp-2026/legacy-stdio/` counts process starts.
+If a port cannot hand the open process over, it respawns as before (Rust logs a warning on stderr when this happens). Port coverage and any gap: `openspec/changes/reuse-stdio-discover-probe/tasks.md`.
+
+- **Docs:** the docs-site hero video is re-cut for 0.26.0 (80 s, new narrator). It now covers eight
+  languages including Rust, typed decisions (`createClassifier`), media generation, and serving the
+  toolkit over MCP, A2A and ACP. Its benchmark claims come only from the Nov 2026 standing page: lowest
+  in Python, Rust and Elixir, level in JavaScript and .NET, and behind in Go and on the JVM.
+
+- **Faster start in JavaScript, fewer allocations per turn in Go** (javascript and golang only; no
+  behaviour change). Importing `toolnexus` in JavaScript no longer loads code a host may never use: the
+  MCP server transport and `@hono/node-server` load on the first `serve()` with an MCP profile or `asMcpServer()`, the remote MCP
+  transports (streamable-HTTP, SSE) only when a remote server falls back to the SDK path, the
+  MCP 2026 client on the first MCP load, and `yaml` on the first skill parsed. A bare import drops
+  from 377 to 284 modules. Every public signature and export is unchanged (the built `.d.ts` files are
+  byte-identical); `yaml` is loaded with a synchronous `require`, so `listSkills`/`loadSkills` stay
+  synchronous. Not done: `buildMcpServer` is synchronous and returns the SDK `Server`, so the SDK
+  server core still loads at import. In Go, the non-streaming OpenAI and Anthropic loops marshal the
+  tools array once per `Run` instead of once per turn, when no `BeforeLLM` hook or `BodyTransform` can
+  see or change it, and the MCP progress token is built without `fmt`. A test pins the request-body
+  bytes, and they are unchanged. Not done in Go: the request body is still a `map[string]any`, because
+  `BodyTransform` receives that map; the per-call `Metadata` map, the idle timer and the progress token
+  stay, because each is observable (returned to the caller, the §2 idle timeout, and sent on the wire).
+- **Docs / benchmarks:** the Nov 2026 standing page gains native-tool rows for toolnexus in Python,
+  JavaScript, Java and C#, so .NET is finally compared like for like with Microsoft.Extensions.AI and
+  Semantic Kernel (which only run native tools): toolnexus native is lowest at 0.59 ms p50 with the lowest
+  init and RSS, a tie with Semantic Kernel inside noise. It also adds a skills row against Spring AI 2's
+  `SkillsTool` (spring-ai-agent-utils 0.13.0) over the shared `hello-world` skill: a latency tie with our
+  `full` config, at about 30% of Spring's memory. Measured 2026-11-08 on a busy machine and kept apart from
+  the 2026-11-07 rows; the C# MCP figure from that sitting is too noisy to claim. No Python or Java
+  competitor has a native row in the harness yet.
+- **Docs / benchmarks: quiet re-run of the Nov 2026 standing page** (2026-11-08, every row started at
+  1-minute load < 4, keep-alive mock). All per-language tables now come from one sitting of the full suite,
+  with toolnexus `main` (the 0.27.0 candidate) and smolagents and AutoAgents, which run for the first time. A
+  new table puts 0.26.0 and `main` side by side per port: MCP cold init drops 14–20 ms in Python, JS, Go,
+  Elixir, Clojure and Rust and 14 ms in C# (the stdio probe child is reused, #167; JS/Go lazy loading, #166;
+  C# lazy `HttpClient`, #171), and per-request latency is unchanged. Where we still lose: Eino in Go,
+  LangChain4j on the JVM, AutoAgents in Rust (new, by 8%), and C# MCP cold init against Microsoft Agent
+  Framework. Java did not show #171's cold-start gain in this run (init 462 vs 413 ms, one sample per
+  process), so the page does not claim it. .NET MCP is now ahead of Microsoft Agent Framework (0.52 vs
+  0.62 ms). Clojure remains the slowest port; its fix is deferred to issue #168. Raw rows are in
+  `benchmarks/results-2026-11.json` under `run: 2026-11-08-quiet`; earlier sittings are kept.
+
+**Security: the classifier no longer sends a default API key to a host that is not its own** (issue #155).
+Until now the classifier read `TYPESAFE_API_KEY` (or the backend's variable) and sent it as a bearer
+token to whatever `baseUrl` pointed at, so a `custom` backend, or any backend with a `baseUrl` override,
+leaked the key to a self-hosted or third-party server whenever the variable was set. It now follows the
+§8 client rule: a caller-named `apiKeyEnv` goes where the caller says; the backend's own variable goes
+only to that backend's own https host (`api.typesafe.ai`, `openrouter.ai` and subdomains,
+`ai-gateway.vercel.sh`, `api.cloudflare.com`); `custom` has no default key. Anything else sends no
+`Authorization` (no error: keyless servers stay legal, and `headers` still work). All eight ports
+carried the same flaw. **Upgrade note:** a self-hosted endpoint that relied on the implicit
+`TYPESAFE_API_KEY` must now name `apiKeyEnv` (or send a header). Shared fixture
+`examples/judge/backends/key-routing.json`.
+
+**Cloudflare classifier errors now say why** (issue #156). A failed Workers AI envelope reports
+`classifier: cloudflare: envelope not successful: 2021 Insufficient balance` (`errors[0]` code and
+message, redacted and capped like any backend cause) instead of the fixed text, so a missing AI Gateway
+balance is distinguishable from a bad model id. All eight ports; fixture `cloudflare-replies.json`.
+
+Change: `openspec/changes/fix-classifier-key-and-errors`.
+
+**A declined durable resume now tells the model why** (issue #125). Resuming a halted run with
+`answerDeclined(id, reason)` through `runWithAnswer` / `askWithAnswer` used to fill every call's slot
+with "no result supplied on resume for <name>", so the reason the human gave never reached the
+model. Each outstanding call now gets the error result `relay declined for <name>: <reason>` (reason
+defaults to `declined`), the same text the inline `waitFor` path already produced, so an answer means
+the same thing whether the host waited inline or durably. SPEC §10; fixture
+`conformance/resume_decline/cases.json`. Only golang and rust ship the durable resume entry point, so
+only they were affected and fixed; the other six ports have no durable resume yet and must replay the
+same fixture when they add one. Change: `openspec/changes/archive/2026-11-07-fix-resume-decline-reason`.
+
+**Oversized skill descriptions are now reported** (issue #84). The skills catalog sends each
+`description` in full on every turn, and nothing told the author when one was huge: a 4,443-character
+description is cut to ~1,536 by Claude Code but paid in full here. The loader result and the
+`listSkills` inventory now carry `warnings`, next to `skipped`: one
+`{ location, reason: "oversized-description", chars }` per skill whose description is longer than
+1,024 Unicode code points (the published Agent Skills limit; exactly 1,024 does not warn). Each port
+also logs it through the channel it already uses for duplicate skill names, never stdout. Nothing is
+truncated: the catalog and the `skill` tool output are byte-identical to before. All eight ports;
+fixture `conformance/skill_description/`. Not done: the threshold is fixed, not configurable.
+Change: `openspec/changes/archive/2026-11-07-add-skill-description-length-warning`.
+
+**Docs: a new "Where toolnexus stands — Nov 2026" page** (Benchmarks & comparison). It has a feature
+matrix re-checked against official docs on 2026-11-07, covering MCP client/server, MCP 2026-07-28, A2A,
+skills, ACP, judges, media and languages. Cells we could not confirm say *unverified*. It also has new
+fake-model overhead benchmarks with pinned versions for 53 framework configurations in eight languages,
+including Rust (vs rig and swiftide) and new rows for Microsoft Agent Framework, Agno, OpenAI Agents
+JS, LangGraph.js, Google ADK Go/Java, Genkit Go and Koog. The page says where we lose: Eino in Go,
+LangChain4j on the JVM, a tie in .NET, and Clojure as our slowest port. It ends with a ranked list of
+gaps. Raw results are in `benchmarks/results-2026-11.json`, and the August `results.json` is kept as
+it was. The page also lists what we could not run and why: smolagents and AutoAgents fail on the
+shared mock's wire format, and Google ADK TS has no OpenAI-compatible model. The July comparison page
+now points to the new one.
+
+## 0.26.0 — 2026-11-06
+
+**Classifier backends: one System One classifier for TypeSafe, OpenRouter, Cloudflare, Vercel or
+your own server, with images, a cache and reply validation** (change `add-classifier-backends`,
+ADR 0038; every default is proposed and awaits the owner's confirmation).
+
+- **`backend`** is now `typesafe | openrouter | cloudflare | vercel | custom`. Cloudflare's `/ai/run`
+  envelope is built in (no more hand-written `custom` evaluator); `custom` is a self-hosted System One
+  endpoint and must declare `baseUrl` and `supports`. The table is data you can read and override.
+  `${ENV}` in `baseUrl` expands at call time and never appears in an error.
+- **Images in the state.** Put an image content part anywhere in the state and it travels as a
+  TypeSafe `assets` entry (Cloudflare Clef: `input.images`), with the
+  `TypeSafe-Danger-Zone-Images` header only where the backend needs it. PNG/JPEG, 16 MiB, 280–1568 px
+  and 32 MiB per request are checked before sending; a backend that cannot take images fails with
+  `ClassifierUnsupported` before the network. Images are never resized or described as text.
+- **`classifier.state(v).evaluate(qs…)`** validates the reply fail-closed; **`states(…).evaluate`**
+  returns one decision-or-error per state, so one bad item no longer loses the rest.
+- **Opt-in cache** (`cache` + `MemoryCache`): off by default, stores only valid replies, keyed per
+  request on the model the server actually served, with key bytes specified so a cache written by
+  one port is readable by another. Per-question splitting is not done: whether System One calibrates
+  questions jointly is unproven (test plan in the change's design).
+- **Helpers:** `validateDecision`, inclusive `Thresholds` (jevx's 0.8/0.2/0.6, alongside the
+  unchanged `Bands`), `chunkQuestions`. `classifier.evaluate` events now carry `questions`,
+  `questionsHash` and `cached`.
+- **Raw questions/answers:** send a System One question type the library does not model yet (e.g.
+  Jev 1.14 `box`); an unknown answer type now decodes to a raw answer instead of failing the whole
+  decision.
+- **Changed defaults:** `openrouter` now defaults to `typesafe/jev-1.14` (was `typesafe/jev-1.13`).
+  **`style: "llm"` is deprecated** — it keeps working unchanged for at least one minor release.
+  Source-level notes: rust `Decision` gains a `cached` field (struct literals need `cached: false`) and
+  `ClassifierError` gains a private second field (build it with `ClassifierError::new`); java code
+  that switches exhaustively over `DecisionAnswer` needs a `RawAnswer` case.
+
+Not done: the Decisions API (second wire), multipart image upload, Vercel and Cloudflare-Jev
+images (not proven live, so refused), per-question caching, and the jevx cutover gate (ADR 0038
+D8). Tracked in `openspec/changes/add-classifier-backends`.
+
+**Docs: the in-process client recipes now cover all eight ports and use the 0.25.0 ACP seam.** The
+ACP agent recipe is now one short file per language on `toolkit.asMcpServer()` + the ACP client
+(`loadACP` / `load_acp` / `LoadACP` / `AcpClient.start` / `AcpClient.StartAsync` /
+`Toolnexus.Acp.connect` / `toolnexus.acp/connect` / `AcpClient::load`) + a streaming
+`createInProcessClient`, instead of a hand-written JSON-RPC driver; the toolkit is reached with a
+bearer token instead of an open port. Every recipe (overview, `asMcpServer`, ACP agent, one-shot
+CLI, and a new "Extend it" recipe with isolation `_meta`, `model` passthrough and an allow-only
+`onPermission` policy) now has JavaScript, Python, Go, Java, C#, Elixir, Clojure and Rust tabs.
+The tabs are generated from the files that were run (`site/recipes/in-process-client/`, synced by
+`site/scripts/sync-recipes.mjs`, `--check` fails on drift), each run on 0.25.0 against a bundled fake
+ACP agent and fake CLI, and the ACP recipe live against `@agentclientprotocol/claude-agent-acp@0.100.0`
+in JavaScript, Python, Go, Java, C# and Rust. The pages also document the per-port default turn
+timeouts (Python 5 s, Java and C# 10 s, others 30 s), which are too short for a real agent; the
+recipes set 300 s. The Java and C# README "Agents via ACP" snippets now compile (missing
+`acp` package import / `using Toolnexus.Acp;`; Java also needed the checked `IOException` wrapped
+and a turn timeout). Not done: Elixir and Clojure were verified against the fake agent only, not live.
+
+- **MCP 2026-07-28 interop matrix: every port's client against every port's server.** `interop/mcp2026/matrix.sh` builds a small client runner and server runner per port (js, python, golang, java, csharp, elixir, clojure, rust) that speak one shared 11-scenario list (discover, MRTR input/confirm/pending, skills, tool search, OAuth with a pre-registered id, scope step-up, CIMD, no-identity error, legacy fallback) against each port's test-only dev authorization server. 64/64 pairs pass; a new CI job runs it hermetically. `interop/mcp2026/keycloak.sh` (`KEYCLOAK=1`, docker, local only) runs the OAuth login and step-up for all eight clients against a real Keycloak 26.8.1; it never runs in CI. Contract: `interop/mcp2026/README.md`. This replaces the Go-only `run.sh`.
+- **fix(python):** a remote MCP tool result carrying `structuredContent` was rendered with `json.dumps` defaults (`{"text": "hi"}`, non-ASCII escaped), where SPEC section 2 requires `JSON.stringify` (`{"text":"hi"}`). It now matches the other ports, on both the 2026 and fallback paths.
+- **fix(java):** the pre-2026 fallback posted to `<origin>/mcp` whatever the configured URL, so a remote server mounted at any other path (for example `/legacy/mcp`) could never be reached once discovery fell back. It now uses the configured path. The SSE transport builds its URL the same way and is probably affected; not changed here.
+
+**Not done:** live GitHub login and tool call per port (needs an interactive browser consent on the OAuth App, owner-run). Clojure's loopback callback and dev authorization server cannot answer a bare GET with a query string (koine does not expose it), so the Clojure runner performs that step itself. Tracked in `openspec/changes/upgrade-mcp-2026-07-28`.
+
+**Fixed: `GET /mcp` on `toolkit.serve` is refused with 405 and `Allow: POST` in every port.** The
+serve MCP profile is stateless and has no server-initiated SSE stream, but Go and JavaScript passed a
+`GET` to their SDK, which answered `200`, and Clojure answered it as a JSON-RPC call (`200` with an
+error body). Python, Java, C#, Elixir and Rust already
+answered 405; Java, C# and Elixir did so without the `Allow: POST` header the status requires, now
+added. The rule is pinned in `SPEC.md §7C` and in a new shared case file,
+`conformance/serve_mcp/cases.json`, which all eight suites replay, so the next drift fails a test
+instead of hanging a client. `POST /mcp` behaviour is unchanged.
+
+**Docs: removed the stale "Python serve gap" warnings** from the In-process client overview and the
+ACP agent recipe. Both gaps (`mcp={}` exposing no tools, `GET /mcp` hanging) were fixed in 0.25.0
+by #147; the Python serve snippet now uses `mcp={}` and was re-run (tools listed, `add` called,
+`GET /mcp` ⇒ 405). Not done: the live Claude ACP adapter run in Python has not been repeated.
+
+**Tests: six timing-flaky tests made deterministic (test-only, no behaviour change).** JS media
+conformance `async_timeout`: a poll aborted at the deadline could reach the fake server late and
+shift the next pass's script; the fake now drops requests from closed connections. C#
+`LoadMcpOnServerReportsFastServerFirst` and Elixir "MCP on_server reports the fast server first": the
+slow server raced a `sleep 1`; it now waits for a gate file `on_server` writes after reporting the fast
+one. C# `ShortGraceKillsTermIgnoringJobAndDescendantFast` could read a half-written pid line; it now
+waits for complete lines (its bound was also widened 1000→1500 ms, still under the 2000 ms grace).
+Python `test_idle_timeout_progress_extends_call` now has a 40x margin between progress ticks and the
+idle budget. Each passed 20/20 runs under parallel load. Java `CliClientTest` is not on main (only on
+the unmerged `feat/cli-acp-client` branch), so nothing changed there.
+
+**Go: one name for the MCP 2026-07-28 version constant.** 0.25.0 shipped the same string twice,
+`McpProtocolVersion` (client, #142) and `MCPProtocol2026` (handler, #143). `MCPProtocol2026` is the
+canonical name; `McpProtocolVersion` stays as a `// Deprecated:` alias of it, so nothing breaks. golang
+only: no other port exports two names for it in the same namespace (Python, Java, Rust and Clojure
+keep a client-wire constant in their MCP client module beside the handler's, which is module scoping,
+not a duplicate public name; JS and C# keep the client one internal; Elixir's are private).
+
+## 0.25.0 — 2026-11-06
+
+**Docs: an "In-process client" section with copy-pasteable recipes for driving coding agents and
+CLIs yourself.** Driving a vendor CLI or ACP agent is not something toolnexus maintains as library
+surface; agents change their flags too often. Instead the new section shows how to do it on the
+public API that already exists: `createInProcessClient` (`generate`, or `GenerateStream` in Go)
+plus `toolkit.serve` with the MCP profile. Four pages: an overview, a complete ACP agent recipe
+(spawn, `initialize`, `session/new` with your toolkit as an MCP server, `session/prompt`, streamed
+`agent_message_chunk`s), a one-shot CLI recipe (`claude -p`, `codex exec`: render the request, run
+the process, parse text or tool calls), and "Extend it" (your own agent, isolation, model selection
+over `configOptions`, permission policies). Recipes are JavaScript, Python and Go, each run against
+a fake agent/CLI and live against Claude Code; per-agent isolation and model notes are labelled
+with the version and date they were verified on. The section is also published as plain markdown
+for agents at `/_llms-txt/in-process-client.txt` (listed in `llms.txt`). The research behind the
+notes is in `docs/references/acp-agent-isolation-2026-11-05.md`. Not done: two Python serve gaps found while verifying are
+documented, not fixed (`mcp={}` exposes no tools; `GET /mcp` gets no response, which hangs the
+Claude ACP adapter).
+
+### MCP 2026-07-28 client: hosted servers, OAuth login, remote skills and tool search (all eight ports)
+
+**toolnexus now speaks MCP 2026-07-28 to every server first, and can log in to OAuth-protected ones.**
+Until now each port drove its MCP SDK (or, in Elixir and Clojure, our own client) on the 2025 protocol,
+and an OAuth-protected server meant pasting a bearer token into `headers`. Hosted servers such as
+GitHub's already speak 2026-07-28, and most of them ask for OAuth.
+
+- **Discover first, nothing to configure.** Each server is asked `server/discover` before anything else.
+  A 2026 server is used through toolnexus's own client (no SDK) over stdio or Streamable HTTP. An older
+  server answers that with an error, an HTTP 400/404/405/5xx or silence on stdio (5 s), and gets
+  **exactly the client you had before**, frozen. `mcp.json` files keep working unchanged, and tool names,
+  result mapping, filters, timeouts and status are the same on both paths.
+- **Questions a tool asks mid-call** (2026 `input_required`) arrive through your `waitFor` as §10 requests:
+  form → `input`, URL → `authorization`. With no `waitFor` the call returns `{status:"pending"}` and resumes
+  at the round it paused on. A `tools/call` is never re-sent after a timeout, 5xx or dropped connection,
+  because the server may already have run it.
+- **OAuth login** (new optional `auth` per server): protected-resource and authorization-server
+  discovery, PKCE S256 with `resource`, `state`/`iss` checks, refresh (one request shared by concurrent
+  callers) and step-up on `insufficient_scope`. The client identity is a pre-registered `clientId` or a
+  Client ID Metadata Document. **Dynamic Client Registration is deliberately not supported**; without an
+  identity you get an error naming the issuer and `auth.clientId`. Two modes: `auto` opens the browser
+  and takes the callback on `127.0.0.1`; `pause` hands your host a §10 `authorization` request and you
+  answer it with `data.callbackUrl`. New load/toolkit options `tokenStore` (default in-memory) and
+  `openUrl`. Tokens, codes and secrets never reach logs or error text.
+- **Skills over MCP** (SEP-2640): a server that offers skills adds them to the same `skill` tool as your
+  local ones, with digest and path-containment checks.
+- **Lazy tool search** (`"toolSearch": true`, optional `"description"`): the toolkit exposes
+  `<server>_search_tools` and `<server>_call_tool` instead of every tool, for servers with hundreds of
+  tools. Your `tools` filter and `disableTools` apply first.
+
+Contract: SPEC §2 (2.2a fallback rule and resolved questions), §2A.1/§2A.1a, fixtures `examples/mcp-2026/`;
+change `openspec/changes/upgrade-mcp-2026-07-28`.
+
+**Not done yet** (tracked in that change and #134):
+- **The server side.** `serve /mcp` still speaks the pre-2026 profile; the 2026 server, its `auth`
+  (PRM, 401/403, JWT via JWKS, principal) and the in-process dev authorization server come in a follow-up
+  on top of the MCP handler from PR #140. When that lands it is **BREAKING**: old-era clients will no
+  longer be able to call `serve /mcp`. The MCP SDK dependencies stay for now because they power the frozen
+  fallback; golang keeps `mark3labs/mcp-go`.
+- **OAuth on the frozen fallback**: JS, Python, Java and C# attach the bearer per request and re-run the
+  flow on a 401. Rust (rmcp), Elixir and Clojure send the token as a fixed header at connect, so a token
+  that expires mid-session is not refreshed on an old server.
+- **`resourceTools()`** (`list_mcp_resources` / `read_mcp_resource`) sees fallback servers only.
+- No progress notifications or `nextCursor` pagination on the 2026 path; roots, sampling, logging and the
+  Tasks extension are out of scope.
+- Elixir and Clojure re-encode a search hit's `inputSchema` (keys sorted) instead of passing the server's
+  bytes through. Clojure resumes only one input request per MRTR round without a `waitFor`, and its
+  `auto` callback page needs a browser (koine gives a server no query string).
+- Not yet verified: the 8×8 client×server interop matrix on the shipped code, and live Keycloak/GitHub
+  logins (the Go spike passed both).
+
+**MCP 2026-07-28 on the server side: `MCPHandler` speaks the new wire when you opt in, with OAuth metadata and skills over MCP, in all eight ports.** The 2026-07-28 client (change `upgrade-mcp-2026-07-28`) could talk to GitHub's hosted server but not to a toolnexus server: `MCPHandler` refused 2026-07-28, so a toolnexus client always fell back to the old wire. Now add `"2026-07-28"` to `ProtocolVersions` and the same handler, with the same hooks, serves it:
+
+- **The stateless wire.** `server/discover`, header validation (`-32020` header mismatch, `-32022` unsupported version, checked before auth), `resultType` and `_meta` serverInfo on every result, `tools/list` sorted by name with `ttlMs`/`cacheScope`. No `initialize`, no session id, no GET stream. List both `"2026-07-28"` and a 2025 version to serve old and new clients on one mount; without the opt-in nothing changes (an old-only handler answers a 2026 `server/discover` with HTTP 400, which the 2026 client takes as its cue to fall back).
+- **Confirm and suspensions without elicitation streams.** A `BeforeCall` confirm becomes an `input_required` round the client answers through its `waitFor`; a tool that returns a §10 `Pending` request gets the answer back as `ToolContext.Answer` on the retry. `BeforeCall` still runs on every round, so a forged `requestState` cannot get past a deny.
+- **Skills over MCP (SEP-2640).** `ListSkills(ctx)` publishes skills (`skills/list`, `skills/get`, `resources/read` of `skill://` URIs with sha256 digests and traversal-safe URIs); `LoadMCPSkills(dir)` reads a skills folder. A toolnexus client loads them into its `skill` tool byte-identical to the local copy.
+- **OAuth for the server.** `MCPServerAuth{Issuer, Scopes, Verify?}` gives you an `Authenticate` hook (bearer token, RS256 JWT checked against the issuer's JWKS — signature, `iss`, `aud`, `exp` — or your own `Verify`; per-tool scopes; exact 401 / 403 `insufficient_scope` challenges) and the RFC 9728 metadata handler to mount at `/.well-known/oauth-protected-resource`. The verified `Principal` is what `IdentityFrom(ctx)` returns. Any `Authenticate` hook can now return an `MCPAuthError` to pick 401 or 403 and the challenge.
+- **Bring your own authorization server.** The auto-approving dev authorization server the suites and the interop run use (pre-registered and Client ID Metadata Document clients, PKCE, refresh, no dynamic client registration) is test tooling in every port's test tree, not library API: nothing named `StartMCPDevAuthServer` / `McpDevAuthServer` / `start_mcp_dev_auth_server` ships, so a server that approves everyone cannot end up in production by import.
+- Proven end to end by `interop/mcp2026/run.sh`: the Go 2026 client against the Go server — discover, MRTR input, confirm, skills, tool search, OAuth with a pre-registered client id, with a CIMD URL and with a scope step-up, and the fallback against a handler without the opt-in. Shared wire cases: `conformance/mcp_handler/cases.json` (`mcp2026_*`).
+
+Not done: `Serve(addr, {mcp})` still serves the pre-2026 profile (switching it is the BREAKING step change `upgrade-mcp-2026-07-28` describes, left for a decision); per-tool scopes are enforced only on the 2026 wire (older wires check `"*"` only); a multi-round tool sees only the latest round's answer; the cross-port interop matrix (every port's client × every port's server) and the Keycloak live run against the server are not run here; the site API pages for the new symbols are not written. Tracked in `openspec/changes/add-mcp-2026-server-handler`.
+
+**MCP serve you can mount yourself, with auth, per-request tools and a confirm gate, in all eight ports.** `Serve(addr, {mcp})` owns its port and shows everyone the same tools, so a host that wanted
+an MCP endpoint behind its own login had to write its own MCP server (#139). Now
+`tk.MCPHandler(cfg)` returns an `http.Handler` to mount on your own mux, behind your own TLS, CORS
+and OAuth, with plain hooks:
+
+- `Authenticate(r)` runs on every request; an error is HTTP 401 with your `WWW-Authenticate` header.
+  What it returns reaches every hook and tool via `IdentityFrom(ctx)`.
+- `ListTools(ctx)` decides the tools per request (they can be built at runtime). A `tools/call` for
+  a name not in that list is "tool not found" and never runs. `NotifyToolsChanged()` tells connected
+  clients to re-list.
+- `BeforeCall(ctx, tool, args)` returns allow, deny or confirm. Confirm asks the user through MCP
+  elicitation when the client supports it; otherwise the caller gets your own result (for example
+  "re-call with this nonce") or a plain "confirmation required" error.
+- `Tool.Annotations` (`title`, `readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint`)
+  go out unchanged; `OnCall` reports identity, duration, error and result size for metering;
+  `ServerInfo(ctx)` brands `initialize` (now with `title`); resources and prompts hooks; your own
+  `SessionIDs`, or `Stateless` (optionally with a fixed `StatelessSessionID` for clients that expect one).
+- **Structured results.** A tool can return `ToolResult.Structured` and declare `Tool.OutputSchema`;
+  MCP serve sends them as `structuredContent` and `outputSchema`, with a JSON text block when the
+  tool sets no text. `ToolResult.Meta` goes out as the result's `_meta`, and a request's
+  `params._meta` is readable in hooks and tools via `MCPRequestMetaFrom(ctx)`. All optional:
+  tools that do not set them produce exactly the same output as before, on `Serve` too.
+- **Protocol versions you can trust.** `ProtocolVersions` per handler; the default is 2025-06-18 only.
+  2025-11-25 can be turned on (the handler implements its one server-side rule change: bad tool
+  arguments come back as an error result, not a protocol error). 2025-03-26 is not accepted (it allows
+  batches, which the handler rejects) and 2026-07-28 waits for #134 — listing them does nothing.
+
+Every port ships it in its own native handler shape: Go `http.Handler`, JS Node request listener
+(`toolkit.mcpHandler`), Python ASGI app (`toolkit.mcp_handler`), Java JDK `HttpHandler`
+(`toolkit.mcpHandler`; give the `HttpServer` a multi-threaded executor), C# `McpHttpHandler` over
+`HttpListenerContext` or a host-supplied `McpHttpExchange` (`toolkit.McpHandler`), Elixir Plug
+(`Toolnexus.mcp_handler/2`), Clojure Ring handler (`toolnexus.mcp-handler/mcp-handler`; SSE bodies are
+lazy seqs, so the Ring adapter must stream seq bodies), Rust hyper `Service` (`toolkit.mcp_handler`,
+`serve` feature). A shared fixture, `conformance/mcp_handler/cases.json`, pins the wire and every
+port's suite replays it.
+
+Port notes: outside Go, `beforeCall` receives the parsed arguments object rather than raw JSON bytes.
+The Java, Elixir and Clojure GET streams send a `: keepalive` comment every 15 s (Java and Elixir) or
+end on session DELETE (Clojure), because those servers cannot see a client disconnect. In Elixir a
+confirm timeout reads "confirmation failed: timeout"; the other ports use Go's "context deadline
+exceeded". The official MCP Java SDK 2.0.0 client sends `MCP-Protocol-Version: 2025-11-25` on later
+requests even after it negotiated 2025-06-18, so it needs `supportedProtocolVersions(List.of("2025-06-18"))`
+against a default handler.
+
+**Rust: a source change if you build `Tool` with a struct literal.** `Tool` has two new public fields,
+`output_schema` and `annotations`. A literal that names every field no longer compiles until you add
+`output_schema: None, annotations: None` (or end it with `..Default::default()`). The builders
+(`with_output_schema`, `with_annotations`) are unaffected.
+
+toolnexus has no tenant, role or storage concepts here: those stay in your hooks (ADR 0039).
+`Serve(addr, {mcp})` is unchanged apart from the optional structured fields. **Not done:** when you
+run several replicas, elicitation answers need sticky routing. The docs-page examples are run in CI
+for Go, Python and Java only; the JS, C#, Elixir, Clojure and Rust pages are not run yet.
+
+**Let any coding agent call your toolkit, through three vendor-neutral pieces (all eight ports).**
+toolnexus does not ship a client per coding agent: which binary, flags, login and quirks an agent
+needs changes on the vendor's schedule, so those live as **recipes in the docs**, written on top of
+what the library now provides (ADR 0041, SPEC §8C):
+
+- **Your in-process model can stream.** Give `createInProcessClient` a streaming generate —
+  `generateStream(req, emit)` (Go `GenerateStream`, python `generate_stream`, elixir
+  `:generate_stream`, clojure `:generate-stream`, …) — and `stream` yields each text you `emit` as it
+  happens. Before, only Go had this and every other port refused `stream` on an in-process client.
+  A new **`thought`** stream event carries model reasoning; `tool_call`/`tool_result` events with
+  `via: "acp"` report tools an agent ran itself — passed to you, never executed by your loop. A plain
+  `generate` still refuses to stream, because one chunk pretending to be a stream is the bug this
+  prevents. Clojure has no stream API; there the events go to `run`'s `:on-event` as emitted.
+- **The ACP client passes your configuration through untouched.** `loadACP` now sends the
+  `mcpServers` you give it verbatim (it always sent `[]` before), `sessionMeta` as `session/new`
+  `_meta`, `clientCapsMeta` as `initialize` `clientCapabilities._meta`, and passes `model` through
+  (`session/set_config_option`, then `session/set_model`). It streams every `agent_message_chunk` the
+  moment it arrives in every port (was Go only), fails a request as soon as the agent exits instead of
+  waiting out the timeout, answers agent requests it does not implement with `-32601` so the agent
+  never hangs, declares `terminal:false`, and tears down the agent's whole process group on `close`.
+- **`toolkit.asMcpServer()` → `{url, token, close}`** serves your toolkit (MCP servers, skills,
+  your own tools) on a loopback port behind a fresh bearer token, so an agent you launch can call it
+  and other local processes cannot. You put `url` and the token into the agent's `mcpServers` entry.
+
+Pinned without any vendor binary in `conformance/acp-client/cases.json` (streaming that is really
+incremental, verbatim passthrough, agent exit, unknown requests, the server's 401/404/405 rules).
+
+Not in the library, by decision: per-vendor styles or enums, a one-shot CLI transport for agents
+without ACP (write a `generate` that runs your CLI — that is what the seam is for), vendor
+permission allow-lists or prompt hints, a stdio-to-HTTP MCP bridge, model lists. The default
+permission policy is unchanged (first allow option); a docs recipe shows how to allow only your
+toolkit's tools.
+
+**Fixed (python only): `toolkit.serve(mcp={})` now exposes the toolkit's tools, and `GET /mcp` answers
+`405` instead of hanging.** An empty MCP serve profile was treated as absent, so `/mcp` was mounted
+but advertised no tools; it now means "present with defaults" (`name: "toolnexus"`, every tool), as
+in every other port and `SPEC.md §7C`. `GET /mcp` used to hold the connection open forever, which
+hung clients that probe it for a server stream (e.g. the Claude ACP adapter, whose `session/new`
+waited on it); the stateless profile offers no stream, so it now returns `405` (`Allow: POST`),
+matching Java, Elixir, C# and Rust. Other ports were not affected by either bug.
+
+## 0.24.0 — 2026-11-04
+
+**Media generation: images, video, speech, transcription, voice cloning and talking-head video,
+from a JSON style instead of provider code.** Until now toolnexus could carry an image or audio
+part but not make one; every provider (a2e, Replicate, fal, OpenAI images/TTS, ComfyUI…) made you
+hand-write a request and a polling loop, per endpoint, per language. Now one engine does it:
+
+- **Typed verbs for your code** — `createMedia(style)` gives `image`, `video`, `speech`,
+  `transcribe`, `cloneVoice` and `talking`, with normalised arguments (`prompt`, `seconds`,
+  `voice`, …) and a result of `{files, text?, jobId?, status}`.
+- **Tools for your agent** — the same verbs become `generate_image`, `generate_video`,
+  `generate_speech`, `transcribe_audio`, `clone_voice` and `talking_video`; `createToolkit({ media })`
+  registers them. Tool names never change when you switch provider, so prompts and skills keep working.
+  Media tools are concurrency-safe: two media calls in one response run side by side (up to
+  `maxToolConcurrency`) instead of waiting for each other like unlabelled tools.
+- **Long jobs just work** — async styles start the job and poll for you (default every 5 s, up to
+  10 min), report progress, honour cancellation, and keep polling through statuses a provider
+  never documented.
+- **Providers are data** — a style is a JSON file (endpoints, dot-paths, `${ENV}` headers, an
+  optional error envelope). `examples/media-styles/a2e.json` ships first, live-verified for image,
+  video and speech. The library names no vendor.
 - **`RunResult.files`** — every image, video or audio a run's tools produced, in order, tagged with
   the tool name and call id; `toolCalls[].parts` carries them per call. The answer text never gets
-  markup. It is not media-only: image or file parts returned by MCP tools and built-in file reads
-  land there too, and each entry keeps the part's `name` when it had one. A media tool's parts
-  carry downloaded or inline files as bytes, never as a local path, and only images are shown to
-  the model: a generated video or audio clip goes to `RunResult.files`, while the model sees just
-  the `video ready: …` line, so a clip never floods its context.
-- **Bounded, safe requests** — every request (start, each poll, each download) is bounded by the
-  time left until the job's deadline, provider headers never reach a different origin, and
-  redirects follow one rule set in every port: 301/302/303/307/308 with a `Location`, at most 10
-  hops (then `<verb>: too many redirects`), 301/302/303 after a POST become a body-less GET,
-  307/308 keep the method and body. Error bodies echoed in `HTTP <status>: …` are capped at 1000
-  characters.
+  markup — you decide how to render. An agent with a completion gate keeps the files of every
+  attempt, exactly as it keeps their tool calls.
+  It is not media-only: image or file parts returned by MCP tools and by built-in file reads land
+  in `RunResult.files` too, and each entry keeps the part's `name` when it had one.
+- **Bounded, safe requests** — every request (start and each poll) is bounded by the time left
+  until the job's deadline (`timeoutMs`, counted from the start; sync verbs default to 10 min), so
+  a server that accepts and never answers can no longer hang a call. Style headers (your API key)
+  are never sent to a different origin than `baseUrl`'s, even across a redirect. Redirects follow
+  one rule set in every port: 301/302/303/307/308 with a `Location`, at most 10 hops (then
+  `<verb>: too many redirects`), 301/302/303 after a POST become a body-less GET, 307/308 keep the
+  method and body (Elixir now follows same-origin redirects too instead of refusing them). Error bodies
+  echoed in `HTTP <status>: …` are capped at 1000 characters. Python has no separate `timeout`
+  option on `create_media`; the style's `timeoutMs` is the one knob.
 
-Contract: SPEC §7G, ADRs 0036 and 0037, `conformance/media/` — every port replays the same style
-engine cases, built-in client cases, CLI cases (against a fake CLI script) and routing cases,
-hermetically.
+Every port ships a runnable `media` example (an image through the typed call, speech through the
+`generate_speech` tool; without `A2E_API_KEY` it prints a hint and exits), and each language's API
+reference page has a Media generation section.
 
-**Live-verified** (one real call each): a2e image, video and speech; ElevenLabs speech (including a
-cloned voice by name); OpenAI image; OpenRouter image; fal image; Codex image; Grok image and video
-(video after opting in under `/privacy`).
+Contract: SPEC §7G, ADR 0036, `conformance/media/` (every port replays the same 34 cases and schema set).
 
-**Implemented from the provider's docs, not yet verified live**: OpenAI speech, transcription and
-video (Sora); fal video; ElevenLabs music, transcription and voice cloning; a2e talking video.
-They are pinned by the conformance cases; a live check of each is tracked in
-`openspec/changes/add-media-clients`.
-
-**Not done yet** (tracked in `openspec/changes/add-media-clients`): cancelling the job at the
-provider (cancel stops polling or kills the CLI; a remote job keeps running), webhooks, price
-quotes, pausing a long job through `waitFor`, streaming `file` events, ComfyUI, a generic ACP
-media client, music lyrics on ElevenLabs, OpenRouter video/audio, image editing, and direct
-clients for Replicate, Gemini, the Grok API, Seedance, Kling and Runway (reachable today through a
-custom client or a style). A file kept with `gather.mode: "url"` from Grok lives in Grok's own
-session folder, whose lifetime Grok decides. Realtime/live voice conversation is deliberately out
-of scope.
-
-Breaking against the unreleased #123 API (never published): `createMedia` takes clients, not styles
-(`createMedia(styleMediaClient(loadMediaStyle(path)))` is the old behaviour); the verb `talking` is
-now `talk`; a style declaring `talking` fails to load; HTTP 402 from a style is now `unavailable`.
+**Not done yet** (tracked in `openspec/changes/add-media-generation`): downloading expiring result
+URLs (a2e's last 3–30 days — save them yourself for now), cancelling the job at the provider
+(cancel stops polling; the provider's job keeps running), uploading local files, ComfyUI workflow
+injection, webhooks, price quotes, pausing a long job through `waitFor`, and streaming `file`
+events. Realtime/live voice conversation is deliberately out of scope.
 
 Known redirect gaps: on Clojure's cljgo host the Go HTTP client follows redirects itself, because
-koine has no no-redirect option yet: custom headers reach another origin (and so does
+koine has no no-redirect option yet: custom style headers reach another origin (and so does
 `Authorization` when only the port differs), and a redirect loop stops after 10 requests instead
-of 11 (same `too many redirects` error). The JVM build follows the §7G rules. An HTTP client or
-transport you inject yourself (Java, C#, Rust, Python, and JS's `opts.fetch`, which may ignore
-`redirect: "manual"`) may follow redirects before the engine sees them, so it must not forward
-headers cross-origin.
-
-**Status of the ports:** the contract (SPEC, conformance, OpenSpec change) lands first; the eight
-port implementations follow on this branch before release and are tracked per port in
-`openspec/changes/add-media-clients/tasks.md`.
+of 11 (same `too many redirects` error); tracked in #130. The JVM build follows the §7G rules. An HTTP client or transport you inject yourself
+(Java, C#, Rust, Python, and JS's `opts.fetch`, which may ignore `redirect: "manual"`) may follow
+redirects before the engine sees them, so it must not forward headers cross-origin.
 
 ### Tool scheduling: reads run together, writes run alone (all eight ports)
 
@@ -130,7 +843,9 @@ SPEC §8 "Tool scheduling"; change `openspec/changes/add-tool-concurrency`; reci
   struct literal must add `concurrency_safe: None` (or use `..` from another tool).
   `define_tool` callers are unaffected.
 - **Not done:** the cap is per response, not per tool; `todowrite` keeps its `readOnly` hint, so
-  two `todowrite` calls in one response may still overlap (last writer wins, as before).
+  two `todowrite` calls in one response may still overlap (last writer wins, as before). On Clojure, when
+  the cap is full a new safe call waits for the oldest running call rather than the first to finish
+  (#128). Only Go's tests are mutation-checked so far (#129).
 
 ### Background subagents: a documented recipe (all eight ports)
 

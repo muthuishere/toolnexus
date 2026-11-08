@@ -38,6 +38,13 @@ pub struct ToolResult {
     pub parts: Vec<ContentPart>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub metadata: Option<Map<String, Value>>,
+    /// The machine-readable result (§1). MCP serve emits it as
+    /// `structuredContent`. `None` ⇒ omitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub structured: Option<Value>,
+    /// Protocol metadata for the wire result (MCP `_meta`). `None` ⇒ omitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub meta: Option<Map<String, Value>>,
 }
 
 impl ToolResult {
@@ -54,6 +61,16 @@ impl ToolResult {
             ..Default::default()
         }
     }
+    /// This result with a structured payload (§1, MCP `structuredContent`).
+    pub fn with_structured(mut self, structured: Value) -> Self {
+        self.structured = Some(structured);
+        self
+    }
+    /// This result with protocol metadata (MCP `_meta`).
+    pub fn with_meta(mut self, meta: Map<String, Value>) -> Self {
+        self.meta = Some(meta);
+        self
+    }
     pub fn with_metadata(mut self, metadata: Map<String, Value>) -> Self {
         self.metadata = Some(metadata);
         self
@@ -62,12 +79,28 @@ impl ToolResult {
 
 /// Per-call context: cancellation, the model's call id when run by a loop,
 /// a per-call timeout override (ms, 0 = none) and the §10 answer on re-execution.
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct ToolContext {
     pub cancel: CancellationToken,
     pub call_id: Option<String>,
     pub timeout_ms: u64,
     pub answer: Option<Answer>,
+    /// Request-scoped data an inbound server attaches (e.g. the MCP handler's
+    /// [`McpRequestContext`](crate::mcp_handler::McpRequestContext), read with
+    /// `mcp_request_context`). `None` outside a served call.
+    pub request: Option<Arc<dyn std::any::Any + Send + Sync>>,
+}
+
+impl std::fmt::Debug for ToolContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ToolContext")
+            .field("cancel", &self.cancel)
+            .field("call_id", &self.call_id)
+            .field("timeout_ms", &self.timeout_ms)
+            .field("answer", &self.answer)
+            .field("request", &self.request.is_some())
+            .finish()
+    }
 }
 
 /// §1B content part: `text | image | file | audio`. Wire keys match Go.
@@ -257,6 +290,23 @@ pub struct ToolHints {
     pub open_world: bool,
 }
 
+/// MCP tool annotations a served tool advertises (§1, §7C.1), passed through
+/// verbatim. `None` fields are omitted. Serialised camelCase.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolAnnotations {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read_only_hint: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub destructive_hint: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idempotent_hint: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub open_world_hint: Option<bool>,
+}
+
 /// §10 suspension request. Keys byte-identical across ports.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Request {
@@ -310,6 +360,8 @@ pub fn pending(mut req: Request) -> ToolResult {
         serde_json::to_value(&req).unwrap_or(Value::Null),
     );
     ToolResult {
+        structured: None,
+        meta: None,
         output: out,
         is_error: true,
         parts: Vec::new(),
@@ -377,6 +429,12 @@ pub struct Tool {
     /// same model response (SPEC §8 "Tool scheduling"). `None` ⇒ safe only when
     /// `hints.read_only`. See [`is_concurrency_safe`].
     pub concurrency_safe: Option<ConcurrencySafeFn>,
+    /// JSON Schema of [`ToolResult::structured`] (§1). MCP serve advertises it
+    /// as `outputSchema`; `None` ⇒ omitted.
+    pub output_schema: Option<Value>,
+    /// MCP annotations, passed through verbatim by the MCP handler (else
+    /// derived from `hints`, else omitted). Never sent to the model.
+    pub annotations: Option<ToolAnnotations>,
 }
 
 /// A per-call concurrency-safety predicate (SPEC §8 "Tool scheduling").
@@ -393,6 +451,16 @@ pub fn is_concurrency_safe(tool: &Tool, args: &Value) -> bool {
 }
 
 impl Tool {
+    /// This tool with an output schema (§1).
+    pub fn with_output_schema(mut self, schema: Value) -> Self {
+        self.output_schema = Some(schema);
+        self
+    }
+    /// This tool with MCP annotations (§7C.1).
+    pub fn with_annotations(mut self, annotations: ToolAnnotations) -> Self {
+        self.annotations = Some(annotations);
+        self
+    }
     /// This tool with a per-call concurrency-safety predicate.
     pub fn with_concurrency_safe(
         mut self,
@@ -458,6 +526,8 @@ where
 {
     let f = Arc::new(f);
     Tool {
+        output_schema: None,
+        annotations: None,
         concurrency_safe: None,
         name: name.into(),
         description: description.into(),

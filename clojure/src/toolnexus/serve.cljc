@@ -170,6 +170,22 @@
 
       :else nil)))
 
+(defn tool-result->mcp
+  "SPEC §1 + §7C — a ToolResult as the MCP CallToolResult, the shape
+  `mcp-handler` (§7C.1) emits: output → one text block (when `:structured` is
+  set and output is empty, the JSON of `:structured` is that text, as the MCP
+  spec asks), §1B parts follow, `isError` only when true, `structuredContent`
+  only when `:structured` is set, `_meta` only when `:meta` is set."
+  [r]
+  (let [structured (:structured r)
+        out        (str (or (:output r) ""))
+        text       (if (and (some? structured) (= "" out)) (json/write-str structured) out)]
+    (cond-> {:content (into [{:type "text" :text text}]
+                            (keep part->content-block (:parts r)))}
+      (true? (:isError r)) (assoc :isError true)
+      (some? structured)   (assoc :structuredContent structured)
+      (some? (:meta r))    (assoc :_meta (:meta r)))))
+
 ;; ---------------------------------------------------------------------------
 ;; JSON-RPC plumbing shared by both profiles
 ;; ---------------------------------------------------------------------------
@@ -321,9 +337,12 @@
           {:jsonrpc "2.0" :id id
            :result  {:tools (mapv (fn [t]
                                     ;; §7C: Tool.name VERBATIM. No sanitize here.
-                                    {:name        (:name t)
-                                     :description (:description t)
-                                     :inputSchema (:input-schema t)})
+                                    (cond-> {:name        (:name t)
+                                             :description (:description t)
+                                             :inputSchema (:input-schema t)}
+                                      ;; SPEC §1: absent ⇒ byte-identical.
+                                      (:output-schema t)
+                                      (assoc :outputSchema (:output-schema t))))
                                   (exposed-tools tk cfg))}}
 
           "tools/call"
@@ -347,9 +366,9 @@
                  ;; §1B: each non-text ContentPart follows it as the matching MCP
                  ;; content block, in order. `metadata` is NOT on the MCP wire
                  ;; (on-call only).
-                 :result  {:content (into [{:type "text" :text (str (:output r))}]
-                                          (keep part->content-block (:parts r)))
-                           :isError (boolean (:isError r))}})))
+                 ;; §1: structured ⇒ structuredContent, meta ⇒ _meta. This
+                 ;; profile always carries isError (unchanged wire).
+                 :result  (assoc (tool-result->mcp r) :isError (boolean (:isError r)))})))
 
           (rpc-error id -32601 "Method not found"))))))
 
@@ -404,6 +423,12 @@
                       (and a2a (= path "/"))
                       (json-res (guarded #(a2a-rpc st run-fn on-task (:body req))))
 
+                      ;; stateless: no server-initiated stream exists, so only POST
+                      ;; is served; anything else is refused at once (§7C).
+                      (and mcp (= path "/mcp") (not= :post (:method req)))
+                      {:status 405 :headers {"content-type" "text/plain" "allow" "POST"}
+                       :body "Method Not Allowed"}
+
                       (and mcp (= path "/mcp"))
                       (json-res (guarded #(mcp-rpc tk mcp on-call (:body req))))
 
@@ -423,3 +448,80 @@
   [handle]
   (server/stop! (:handle handle))
   nil)
+
+;; ---------------------------------------------------------------------------
+;; §8C — the toolkit as a loopback MCP server for a local agent
+;; ---------------------------------------------------------------------------
+
+(defn- new-token
+  "32 random bytes, lowercase hex (64 chars). koine has no CSPRNG byte API, so
+  the bytes come from the kernel's /dev/urandom (POSIX); two random UUIDs
+  (SecureRandom-backed on the JVM) are the fallback should that ever fail."
+  []
+  (let [r   (try (proc/sh ["od" "-An" "-tx1" "-N32" "/dev/urandom"] {:timeout-ms 5000})
+                 (catch Throwable _ nil))
+        hex (str/replace (str (:out r)) #"[^0-9a-f]" "")]
+    (if (and (= 0 (:exit r)) (= 64 (count hex)))
+      hex
+      (str (str/replace (str (random-uuid)) "-" "")
+           (str/replace (str (random-uuid)) "-" "")))))
+
+(defn- constant-time=
+  "String equality whose time does not depend on WHERE the strings differ."
+  [a b]
+  (let [a (str a) b (str b)]
+    (and (= (count a) (count b))
+         (zero? (reduce (fn [acc i] (bit-or acc (bit-xor (int (nth a i)) (int (nth b i)))))
+                        0 (range (count a)))))))
+
+(defn- bearer-mcp-handler
+  [tk cfg token]
+  (let [want (str "Bearer " token)]
+    (fn [req]
+      (cond
+        (not= "/mcp" (:path req))
+        not-found
+
+        (not (constant-time= (get (:headers req) "authorization") want))
+        {:status 401 :headers {"content-type" "text/plain" "www-authenticate" "Bearer"}
+         :body "unauthorized"}
+
+        ;; stateless: there is no server-sent stream to hold open, and an agent
+        ;; that opens one would wait on it forever.
+        (not= :post (:method req))
+        {:status 405 :headers {"content-type" "text/plain" "allow" "POST"} :body "Method Not Allowed"}
+
+        :else
+        (let [msg (try (json/read-str (str (:body req))) (catch Throwable _ nil))]
+          (if (and (map? msg) (some? (:method msg)) (nil? (:id msg)))
+            {:status 202 :body ""}           ; a notification: accepted, no body
+            {:status  200
+             :headers {"content-type" "application/json"}
+             :body    (json/write-str (guarded #(mcp-rpc tk cfg nil (:body req))))}))))))
+
+(defn as-mcp-server
+  "SPEC §8C `toolkit.asMcpServer(config?)` — serve `tk` for a LOCAL agent to
+  call, on the §7C server (same tool mapping; tool names verbatim, `skill`
+  stays `skill`). `cfg` is the §7C MCPServeConfig `{:name :version :tools}`.
+
+  Listens on 127.0.0.1:<ephemeral>. Returns
+  `{:url \"http://127.0.0.1:<port>/mcp\" :token <64 hex> :close (fn [])}`.
+  Every request needs `Authorization: Bearer <token>` (else 401 +
+  `WWW-Authenticate: Bearer`, compared in constant time); other paths 404;
+  any method but POST 405. `:close` is idempotent. The token is fresh per call
+  and never logged. The caller builds whatever `mcpServers` entry its agent
+  accepts, e.g. for `toolnexus.acp/connect`:
+
+    {:type \"http\" :name \"toolnexus\" :url url
+     :headers [{:name \"Authorization\" :value (str \"Bearer \" token)}]}"
+  ([tk] (as-mcp-server tk nil))
+  ([tk cfg]
+   (let [token (new-token)
+         h     (server/serve (bearer-mcp-handler tk (or cfg {}) token) {:port 0 :host "127.0.0.1"})
+         once  (atom false)]
+     {:url   (str "http://127.0.0.1:" (server/port h) "/mcp")
+      :token token
+      :close (fn []
+               (when (compare-and-set! once false true)
+                 (try (server/stop! h) (catch Throwable _ nil)))
+               nil)})))

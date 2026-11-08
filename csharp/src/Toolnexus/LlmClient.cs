@@ -19,8 +19,16 @@ public interface IConversationStore
     Task SaveAsync(string id, List<object?> messages);
 }
 
+/// <summary>A conversation store that can enumerate its conversations, newest first — what
+/// <see cref="TranscriptSearch.Tool"/> requires (SPEC §7E "Memory hierarchy").</summary>
+public interface IListableConversationStore : IConversationStore
+{
+    /// <summary>Every stored conversation, newest first.</summary>
+    Task<List<ConversationInfo>> ListAsync();
+}
+
 /// <summary>Default conversation provider — keeps transcripts in memory for the client's lifetime.</summary>
-public sealed class InMemoryConversationStore : IConversationStore
+public sealed class InMemoryConversationStore : IListableConversationStore
 {
     private readonly ConcurrentDictionary<string, (List<object?> Messages, DateTimeOffset UpdatedAt, long Seq)> _map = new();
     private long _seq;
@@ -60,7 +68,12 @@ public sealed record ConversationInfo(string Id, DateTimeOffset UpdatedAt);
 /// </summary>
 public sealed partial class LlmClient
 {
-    private static readonly HttpClient DefaultHttp = new() { Timeout = Timeout.InfiniteTimeSpan };
+    // The system proxy is resolved once per scheme+host+port (CachedProxy) rather than per request:
+    // on macOS the default proxy asks CFNetwork on every send, which was a measurable slice of a turn.
+    private static readonly HttpClient DefaultHttp = new(new SocketsHttpHandler { Proxy = new CachedProxy(() => HttpClient.DefaultProxy) })
+    {
+        Timeout = Timeout.InfiniteTimeSpan,
+    };
     /// <summary>
     /// The default retryable set (§8 Resilience): <c>429</c> plus the 5xx worth another try — and
     /// <c>529 Overloaded</c>, which TypeSafe documents as "retry with backoff" and which this
@@ -214,12 +227,23 @@ public sealed partial class LlmClient
         public IDictionary<string, string>? Headers { get; set; }
         public string? SystemPrompt { get; set; }
         public int? MaxTurns { get; set; }             // default 10
+        /// <summary>(SPEC §8 "Stop-reason recovery", default false) Answers a malformed tool call with a
+        /// corrective message (once), a truncated reply (length/max_tokens) with a continue message (up
+        /// to 3 times, text joined) and an empty answer (e.g. thinking-only) with a nudge (once). Off ⇒
+        /// the loop is unchanged.</summary>
+        public bool StopRecovery { get; set; }
         /// <summary>(SPEC §8 "Tool scheduling") Cap on concurrency-safe tool calls of one response
         /// running at once. <c>null</c> ⇒ env <c>TOOLNEXUS_MAX_TOOL_CONCURRENCY</c> when a positive
         /// integer, else 10. Unsafe calls (anything not read-only) always run alone.</summary>
         public int? MaxToolConcurrency { get; set; }
         public Hooks? Hooks { get; set; }
         public int? Retries { get; set; }              // default 2
+
+        /// <summary>(§8 Resilience, <c>fallbackModels</c>) Ordered model ids tried, on the same
+        /// endpoint, after the turn's model when its retry budget ends on <c>503</c>/<c>529</c>
+        /// (overload). Each fallback gets a fresh retry budget; nothing else advances. Null/empty ⇒
+        /// byte-identical to today. Env <c>TOOLNEXUS_DISABLE_MODEL_FALLBACK=1|true</c> disables it.</summary>
+        public IReadOnlyList<string>? FallbackModels { get; set; }
 
         /// <summary>
         /// Extra HTTP statuses to treat as retryable, ADDED to the default set
@@ -316,6 +340,17 @@ public sealed partial class LlmClient
         public Func<ErrorInfo, Tier>? OnError { get; set; }
 
         /// <summary>
+        /// (SPEC §7F.1) Reactive compaction: a hook with the <c>BeforeLLM</c> signature — typically a
+        /// compactor with a TIGHTER budget than the proactive one — called when the provider rejects a
+        /// call as a context overflow (<see cref="IsContextOverflow"/>). If it returns strictly fewer
+        /// messages, they replace the working transcript and the SAME turn is re-sent (no BeforeLLM
+        /// re-run, no turn consumed); otherwise the run fails with <see cref="ContextOverflowException"/>.
+        /// A breaker fails after 3 compactions in a row that did not buy two successful calls each.
+        /// Null ⇒ byte-identical: the overflow surfaces as <see cref="ProviderException"/>.
+        /// </summary>
+        public Func<BeforeLLMEvent, LLMOverride?>? CompactOnOverflow { get; set; }
+
+        /// <summary>
         /// (§1B) Cap on a single content part, measured in <b>decoded</b> bytes (base64 is +33%).
         /// Enforced when the client assembles a part into a request; the edge constructors take
         /// the same limit as an argument. Null ⇒ no cap.
@@ -335,6 +370,7 @@ public sealed partial class LlmClient
         public Options WithOnUnsupportedPart(string v) { OnUnsupportedPart = v; return this; }
 
         public Options WithOnError(Func<ErrorInfo, Tier> v) { OnError = v; return this; }
+        public Options WithCompactOnOverflow(Func<BeforeLLMEvent, LLMOverride?> v) { CompactOnOverflow = v; return this; }
         public Options WithWaitFor(Func<Request, Task<Answer>> v) { WaitFor = v; return this; }
         public Options WithWaitForCtx(Func<Request, CancellationToken, Task<Answer>> v) { WaitForCtx = v; return this; }
         public Options WithApiKeyEnv(string v) { ApiKeyEnv = v; return this; }
@@ -352,9 +388,11 @@ public sealed partial class LlmClient
         public Options WithHeaders(IDictionary<string, string> v) { Headers = v; return this; }
         public Options WithSystemPrompt(string v) { SystemPrompt = v; return this; }
         public Options WithMaxTurns(int v) { MaxTurns = v; return this; }
+        public Options WithStopRecovery(bool v = true) { StopRecovery = v; return this; }
         public Options WithMaxToolConcurrency(int v) { MaxToolConcurrency = v; return this; }
         public Options WithHooks(Hooks v) { Hooks = v; return this; }
         public Options WithRetries(int v) { Retries = v; return this; }
+        public Options WithFallbackModels(IReadOnlyList<string> v) { FallbackModels = v; return this; }
         public Options WithRetryableStatuses(IReadOnlyCollection<int> v) { RetryableStatuses = v; return this; }
         public Options WithRetryBaseMs(int v) { RetryBaseMs = v; return this; }
         public Options WithTimeoutMs(long v) { TimeoutMs = v; return this; }
@@ -414,6 +452,74 @@ public sealed partial class LlmClient
             Body = body ?? "";
             RetryAfter = retryAfter;
         }
+    }
+
+    /// <summary>
+    /// (SPEC §7F.1) The run failed because the prompt did not fit even after reactive compaction:
+    /// the breaker tripped (<see cref="Compactions"/> = 3) or the hook made no progress. A failure,
+    /// never a §10 Pending. Message pinned byte-identical across ports.
+    /// </summary>
+    public sealed class ContextOverflowException : InvalidOperationException
+    {
+        /// <summary>The compaction streak at failure.</summary>
+        public int Compactions { get; }
+        /// <summary>The HTTP status of the last provider error.</summary>
+        public int Status { get; }
+        /// <summary>The last provider error body, redacted like <see cref="ProviderException.Body"/>.</summary>
+        public string Body { get; }
+
+        public ContextOverflowException(int compactions, int status, string body)
+            : base($"context overflow: {compactions} reactive compaction(s) did not make the prompt fit")
+        {
+            Compactions = compactions;
+            Status = status;
+            Body = body ?? "";
+        }
+    }
+
+    private static readonly string[] OverflowMarkers =
+    {
+        "context_length_exceeded", "maximum context length", "prompt is too long",
+        "prompt_too_long", "request_too_large", "context window",
+    };
+
+    /// <summary>(SPEC §7F.1) True iff <paramref name="status"/> is 400 or 413 AND the lowercased body
+    /// carries a context-overflow marker. Nothing else counts.</summary>
+    public static bool IsContextOverflow(int status, string? body)
+    {
+        if (status != 400 && status != 413) return false;
+        var b = (body ?? "").ToLowerInvariant();
+        foreach (var m in OverflowMarkers) if (b.Contains(m, StringComparison.Ordinal)) return true;
+        return false;
+    }
+
+    /// <summary>Per-run reactive-compaction breaker state (SPEC §7F.1).</summary>
+    private sealed class OverflowState
+    {
+        public int OkSince;
+        public int Streak;
+    }
+
+    /// <summary>
+    /// (SPEC §7F.1) The one shared reaction, called from every loop's catch of a provider failure.
+    /// Returns true when the working transcript was compacted and the same turn must be re-sent;
+    /// false when the error is not an overflow (or the option is absent) and must be rethrown as-is;
+    /// throws <see cref="ContextOverflowException"/> when the breaker trips or the hook makes no progress.
+    /// </summary>
+    private bool ReactToOverflow(OverflowState st, ProviderException e, ref List<object?> messages,
+        List<Dictionary<string, object?>> tools, string model, int turn)
+    {
+        if (_opts.CompactOnOverflow == null || !IsContextOverflow(e.Status, e.Body)) return false;
+        var rapid = st.Streak > 0 && st.OkSince < 2;
+        if (!rapid) st.Streak = 0;
+        if (st.Streak == 3) throw new ContextOverflowException(3, e.Status, e.Body);
+        var ov = _opts.CompactOnOverflow(new BeforeLLMEvent(messages, tools, model, turn));
+        if (ov?.Messages == null || ov.Messages.Count >= messages.Count)
+            throw new ContextOverflowException(st.Streak, e.Status, e.Body);
+        messages = ov.Messages;
+        st.Streak++;
+        st.OkSince = 0;
+        return true;
     }
 
     /// <summary>
@@ -512,6 +618,35 @@ public sealed partial class LlmClient
         public Action<AfterLLMEvent>? AfterLLM { get; set; }
         public Func<BeforeToolEvent, ToolOverride?>? BeforeTool { get; set; }
         public Func<AfterToolEvent, ToolOverride?>? AfterTool { get; set; }
+        /// <summary>SPEC §8 round boundary (#192): after a round's tool results (Final=false), or when
+        /// the model answered with no tool call and a turn remains (Final=true). Each non-empty
+        /// <c>Inject</c> string is appended as a user message; on a final round that continues the loop.</summary>
+        public Func<AfterRoundEvent, RoundInjection?>? AfterRound { get; set; }
+    }
+
+    /// <summary>The <see cref="Hooks.AfterRound"/> event: 0-based turn, whether the model stopped,
+    /// that answer's text (else ""), and the working transcript.</summary>
+    public sealed record AfterRoundEvent(int Turn, bool Final, string Text, List<object?> Messages);
+    /// <summary>What <see cref="Hooks.AfterRound"/> may return.</summary>
+    public sealed record RoundInjection(IReadOnlyList<string>? Inject = null)
+    {
+        public static RoundInjection Of(params string[] inject) => new(inject);
+    }
+
+    /// <summary>§8 AfterRound: fire the hook and append its injections; true when any appended.
+    /// A final round fires only when a turn remains.</summary>
+    private bool RoundEnd(List<object?> messages, int turn, bool final, string text)
+    {
+        var h = _opts.Hooks?.AfterRound;
+        if (h == null) return false;
+        if (final && turn + 1 >= MaxTurns()) return false;
+        var o = h(new AfterRoundEvent(turn, final, text, messages));
+        var added = false;
+        foreach (var m in o?.Inject ?? Array.Empty<string>())
+        {
+            if (!string.IsNullOrEmpty(m)) { messages.Add(Msg("user", m)); added = true; }
+        }
+        return added;
     }
 
     private async Task<(IDictionary<string, object?> Args, ToolResult Result)> RunToolAsync(
@@ -737,14 +872,31 @@ public sealed partial class LlmClient
 
     // ---------------------------------------------------------------- streaming events
 
-    public enum StreamKind { Text, ToolCall, ToolResult, Usage, Pending, Done }
+    /// <summary>Stream event kinds. <c>Thought</c> is a model's reasoning as reported by its source
+    /// (e.g. an ACP agent's <c>agent_thought_chunk</c>): surfaced live, never part of the answer.
+    /// <c>ToolCallArgs</c> is a call's input an ACP agent reported on a <c>tool_call_update</c>
+    /// after the call began (<c>Id</c>, <c>Name</c>, <c>Args</c>, <c>Via</c>; SPEC §8C, issue #188).
+    /// <c>Retry</c> (streaming only): the LLM request failed retryably and the loop is about to wait
+    /// <see cref="StreamEvent.DelayMs"/> and try again.
+    /// <c>Fallback</c> (streaming only): the call switched from model <c>From</c> to <c>To</c> after overload.</summary>
+    public enum StreamKind { Text, ToolCall, ToolResult, Usage, Pending, Done, Thought, ToolCallArgs, Retry, Fallback }
 
     public sealed record StreamEvent(
         StreamKind Type, string? Delta = null, string? Id = null, string? Name = null,
         IDictionary<string, object?>? Args = null, string? Output = null, bool IsError = false,
         Usage? Usage = null, RunResult? Result = null, Request? Request = null,
-        IDictionary<string, object?>? Metadata = null, string? Via = null)
+        IDictionary<string, object?>? Metadata = null, string? Via = null,
+        int? Attempt = null, int? Max = null, long? DelayMs = null, int? Status = null, string? Reason = null,
+        string? From = null, string? To = null)
     {
+        /// <summary>§8 Retry event: <c>Attempt</c> is the 1-based retry about to happen, <c>Max</c> the
+        /// configured retries, <c>DelayMs</c> the exact wait, <c>Status</c> the HTTP status (null on a
+        /// network error), <c>Reason</c> <c>"HTTP &lt;status&gt;"</c> or <c>"network"</c>.</summary>
+        internal static StreamEvent RetryEvent(int attempt, int max, long delayMs, int? status) =>
+            new(StreamKind.Retry, Attempt: attempt, Max: max, DelayMs: delayMs, Status: status,
+                Reason: status is { } st ? $"HTTP {st}" : "network");
+        /// <summary>§8 <c>fallbackModels</c>: the call is switching from model <c>From</c> to <c>To</c> after overload.</summary>
+        internal static StreamEvent FallbackEvent(string from, string to) => new(StreamKind.Fallback, From: from, To: to);
         /// <summary>§10: a tool is waiting on an out-of-band resolution (emitted before <c>WaitFor</c> runs).</summary>
         internal static StreamEvent PendingEvent(Request request) => new(StreamKind.Pending, Request: request);
         internal static StreamEvent Text(string delta) => new(StreamKind.Text, Delta: delta);
@@ -822,6 +974,7 @@ public sealed partial class LlmClient
         body = FinalizeBody(body);
 
         var data = await LlmCallJsonAsync(url, BaseHeaders(key, false), body, deadline, external, "openai").ConfigureAwait(false);
+        turnModel = ServedModel(body, turnModel);
         _opts.Hooks?.AfterLLM?.Invoke(new AfterLLMEvent(data, turnModel, 0));
 
         var result = new Translate.Result { Model = turnModel, Raw = data };
@@ -875,6 +1028,7 @@ public sealed partial class LlmClient
         body = FinalizeBody(body);
 
         var data = await LlmCallJsonAsync(endpoint, BaseHeaders(key, true), body, deadline, external, "anthropic").ConfigureAwait(false);
+        turnModel = ServedModel(body, turnModel);
         _opts.Hooks?.AfterLLM?.Invoke(new AfterLLMEvent(data, turnModel, 0));
 
         var result = new Translate.Result { Model = turnModel, Raw = data };
@@ -967,9 +1121,15 @@ public sealed partial class LlmClient
         string? id = null, CancellationToken cancellationToken = default)
         => StreamAsync((object)prompt, toolkit, onEvent, id, cancellationToken);
 
+    /// <summary>The live stream's consumer, visible to an in-process handler on the same async flow so a
+    /// streaming generate can pass non-text events (thought, a model's own tool calls) straight to it —
+    /// never through the wire, where the loop would execute them.</summary>
+    internal static readonly AsyncLocal<Action<StreamEvent>?> StreamSide = new();
+
     private async Task<RunResult> StreamAsync(object prompt, Toolkit? toolkit, Action<StreamEvent> onEvent,
         string? id, CancellationToken cancellationToken)
     {
+        StreamSide.Value = onEvent;
         var deadline = new Deadline(_opts.TimeoutMs);
         var history = id != null ? (await _store.GetAsync(id).ConfigureAwait(false) ?? new List<object?>()) : null;
         var intr = id != null ? new Interrupt() : null;
@@ -1313,7 +1473,9 @@ public sealed partial class LlmClient
         var turns = 0;
         var runStart = NowMs();
         var lastModel = _opts.Model; // §8: the model of the last call this run made
+        var rec = new StopRecoveryState(_opts.StopRecovery);
         var finished = new ConcurrentDictionary<string, ToolResult>(); // finished tool results, for an interrupted save
+        var overflow = new OverflowState(); // §7F.1 reactive-compaction breaker
         var relocated = new Relocated(); // §8A adapter artifact — never enters `messages`
 
         try
@@ -1324,20 +1486,35 @@ public sealed partial class LlmClient
                 var turnModel = ApplyBeforeLLM(ref messages, ref tools, turn);
                 lastModel = turnModel;
 
-                var body = new Dictionary<string, object?>
+                Dictionary<string, object?> data;
+                while (true)
                 {
-                    ["model"] = turnModel,
-                    ["messages"] = relocated.Wire(messages),
-                };
-                // §8 Gap 5: omit tools/tool_choice when the effective tool list is empty.
-                if (tools.Count > 0)
-                {
-                    body["tools"] = tools;
-                    body["tool_choice"] = "auto";
+                    var body = new Dictionary<string, object?>
+                    {
+                        ["model"] = turnModel,
+                        ["messages"] = relocated.Wire(messages),
+                    };
+                    // §8 Gap 5: omit tools/tool_choice when the effective tool list is empty.
+                    if (tools.Count > 0)
+                    {
+                        body["tools"] = tools;
+                        body["tool_choice"] = "auto";
+                    }
+                    body = FinalizeBody(body);
+                    var url = StripTrailingSlash(_opts.BaseUrl) + "/chat/completions";
+                    try
+                    {
+                        data = await LlmCallJsonAsync(url, BaseHeaders(key, false), body, deadline, external, "openai").ConfigureAwait(false);
+                        turnModel = lastModel = ServedModel(body, turnModel);
+                    }
+                    catch (ProviderException pe)
+                    {
+                        if (!ReactToOverflow(overflow, pe, ref messages, tools, turnModel, turn)) throw;
+                        continue; // §7F.1: same turn, compacted transcript
+                    }
+                    overflow.OkSince++;
+                    break;
                 }
-                body = FinalizeBody(body);
-                var url = StripTrailingSlash(_opts.BaseUrl) + "/chat/completions";
-                var data = await LlmCallJsonAsync(url, BaseHeaders(key, false), body, deadline, external, "openai").ConfigureAwait(false);
                 AddUsage(usage, data.Get("usage") as IDictionary<string, object?>, "openai");
                 _opts.Hooks?.AfterLLM?.Invoke(new AfterLLMEvent(data, turnModel, turn));
 
@@ -1345,11 +1522,25 @@ public sealed partial class LlmClient
                 var message = (IDictionary<string, object?>)((IDictionary<string, object?>)choices[0]!)["message"]!;
                 messages.Add(message);
                 var calls = message.Get("tool_calls") as List<object?>;
+                var malformed = false;
+                foreach (var c in calls ?? new List<object?>())
+                    if (c is IDictionary<string, object?> cd && cd.Get("function") is IDictionary<string, object?> cf)
+                        malformed = malformed || StopRecoveryState.MalformedArgs(cf.Get("arguments")?.ToString());
+                var (nudge, drop) = rec.Decide(turn == MaxTurns() - 1, calls is { Count: > 0 }, malformed,
+                    ((IDictionary<string, object?>)choices[0]!).Get("finish_reason") as string == "length", message.Get("content")?.ToString() ?? "");
+                if (nudge != null)
+                {
+                    if (drop) messages.RemoveAt(messages.Count - 1);
+                    messages.Add(Msg("user", nudge));
+                    continue;
+                }
                 if (calls == null || calls.Count == 0)
                 {
                     var content = message.Get("content");
-                    return EndRun(runStart, content?.ToString() ?? "", messages, toolCalls, turns, usage, lastModel);
+                    if (RoundEnd(messages, turn, true, rec.Final(content?.ToString() ?? ""))) { rec.Carry = ""; continue; }
+                    return EndRun(runStart, rec.Final(content?.ToString() ?? ""), messages, toolCalls, turns, usage, lastModel);
                 }
+                rec.Carry = "";
 
                 // Execute all tool calls in this turn concurrently.
                 var n = calls.Count;
@@ -1401,6 +1592,7 @@ public sealed partial class LlmClient
                     }
                 }
                 RecordRelocation(relocated, relocations, messages.Count);
+                RoundEnd(messages, turn, false, "");
             }
             // MaxTurns exhausted while the model was still emitting tool calls (§8 addendum).
             return EndRun(runStart, LastAssistantText(messages), messages, toolCalls, turns, usage, lastModel, "incomplete");
@@ -1429,7 +1621,9 @@ public sealed partial class LlmClient
         var turns = 0;
         var runStart = NowMs();
         var lastModel = _opts.Model; // §8: the model of the last call this run made
+        var rec = new StopRecoveryState(_opts.StopRecovery);
         var finished = new ConcurrentDictionary<string, ToolResult>(); // finished tool results, for an interrupted save
+        var overflow = new OverflowState(); // §7F.1 reactive-compaction breaker
 
         try
         {
@@ -1439,18 +1633,33 @@ public sealed partial class LlmClient
                 var turnModel = ApplyBeforeLLM(ref messages, ref tools, turn);
                 lastModel = turnModel;
 
-                var body = new Dictionary<string, object?>
+                Dictionary<string, object?> data;
+                while (true)
                 {
-                    ["model"] = turnModel,
-                    ["max_tokens"] = 4096,
-                    ["messages"] = messages,
-                };
-                if (system.Length > 0) body["system"] = system;
-                // §8 Gap 5: omit tools when the effective tool list is empty.
-                if (tools.Count > 0) body["tools"] = tools;
-                body = FinalizeBody(body);
+                    var body = new Dictionary<string, object?>
+                    {
+                        ["model"] = turnModel,
+                        ["max_tokens"] = 4096,
+                        ["messages"] = messages,
+                    };
+                    if (system.Length > 0) body["system"] = system;
+                    // §8 Gap 5: omit tools when the effective tool list is empty.
+                    if (tools.Count > 0) body["tools"] = tools;
+                    body = FinalizeBody(body);
 
-                var data = await LlmCallJsonAsync(endpoint, BaseHeaders(key, true), body, deadline, external, "anthropic").ConfigureAwait(false);
+                    try
+                    {
+                        data = await LlmCallJsonAsync(endpoint, BaseHeaders(key, true), body, deadline, external, "anthropic").ConfigureAwait(false);
+                        turnModel = lastModel = ServedModel(body, turnModel);
+                    }
+                    catch (ProviderException pe)
+                    {
+                        if (!ReactToOverflow(overflow, pe, ref messages, tools, turnModel, turn)) throw;
+                        continue; // §7F.1: same turn, compacted transcript
+                    }
+                    overflow.OkSince++;
+                    break;
+                }
                 AddUsage(usage, data.Get("usage") as IDictionary<string, object?>, "anthropic");
                 _opts.Hooks?.AfterLLM?.Invoke(new AfterLLMEvent(data, turnModel, turn));
 
@@ -1459,13 +1668,26 @@ public sealed partial class LlmClient
 
                 var uses = content.OfType<IDictionary<string, object?>>()
                     .Where(b => (b.Get("type") as string) == "tool_use").ToList();
-                if (uses.Count == 0)
                 {
                     var text = new StringBuilder();
                     foreach (var b in content.OfType<IDictionary<string, object?>>())
                         if ((b.Get("type") as string) == "text")
                             text.Append(b.Get("text"));
-                    return EndRun(runStart, text.ToString(), messages, toolCalls, turns, usage, lastModel);
+                    var (nudge, drop) = rec.Decide(turn == MaxTurns() - 1, uses.Count > 0,
+                        uses.Any(u => StopRecoveryState.MalformedInput(u.Get("input"))),
+                        data.Get("stop_reason") as string == "max_tokens", text.ToString());
+                    if (nudge != null)
+                    {
+                        if (drop) messages.RemoveAt(messages.Count - 1);
+                        messages.Add(Msg("user", nudge));
+                        continue;
+                    }
+                    if (uses.Count == 0)
+                    {
+                        if (RoundEnd(messages, turn, true, rec.Final(text.ToString()))) { rec.Carry = ""; continue; }
+                        return EndRun(runStart, rec.Final(text.ToString()), messages, toolCalls, turns, usage, lastModel);
+                    }
+                    rec.Carry = "";
                 }
 
                 var n = uses.Count;
@@ -1518,6 +1740,7 @@ public sealed partial class LlmClient
                     }
                 }
                 messages.Add(new Dictionary<string, object?> { ["role"] = "user", ["content"] = resultBlocks });
+                RoundEnd(messages, turn, false, "");
             }
             // MaxTurns exhausted while the model was still emitting tool calls (§8 addendum).
             return EndRun(runStart, "", messages, toolCalls, turns, usage, lastModel, "incomplete");
@@ -1569,7 +1792,9 @@ public sealed partial class LlmClient
         var turns = 0;
         var runStart = NowMs();
         var lastModel = _opts.Model; // §8: the model of the last call this run made
+        var rec = new StopRecoveryState(_opts.StopRecovery);
         var finished = new ConcurrentDictionary<string, ToolResult>(); // finished tool results, for an interrupted save
+        var overflow = new OverflowState(); // §7F.1 reactive-compaction breaker
         var relocated = new Relocated(); // §8A adapter artifact — never enters `messages`
 
         try
@@ -1579,79 +1804,112 @@ public sealed partial class LlmClient
                 turns++;
                 var turnModel = ApplyBeforeLLM(ref messages, ref tools, turn);
                 lastModel = turnModel;
-                var body = new Dictionary<string, object?>
+                Dictionary<string, object?> BuildBody()
                 {
-                    ["model"] = turnModel,
-                    ["messages"] = relocated.Wire(messages),
-                    ["stream"] = true,
-                    ["stream_options"] = new Dictionary<string, object?> { ["include_usage"] = true },
-                };
-                // §8 Gap 5: omit tools/tool_choice when the effective tool list is empty.
-                if (tools.Count > 0)
-                {
-                    body["tools"] = tools;
-                    body["tool_choice"] = "auto";
+                    var b0 = new Dictionary<string, object?>
+                    {
+                        ["model"] = turnModel,
+                        ["messages"] = relocated.Wire(messages),
+                        ["stream"] = true,
+                        ["stream_options"] = new Dictionary<string, object?> { ["include_usage"] = true },
+                    };
+                    // §8 Gap 5: omit tools/tool_choice when the effective tool list is empty.
+                    if (tools.Count > 0)
+                    {
+                        b0["tools"] = tools;
+                        b0["tool_choice"] = "auto";
+                    }
+                    return FinalizeBody(b0);
                 }
-                body = FinalizeBody(body);
+                var body = BuildBody();
                 var url = StripTrailingSlash(_opts.BaseUrl) + "/chat/completions";
 
                 var content = new StringBuilder();
                 var acc = new Dictionary<int, string[]>(); // index -> [id, name, args]
                 var order = new List<int>();
+                var finish = "";
 
                 var t0 = NowMs();
                 var beforeP = usage.PromptTokens;
                 var beforeC = usage.CompletionTokens;
-                try
+                while (true)
                 {
-                    await foreach (var line in SseLinesAsync(url, BaseHeaders(key, false), body, deadline, external).ConfigureAwait(false))
+                    try
                     {
-                        if (!line.StartsWith("data:")) continue;
-                        var payload = line[5..].Trim();
-                        if (payload == "[DONE]") break;
-                        if (Json.ParseLoose(payload) is not IDictionary<string, object?> j) continue;
-                        AddUsage(usage, j.Get("usage") as IDictionary<string, object?>, "openai");
-                        if (j.Get("choices") is not List<object?> { Count: > 0 } choices) continue;
-                        if (((IDictionary<string, object?>)choices[0]!).Get("delta") is not IDictionary<string, object?> delta) continue;
-                        if (delta.Get("content") is string ds && ds.Length > 0)
+                        try
                         {
-                            content.Append(ds);
-                            onEvent(StreamEvent.Text(ds));
-                        }
-                        if (delta.Get("tool_calls") is List<object?> tcs)
-                        {
-                            foreach (var o in tcs)
+                            await foreach (var line in SseLinesAsync(url, BaseHeaders(key, false), body, deadline, onEvent, external, (f, t) => onEvent(StreamEvent.FallbackEvent(f, t))).ConfigureAwait(false))
                             {
-                                var tc = (IDictionary<string, object?>)o!;
-                                var index = (int)AsLong(tc.Get("index"));
-                                if (!acc.TryGetValue(index, out var slot)) { slot = new[] { "", "", "" }; acc[index] = slot; order.Add(index); }
-                                if (tc.Get("id") != null) slot[0] = tc["id"]!.ToString()!;
-                                if (tc.Get("function") is IDictionary<string, object?> fn)
+                                if (!line.StartsWith("data:")) continue;
+                                var payload = line[5..].Trim();
+                                if (payload == "[DONE]") break;
+                                if (Json.ParseLoose(payload) is not IDictionary<string, object?> j) continue;
+                                AddUsage(usage, j.Get("usage") as IDictionary<string, object?>, "openai");
+                                if (j.Get("choices") is not List<object?> { Count: > 0 } choices) continue;
+                                if (((IDictionary<string, object?>)choices[0]!).Get("finish_reason") is string { Length: > 0 } fr) finish = fr;
+                                if (((IDictionary<string, object?>)choices[0]!).Get("delta") is not IDictionary<string, object?> delta) continue;
+                                if (delta.Get("content") is string ds && ds.Length > 0)
                                 {
-                                    if (fn.Get("name") != null) slot[1] += fn["name"];
-                                    if (fn.Get("arguments") != null) slot[2] += fn["arguments"];
+                                    content.Append(ds);
+                                    onEvent(StreamEvent.Text(ds));
+                                }
+                                if (delta.Get("tool_calls") is List<object?> tcs)
+                                {
+                                    foreach (var o in tcs)
+                                    {
+                                        var tc = (IDictionary<string, object?>)o!;
+                                        var index = (int)AsLong(tc.Get("index"));
+                                        if (!acc.TryGetValue(index, out var slot)) { slot = new[] { "", "", "" }; acc[index] = slot; order.Add(index); }
+                                        if (tc.Get("id") != null) slot[0] = tc["id"]!.ToString()!;
+                                        if (tc.Get("function") is IDictionary<string, object?> fn)
+                                        {
+                                            if (fn.Get("name") != null) slot[1] += fn["name"];
+                                            if (fn.Get("arguments") != null) slot[2] += fn["arguments"];
+                                        }
+                                    }
                                 }
                             }
                         }
+                        catch (Exception)
+                        {
+                            Emit(MetricEvent.Llm(ServedModel(body, turnModel), "error", NowMs() - t0, 0, 0));
+                            throw;
+                        }
+                        turnModel = lastModel = ServedModel(body, turnModel);
+                        break;
+                    }
+                    catch (ProviderException pe)
+                    {
+                        // §7F.1: an overflow is an HTTP error before any event of this turn —
+                        // nothing was emitted; compact and re-send the same turn.
+                        if (!ReactToOverflow(overflow, pe, ref messages, tools, turnModel, turn)) throw;
+                        body = BuildBody();
+                        t0 = NowMs();
                     }
                 }
-                catch (Exception)
-                {
-                    Emit(MetricEvent.Llm(turnModel, "error", NowMs() - t0, 0, 0));
-                    throw;
-                }
+                overflow.OkSince++;
                 Emit(MetricEvent.Llm(turnModel, "ok", NowMs() - t0, usage.PromptTokens - beforeP, usage.CompletionTokens - beforeC));
                 _opts.Hooks?.AfterLLM?.Invoke(new AfterLLMEvent(new Dictionary<string, object?> { ["streamed"] = true }, turnModel, turn));
 
+                var (nudgeS, dropS) = rec.Decide(turn == MaxTurns() - 1, order.Count > 0,
+                    order.Any(i => StopRecoveryState.MalformedArgs(acc[i][2])), finish == "length", content.ToString());
+                if (nudgeS != null)
+                {
+                    if (!dropS) messages.Add(Msg("assistant", content.ToString())); // only a truncated text reply is kept
+                    messages.Add(Msg("user", nudgeS));
+                    continue;
+                }
                 if (order.Count == 0)
                 {
                     messages.Add(Msg("assistant", content.ToString()));
+                    if (RoundEnd(messages, turn, true, rec.Final(content.ToString()))) { rec.Carry = ""; continue; }
                     onEvent(StreamEvent.UsageEvent(usage.Copy()));
-                    var done0 = EndRun(runStart, content.ToString(), messages, toolCalls, turns, usage, lastModel);
+                    var done0 = EndRun(runStart, rec.Final(content.ToString()), messages, toolCalls, turns, usage, lastModel);
                     onEvent(StreamEvent.DoneEvent(done0));
                     return done0;
                 }
 
+                rec.Carry = "";
                 var assembledCalls = new List<object?>();
                 foreach (var index in order)
                 {
@@ -1718,6 +1976,7 @@ public sealed partial class LlmClient
                     onEvent(ResultEvent(slot[0], slot[1], Json.ParseObjectLoose(slot[2]), rr.Result));
                 }
                 RecordRelocation(relocated, relocations, messages.Count);
+                RoundEnd(messages, turn, false, "");
             }
             // MaxTurns exhausted while the model was still emitting tool calls (§8 addendum).
             var done = EndRun(runStart, LastAssistantText(messages), messages, toolCalls, turns, usage, lastModel, "incomplete");
@@ -1748,7 +2007,9 @@ public sealed partial class LlmClient
         var turns = 0;
         var runStart = NowMs();
         var lastModel = _opts.Model; // §8: the model of the last call this run made
+        var rec = new StopRecoveryState(_opts.StopRecovery);
         var finished = new ConcurrentDictionary<string, ToolResult>(); // finished tool results, for an interrupted save
+        var overflow = new OverflowState(); // §7F.1 reactive-compaction breaker
 
         try
         {
@@ -1757,17 +2018,21 @@ public sealed partial class LlmClient
                 turns++;
                 var turnModel = ApplyBeforeLLM(ref messages, ref tools, turn);
                 lastModel = turnModel;
-                var body = new Dictionary<string, object?>
+                Dictionary<string, object?> BuildBody()
                 {
-                    ["model"] = turnModel,
-                    ["max_tokens"] = 4096,
-                    ["messages"] = messages,
-                    ["stream"] = true,
-                };
-                if (system.Length > 0) body["system"] = system;
-                // §8 Gap 5: omit tools when the effective tool list is empty.
-                if (tools.Count > 0) body["tools"] = tools;
-                body = FinalizeBody(body);
+                    var b0 = new Dictionary<string, object?>
+                    {
+                        ["model"] = turnModel,
+                        ["max_tokens"] = 4096,
+                        ["messages"] = messages,
+                        ["stream"] = true,
+                    };
+                    if (system.Length > 0) b0["system"] = system;
+                    // §8 Gap 5: omit tools when the effective tool list is empty.
+                    if (tools.Count > 0) b0["tools"] = tools;
+                    return FinalizeBody(b0);
+                }
+                var body = BuildBody();
 
                 var blocks = new Dictionary<int, Dictionary<string, object?>>();
                 var order = new List<int>();
@@ -1776,73 +2041,92 @@ public sealed partial class LlmClient
                 var t0 = NowMs();
                 var beforeP = usage.PromptTokens;
                 var beforeC = usage.CompletionTokens;
-                try
+                while (true)
                 {
-                    await foreach (var line in SseLinesAsync(endpoint, BaseHeaders(key, true), body, deadline, external).ConfigureAwait(false))
+                    try
                     {
-                        if (!line.StartsWith("data:")) continue;
-                        if (Json.ParseLoose(line[5..].Trim()) is not IDictionary<string, object?> j) continue;
-                        var type = j.Get("type") as string;
-                        if (type == "message_start")
+                        try
                         {
-                            if (j.Get("message") is IDictionary<string, object?> m)
-                                AddUsage(usage, m.Get("usage") as IDictionary<string, object?>, "anthropic");
-                        }
-                        else if (type == "content_block_start")
-                        {
-                            var index = (int)AsLong(j.Get("index"));
-                            var cb = (IDictionary<string, object?>)j["content_block"]!;
-                            blocks[index] = new Dictionary<string, object?>
+                            await foreach (var line in SseLinesAsync(endpoint, BaseHeaders(key, true), body, deadline, onEvent, external, (f, t) => onEvent(StreamEvent.FallbackEvent(f, t))).ConfigureAwait(false))
                             {
-                                ["type"] = cb.Get("type"),
-                                ["id"] = cb.Get("id"),
-                                ["name"] = cb.Get("name"),
-                                ["text"] = new StringBuilder(),
-                                ["json"] = new StringBuilder(),
-                            };
-                            order.Add(index);
-                        }
-                        else if (type == "content_block_delta")
-                        {
-                            var index = (int)AsLong(j.Get("index"));
-                            if (!blocks.TryGetValue(index, out var b)) continue;
-                            var delta = (IDictionary<string, object?>)j["delta"]!;
-                            var dtype = delta.Get("type") as string;
-                            if (dtype == "text_delta")
-                            {
-                                var t = delta.Get("text")?.ToString() ?? "";
-                                ((StringBuilder)b["text"]!).Append(t);
-                                onEvent(StreamEvent.Text(t));
+                                if (!line.StartsWith("data:")) continue;
+                                if (Json.ParseLoose(line[5..].Trim()) is not IDictionary<string, object?> j) continue;
+                                var type = j.Get("type") as string;
+                                if (type == "message_start")
+                                {
+                                    if (j.Get("message") is IDictionary<string, object?> m)
+                                        AddUsage(usage, m.Get("usage") as IDictionary<string, object?>, "anthropic");
+                                }
+                                else if (type == "content_block_start")
+                                {
+                                    var index = (int)AsLong(j.Get("index"));
+                                    var cb = (IDictionary<string, object?>)j["content_block"]!;
+                                    blocks[index] = new Dictionary<string, object?>
+                                    {
+                                        ["type"] = cb.Get("type"),
+                                        ["id"] = cb.Get("id"),
+                                        ["name"] = cb.Get("name"),
+                                        ["text"] = new StringBuilder(),
+                                        ["json"] = new StringBuilder(),
+                                    };
+                                    order.Add(index);
+                                }
+                                else if (type == "content_block_delta")
+                                {
+                                    var index = (int)AsLong(j.Get("index"));
+                                    if (!blocks.TryGetValue(index, out var b)) continue;
+                                    var delta = (IDictionary<string, object?>)j["delta"]!;
+                                    var dtype = delta.Get("type") as string;
+                                    if (dtype == "text_delta")
+                                    {
+                                        var t = delta.Get("text")?.ToString() ?? "";
+                                        ((StringBuilder)b["text"]!).Append(t);
+                                        onEvent(StreamEvent.Text(t));
+                                    }
+                                    else if (dtype == "input_json_delta")
+                                    {
+                                        ((StringBuilder)b["json"]!).Append(delta.Get("partial_json"));
+                                    }
+                                }
+                                else if (type == "message_delta")
+                                {
+                                    if (j.Get("delta") is IDictionary<string, object?> delta && delta.Get("stop_reason") != null)
+                                        stopReason = delta["stop_reason"]!.ToString()!;
+                                    AddUsage(usage, j.Get("usage") as IDictionary<string, object?>, "anthropic");
+                                }
                             }
-                            else if (dtype == "input_json_delta")
-                            {
-                                ((StringBuilder)b["json"]!).Append(delta.Get("partial_json"));
-                            }
                         }
-                        else if (type == "message_delta")
+                        catch (Exception)
                         {
-                            if (j.Get("delta") is IDictionary<string, object?> delta && delta.Get("stop_reason") != null)
-                                stopReason = delta["stop_reason"]!.ToString()!;
-                            AddUsage(usage, j.Get("usage") as IDictionary<string, object?>, "anthropic");
+                            Emit(MetricEvent.Llm(ServedModel(body, turnModel), "error", NowMs() - t0, 0, 0));
+                            throw;
                         }
+                        turnModel = lastModel = ServedModel(body, turnModel);
+                        break;
+                    }
+                    catch (ProviderException pe)
+                    {
+                        // §7F.1: an overflow is an HTTP error before any event of this turn —
+                        // nothing was emitted; compact and re-send the same turn.
+                        if (!ReactToOverflow(overflow, pe, ref messages, tools, turnModel, turn)) throw;
+                        body = BuildBody();
+                        t0 = NowMs();
                     }
                 }
-                catch (Exception)
-                {
-                    Emit(MetricEvent.Llm(turnModel, "error", NowMs() - t0, 0, 0));
-                    throw;
-                }
+                overflow.OkSince++;
                 Emit(MetricEvent.Llm(turnModel, "ok", NowMs() - t0, usage.PromptTokens - beforeP, usage.CompletionTokens - beforeC));
                 _opts.Hooks?.AfterLLM?.Invoke(new AfterLLMEvent(new Dictionary<string, object?> { ["streamed"] = true }, turnModel, turn));
 
                 var contentBlocks = new List<object?>();
                 var uses = new List<Dictionary<string, object?>>();
+                var malformedS = false;
                 foreach (var index in order)
                 {
                     var b = blocks[index];
                     if ((b["type"] as string) == "tool_use")
                     {
                         var json = b["json"]!.ToString()!;
+                        malformedS = malformedS || StopRecoveryState.MalformedArgs(json);
                         var tu = new Dictionary<string, object?>
                         {
                             ["type"] = "tool_use",
@@ -1860,18 +2144,27 @@ public sealed partial class LlmClient
                 }
                 messages.Add(new Dictionary<string, object?> { ["role"] = "assistant", ["content"] = contentBlocks });
 
+                var textS = new StringBuilder();
+                foreach (var b in contentBlocks.OfType<IDictionary<string, object?>>())
+                    if ((b.Get("type") as string) == "text")
+                        textS.Append(b.Get("text"));
+                var (nudgeA, dropA) = rec.Decide(turn == MaxTurns() - 1, uses.Count > 0, malformedS, stopReason == "max_tokens", textS.ToString());
+                if (nudgeA != null)
+                {
+                    if (dropA) messages.RemoveAt(messages.Count - 1);
+                    messages.Add(Msg("user", nudgeA));
+                    continue;
+                }
                 if (stopReason != "tool_use" || uses.Count == 0)
                 {
-                    var text = new StringBuilder();
-                    foreach (var b in contentBlocks.OfType<IDictionary<string, object?>>())
-                        if ((b.Get("type") as string) == "text")
-                            text.Append(b.Get("text"));
+                    if (RoundEnd(messages, turn, true, rec.Final(textS.ToString()))) { rec.Carry = ""; continue; }
                     onEvent(StreamEvent.UsageEvent(usage.Copy()));
-                    var done0 = EndRun(runStart, text.ToString(), messages, toolCalls, turns, usage, lastModel);
+                    var done0 = EndRun(runStart, rec.Final(textS.ToString()), messages, toolCalls, turns, usage, lastModel);
                     onEvent(StreamEvent.DoneEvent(done0));
                     return done0;
                 }
 
+                rec.Carry = "";
                 var n = uses.Count;
                 foreach (var u in uses)
                     onEvent(CallEvent(u["id"]?.ToString(), u["name"]?.ToString() ?? "", (IDictionary<string, object?>)u["input"]!));
@@ -1926,6 +2219,7 @@ public sealed partial class LlmClient
                     onEvent(ResultEvent(id, name, u.Get("input") as IDictionary<string, object?> ?? new Dictionary<string, object?>(), r.Result));
                 }
                 messages.Add(new Dictionary<string, object?> { ["role"] = "user", ["content"] = results });
+                RoundEnd(messages, turn, false, "");
             }
             // MaxTurns exhausted while the model was still emitting tool calls (§8 addendum).
             var done = EndRun(runStart, "", messages, toolCalls, turns, usage, lastModel, "incomplete");
@@ -1968,8 +2262,50 @@ public sealed partial class LlmClient
         }
     }
 
+    /// <summary>The model the call actually transmitted last (the served model after any fallback).</summary>
+    private static string ServedModel(Dictionary<string, object?> body, string fallback) =>
+        body.Get("model") as string ?? fallback;
+
+    internal static bool ModelFallbackDisabled()
+    {
+        var v = Environment.GetEnvironmentVariable("TOOLNEXUS_DISABLE_MODEL_FALLBACK")?.Trim();
+        return v == "1" || string.Equals(v, "true", StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>§8 <c>fallbackModels</c>: [turnModel, ...FallbackModels], empties/duplicates skipped.</summary>
+    private List<string> ModelChain(string turnModel)
+    {
+        var chain = new List<string> { turnModel };
+        if (_opts.FallbackModels is not { Count: > 0 } fb || ModelFallbackDisabled()) return chain;
+        foreach (var m in fb)
+            if (!string.IsNullOrEmpty(m) && !chain.Contains(m)) chain.Add(m);
+        return chain;
+    }
+
+    /// <summary>
+    /// One model call over the §8 fallback chain: today's retry budget runs on each model; only an
+    /// exhausted budget ending on 503/529 advances to the next model (rewriting <c>body["model"]</c>,
+    /// which callers then read as the served model). Everything else returns/throws as today.
+    /// </summary>
     private async Task<HttpResponseMessage> LlmSendAsync(string url, Dictionary<string, string> headers,
-        Dictionary<string, object?> body, Deadline deadline, bool streaming, CancellationToken external)
+        Dictionary<string, object?> body, Deadline deadline, bool streaming, CancellationToken external,
+        Action<StreamEvent>? onRetry = null, Action<string, string>? onFallback = null)
+    {
+        var chain = body.Get("model") is string tm ? ModelChain(tm) : new List<string>();
+        for (var i = 0; ; i++)
+        {
+            var (res, exhausted) = await LlmSendOnceAsync(url, headers, body, deadline, streaming, external, onRetry).ConfigureAwait(false);
+            var st = (int)res.StatusCode;
+            if (i + 1 >= chain.Count || !exhausted || (st != 503 && st != 529)) return res;
+            res.Dispose();
+            onFallback?.Invoke(chain[i], chain[i + 1]);
+            body["model"] = chain[i + 1];
+        }
+    }
+
+    private async Task<(HttpResponseMessage Res, bool Exhausted)> LlmSendOnceAsync(string url, Dictionary<string, string> headers,
+        Dictionary<string, object?> body, Deadline deadline, bool streaming, CancellationToken external,
+        Action<StreamEvent>? onRetry)
     {
         var retries = Retries();
         var baseMs = RetryBaseMs();
@@ -2007,12 +2343,21 @@ public sealed partial class LlmClient
                 var completion = streaming ? HttpCompletionOption.ResponseHeadersRead : HttpCompletionOption.ResponseContentRead;
                 var res = await _http.SendAsync(req, completion, cts.Token).ConfigureAwait(false);
                 var status = (int)res.StatusCode;
-                if (status is >= 200 and < 300) return res;
+                if (status is >= 200 and < 300) return (res, false);
                 var retryable = IsRetryableStatus(status, _opts.RetryableStatuses);
+                // x-should-retry: a server-sent true/false overrides the default classification.
+                if (res.Headers.TryGetValues("x-should-retry", out var xsrs))
+                {
+                    var xsr = xsrs.FirstOrDefault()?.Trim();
+                    if (string.Equals(xsr, "true", StringComparison.OrdinalIgnoreCase)) retryable = true;
+                    else if (string.Equals(xsr, "false", StringComparison.OrdinalIgnoreCase)) retryable = false;
+                }
                 var tier = classify(new ErrorInfo(null, status, attempt, retryable));
-                if (tier == Tier.Fail || attempt == retries) return res; // caller handles non-2xx
+                if (tier == Tier.Fail) return (res, false); // caller handles non-2xx
+                if (attempt == retries) return (res, true);  // budget exhausted (fallback may advance)
                 var wait = RetryAfterMs(res) ?? (long)(baseMs * Math.Pow(2, attempt) + Random.Shared.Next(0, 100));
                 res.Dispose();
+                onRetry?.Invoke(StreamEvent.RetryEvent(attempt + 1, retries, wait, status));
                 await SleepAsync(wait, deadline, external).ConfigureAwait(false);
             }
             // Cancellation classification (SPEC §7D cancellation contract): an EXTERNAL cancel is
@@ -2028,7 +2373,9 @@ public sealed partial class LlmClient
                 lastErr = new InvalidOperationException("LLM request failed: " + e.Message, e);
                 var tier = classify(new ErrorInfo(e, null, attempt, true)); // network errors are retryable by default
                 if (tier == Tier.Fail || attempt == retries) throw lastErr;
-                await SleepAsync((long)(baseMs * Math.Pow(2, attempt) + Random.Shared.Next(0, 100)), deadline, external).ConfigureAwait(false);
+                var wait = (long)(baseMs * Math.Pow(2, attempt) + Random.Shared.Next(0, 100));
+                onRetry?.Invoke(StreamEvent.RetryEvent(attempt + 1, retries, wait, null));
+                await SleepAsync(wait, deadline, external).ConfigureAwait(false);
             }
         }
         throw lastErr ?? new InvalidOperationException("LLM request failed");
@@ -2072,18 +2419,18 @@ public sealed partial class LlmClient
     private async Task<Dictionary<string, object?>> LlmCallJsonAsync(string url, Dictionary<string, string> headers,
         Dictionary<string, object?> body, Deadline deadline, CancellationToken external, string style)
     {
-        var callModel = body.Get("model")?.ToString() ?? _opts.Model;
         var t0 = NowMs();
         try
         {
             var data = await PostJsonAsync(url, headers, body, deadline, external).ConfigureAwait(false);
+            var callModel = body.Get("model")?.ToString() ?? _opts.Model;
             var tok = PerCall(data.Get("usage") as IDictionary<string, object?>, style);
             Emit(MetricEvent.Llm(callModel, "ok", NowMs() - t0, tok.Prompt, tok.Completion));
             return data;
         }
         catch (Exception)
         {
-            Emit(MetricEvent.Llm(callModel, "error", NowMs() - t0, 0, 0));
+            Emit(MetricEvent.Llm(body.Get("model")?.ToString() ?? _opts.Model, "error", NowMs() - t0, 0, 0));
             throw;
         }
     }
@@ -2103,10 +2450,11 @@ public sealed partial class LlmClient
     }
 
     private async IAsyncEnumerable<string> SseLinesAsync(string url, Dictionary<string, string> headers,
-        Dictionary<string, object?> body, Deadline deadline,
-        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken external)
+        Dictionary<string, object?> body, Deadline deadline, Action<StreamEvent>? onRetry,
+        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken external,
+        Action<string, string>? onFallback = null)
     {
-        using var res = await LlmSendAsync(url, headers, body, deadline, true, external).ConfigureAwait(false);
+        using var res = await LlmSendAsync(url, headers, body, deadline, true, external, onRetry, onFallback).ConfigureAwait(false);
         if ((int)res.StatusCode is < 200 or >= 300)
         {
             var b = await res.Content.ReadAsStringAsync(external).ConfigureAwait(false);

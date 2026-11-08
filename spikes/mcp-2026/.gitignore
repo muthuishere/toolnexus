@@ -1,0 +1,14 @@
+.venv/
+__pycache__/
+.pytest_cache/
+node_modules/
+target/
+build/
+.gradle/
+bin/
+obj/
+_build/
+deps/
+.cpcache/
+.cache/
+*.pem

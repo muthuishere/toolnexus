@@ -421,7 +421,7 @@ func TestD5_ClassifierBackendPairing(t *testing.T) {
 	if err == nil {
 		t.Fatal("the known cross-base mismatch must fail at construction")
 	}
-	want := `model "jev-latest" is TypeSafe's spelling; on openrouter.ai use "typesafe/jev-1.13"`
+	want := `model "jev-latest" is TypeSafe's spelling; on openrouter.ai use "typesafe/jev-1.14"`
 	if err.Error() != want {
 		t.Errorf("message must be byte-identical across ports.\n got: %s\nwant: %s", err.Error(), want)
 	}

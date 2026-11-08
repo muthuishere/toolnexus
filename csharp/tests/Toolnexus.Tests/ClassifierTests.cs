@@ -673,7 +673,9 @@ public class ClassifierTests
     [Fact]
     public void ConstructionRejectsIncompleteStylesAndAppliesDefaults()
     {
+#pragma warning disable CS0618 // the deprecated alias must keep working
         Assert.Throws<ClassifierException>(() => new Classifier(new ClassifierOptions { Style = ClassifierStyle.Llm }));
+#pragma warning restore CS0618
         Assert.Throws<ClassifierException>(() => new Classifier(new ClassifierOptions { Style = ClassifierStyle.Custom }));
         Assert.Throws<ClassifierException>(() => new Classifier(new ClassifierOptions { Style = (ClassifierStyle)99 }));
 

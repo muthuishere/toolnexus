@@ -119,6 +119,23 @@ async fn permission_callback_timeout_is_typed_and_answers_cancelled() {
 }
 
 #[tokio::test]
+async fn permission_timeout_bounds_the_whole_turn() {
+    // SPEC §7 ACP host hooks: "the turn's permission timeout still applies" —
+    // a turn the agent never ends fails typed after the bound, not never.
+    let mut o = opts("cancel");
+    o.permission_timeout = Duration::from_millis(200);
+    let c = AcpClient::load(o).await.unwrap();
+    let started = Instant::now();
+    let err = tokio::time::timeout(Duration::from_secs(5), c.prompt_text("go"))
+        .await
+        .expect("turn must be bounded by permission_timeout")
+        .unwrap_err();
+    assert!(matches!(err, AcpError::PermissionTimeout(_)), "{err}");
+    assert!(started.elapsed() < Duration::from_secs(3));
+    c.close().await;
+}
+
+#[tokio::test]
 async fn slow_cold_start_within_initialize_timeout() {
     let c = AcpClient::load(opts("echo").args(["echo", "800"]))
         .await
@@ -144,10 +161,13 @@ async fn agent_exiting_mid_turn_ends_the_turn() {
     let start = Instant::now();
     let err = turn.finish().await.unwrap_err();
     assert!(
-        matches!(err, AcpError::AgentExited { code: Some(3) }),
+        matches!(err, AcpError::AgentExited { code: Some(3), .. }),
         "{err}"
     );
-    assert_eq!(err.to_string(), "toolnexus: acp: agent exited with code 3");
+    assert_eq!(
+        err.to_string(),
+        "toolnexus: acp: agent exited before replying to session/prompt with code 3"
+    );
     assert!(start.elapsed() < Duration::from_secs(2));
     // the session is dead: the next prompt fails fast
     assert!(matches!(
@@ -357,6 +377,10 @@ async fn generate_stream_emits_text_and_agent_tool_events_via_acp() {
     assert_eq!(
         events,
         vec![
+            AcpStreamEvent::Thought {
+                delta: "hmm".into(),
+                via: "acp"
+            },
             AcpStreamEvent::ToolCall {
                 id: "t1".into(),
                 name: "Read file".into(),
@@ -387,7 +411,7 @@ async fn generate_stream_emits_text_and_agent_tool_events_via_acp() {
                 delta: "done".into()
             },
         ],
-        "thoughts and in-progress updates are not emitted"
+        "thoughts are emitted; in-progress updates are not"
     );
     c.close().await;
 }

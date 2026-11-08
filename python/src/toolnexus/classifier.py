@@ -24,13 +24,17 @@ build without this module.
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
 import inspect
 import json
 import math
 import os
 import re
+import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable, Literal, Mapping, Optional, Protocol, Sequence, Union
@@ -80,6 +84,26 @@ __all__ = [
     "ClassifierTransport",
     "Classifier",
     "create_classifier",
+    # add-classifier-backends (SPEC §8B "Backends, images, cache and validation")
+    "ClassifierBackend",
+    "ClassifierBackendPreset",
+    "CLASSIFIER_BACKENDS",
+    "ClassifierSupports",
+    "ClassifierUnsupported",
+    "IMAGES_HEADER",
+    "RawQuestion",
+    "RawAnswer",
+    "ClassifierCache",
+    "MemoryCache",
+    "classifier_model_cache_key",
+    "classifier_decision_cache_key",
+    "validate_decision",
+    "Thresholds",
+    "DEFAULT_THRESHOLDS",
+    "chunk_questions",
+    "ClassifierState",
+    "ClassifierStates",
+    "BatchResult",
 ]
 
 # --------------------------------------------------------------------------- #
@@ -117,26 +141,109 @@ _DEFAULT_RETRIES = 2
 #: Default retry backoff base in ms — the same 500 as §8 ``ClientOptions.retry_base_ms``.
 _DEFAULT_RETRY_BASE_MS = 500
 
+#: ``"llm"`` is DEPRECATED (ADR 0038 D3: System One is the single product wire).
+#: It keeps working byte-identically as an alias for at least one minor release;
+#: there is no runtime warning.
 ClassifierStyle = Literal["systemone", "llm", "custom", "static"]
 
 #: A BACKEND is where the System One wire is served. Picking one sets base_url,
 #: model and api_key_env AS A UNIT (D5, #91, ADR 0027) — mixing TypeSafe's model
 #: alias with OpenRouter's base URL is the documented 404 in issue #91, and it
 #: used to be discoverable only at request time.
-ClassifierBackend = Literal["typesafe", "openrouter"]
+ClassifierBackend = Literal["typesafe", "openrouter", "cloudflare", "vercel", "openai", "custom"]
 
-CLASSIFIER_BACKENDS: dict[str, dict[str, str]] = {
-    "typesafe": {
-        "base_url": DEFAULT_CLASSIFIER_BASE_URL,
-        "model": DEFAULT_CLASSIFIER_MODEL,
-        "api_key_env": DEFAULT_CLASSIFIER_API_KEY_ENV,
-    },
-    "openrouter": {
-        "base_url": "https://openrouter.ai/api/v1",
-        "model": "typesafe/jev-1.13",
-        "api_key_env": "OPENROUTER_API_KEY",
-    },
+#: TypeSafe's required opt-in for image ("danger zone") input.
+IMAGES_HEADER = "TypeSafe-Danger-Zone-Images"
+
+#: Image limits (docs.typesafe.ai/images). Outside them the API rejects and never
+#: resizes, so they are checked client-side before any request.
+CLASSIFIER_IMAGE_MIN_SIDE = 280
+CLASSIFIER_IMAGE_MAX_SIDE = 1568
+CLASSIFIER_IMAGE_MAX_BYTES = 16 * 1024 * 1024
+CLASSIFIER_REQUEST_IMAGE_BYTES = 32 * 1024 * 1024
+
+
+@dataclass(frozen=True)
+class ClassifierSupports:
+    """What a backend+model can take. DATA: a fail-fast for what the table says,
+    never a claim about the vendor. Override per classifier with ``supports``."""
+
+    images: bool = False
+
+
+@dataclass(frozen=True)
+class ClassifierBackendPreset:
+    """One row of the backend table (§8B)."""
+
+    base_url: str
+    model: str
+    api_key_env: str
+    #: ``"systemone"``, ``"cloudflare"`` or ``"decisions"``.
+    wire: str
+    #: Send ``TypeSafe-Danger-Zone-Images: true`` when a request carries images.
+    images_header: bool
+    #: Default support for a model on this backend. ``None`` on ``custom``, which
+    #: requires the ``supports`` option.
+    supports: Optional[Callable[[str], ClassifierSupports]]
+
+    def __getitem__(self, key: str) -> Any:  # the pre-0.25 dict-row spelling
+        return getattr(self, key)
+
+
+#: The backend table (researched and live-probed 2026-11-04, ADR 0038). Vercel and
+#: Cloudflare-Jev images stay False until a live probe proves them.
+CLASSIFIER_BACKENDS: dict[str, ClassifierBackendPreset] = {
+    "typesafe": ClassifierBackendPreset(
+        DEFAULT_CLASSIFIER_BASE_URL, DEFAULT_CLASSIFIER_MODEL, DEFAULT_CLASSIFIER_API_KEY_ENV,
+        "systemone", True, lambda m: ClassifierSupports(images=True),
+    ),
+    "openrouter": ClassifierBackendPreset(
+        "https://openrouter.ai/api/v1", "typesafe/jev-1.14", "OPENROUTER_API_KEY",
+        "systemone", True, lambda m: ClassifierSupports(images=True),
+    ),
+    "cloudflare": ClassifierBackendPreset(
+        "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/ai/run",
+        "typesafe/jev", "CLOUDFLARE_JEV_API_KEY",
+        "cloudflare", False, lambda m: ClassifierSupports(images="clef" in m),
+    ),
+    "vercel": ClassifierBackendPreset(
+        "https://ai-gateway.vercel.sh/typesafe/v1", "typesafe-ai/jev", "AI_GATEWAY_API_KEY",
+        "systemone", True, lambda m: ClassifierSupports(images=False),
+    ),
+    # OpenAI's Decisions API (#157): its own wire, POST {base}/decisions.
+    "openai": ClassifierBackendPreset(
+        "https://api.openai.com/v1", "gpt-6-luna", "OPENAI_API_KEY",
+        "decisions", False, lambda m: ClassifierSupports(images=True),
+    ),
+    "custom": ClassifierBackendPreset(
+        "", DEFAULT_CLASSIFIER_MODEL, "", "systemone", True, None,
+    ),
 }
+
+
+def classifier_key_env(backend: str, base_url: str) -> str:
+    """The env var whose key may be sent to ``base_url`` (already ``${NAME}``-expanded):
+    the backend's own variable, and only when ``base_url`` is that backend's own host
+    over https (OpenRouter also its ``*.openrouter.ai`` subdomains, as in the §8
+    client). ``""`` when none may — ``custom`` has no preset key at all. A key is
+    never sent to a host the caller did not name (#155, SPEC §8B)."""
+    p = CLASSIFIER_BACKENDS.get(backend)
+    if p is None or not p.api_key_env or not p.base_url:
+        return ""
+
+    def host(u: str) -> str:
+        try:
+            sp = urllib.parse.urlsplit(u)
+            return (sp.hostname or "").lower() if sp.scheme.lower() == "https" else ""
+        except ValueError:
+            return ""
+
+    h, own = host(base_url), host(p.base_url)
+    if not h or not own:
+        return ""
+    if h == own or (backend == "openrouter" and h.endswith(".openrouter.ai")):
+        return p.api_key_env
+    return ""
 
 #: The one mismatch worth failing at construction: a model alias only TypeSafe
 #: serves, pointed at OpenRouter.
@@ -147,6 +254,18 @@ class ClassifierError(Exception):
     """Every failure this module raises. Never carries a credential value, an
     expanded header value, or the body of a 401/403 (a gateway happily reflects a
     bad ``Authorization`` header into its own error text)."""
+
+
+class ClassifierUnsupported(ClassifierError):
+    """Raised BEFORE any network call when the backend's support table says it
+    cannot take what the request carries (§8B, PD-5). Not raised for an image
+    outside the limits: that is the caller's input, not a backend gap."""
+
+    def __init__(self, backend: str, model: str, feature: str) -> None:
+        super().__init__(f"classifier: {backend} ({model}) does not support {feature}")
+        self.backend = backend
+        self.model = model
+        self.feature = feature
 
 
 # --------------------------------------------------------------------------- #
@@ -215,7 +334,19 @@ class ScoreQuestion:
     type: Literal["score"] = "score"
 
 
-Question = Union[NoulQuestion, ChoiceQuestion, ScoreQuestion]
+@dataclass
+class RawQuestion:
+    """The OPEN end of the question union (§8B): a System One question type the
+    library does not model (e.g. Jev 1.14 ``box``), sent as written. It gets no
+    client-side limits beyond a non-empty ``type``."""
+
+    type: str
+    instructions: str
+    #: Sent verbatim when not ``None``; omitted when ``None``.
+    criteria: Any = None
+
+
+Question = Union[NoulQuestion, ChoiceQuestion, ScoreQuestion, RawQuestion]
 
 
 def choice_over(instructions: str, items: Mapping[str, str]) -> ChoiceQuestion:
@@ -242,6 +373,11 @@ def _question_wire(key: str, q: Question) -> dict[str, Any]:
         return {"type": "choice", "instructions": q.instructions, "criteria": dict(q.criteria)}
     if isinstance(q, ScoreQuestion):
         return {"type": "score", "instructions": q.instructions, "criteria": list(q.criteria)}
+    if isinstance(q, RawQuestion):
+        out = {"type": q.type, "instructions": q.instructions}
+        if q.criteria is not None:
+            out["criteria"] = q.criteria
+        return out
     raise ClassifierError(f"classifier: question {key!r} is not a noul, choice or score question")
 
 
@@ -262,7 +398,10 @@ def _validate_question(key: str, q: Question) -> None:
     from the backend's own ``400 "Too many choices."``, which is still surfaced
     intact if it arrives.
     """
-    if isinstance(q, ChoiceQuestion):
+    if isinstance(q, RawQuestion):
+        if not q.type:
+            raise ClassifierError(f"classifier: question {key!r}: a raw question needs a type")
+    elif isinstance(q, ChoiceQuestion):
         n = len(q.criteria)
         if n < 1 or n > MAX_CHOICE_OPTIONS:
             raise ClassifierError(
@@ -359,7 +498,16 @@ class ScoreAnswer:
 #: One typed answer. The set is CLOSED and discriminated by the wire's ``type``.
 #: Named ``DecisionAnswer`` because §10 already owns ``Answer`` (the suspension
 #: resolution) — same idea, different seam.
-DecisionAnswer = Union[NoulAnswer, ChoiceAnswer, ScoreAnswer]
+@dataclass
+class RawAnswer:
+    """An answer of a type the library does not model (§8B open union). ``value``
+    is the whole answer object as decoded, ``type`` included."""
+
+    type: str
+    value: dict[str, Any] = field(default_factory=dict)
+
+
+DecisionAnswer = Union[NoulAnswer, ChoiceAnswer, ScoreAnswer, RawAnswer]
 
 
 @dataclass
@@ -410,6 +558,9 @@ class Decision:
     #: probabilities from provider token probabilities. A THRESHOLD TUNED AGAINST
     #: ONE BACKEND DOES NOT TRANSFER TO ANOTHER.
     calibrated: bool = True
+    #: True when the decision came from the classifier ``cache`` and no request was
+    #: sent. Never on the wire.
+    cached: bool = False
 
     # Typed accessors, so a wrong-type or absent read RAISES rather than returning
     # something wrong and no caller has to ``isinstance`` by hand.
@@ -421,6 +572,9 @@ class Decision:
 
     def score(self, key: str) -> ScoreAnswer:
         return self._typed(key, ScoreAnswer, "score")
+
+    def raw(self, key: str) -> RawAnswer:
+        return self._typed(key, RawAnswer, "raw")
 
     def _typed(self, key: str, cls: type, want: str) -> Any:
         a = self.answers.get(key)
@@ -464,7 +618,10 @@ def _decision_from_wire(raw: Mapping[str, Any]) -> Decision:
                     confidence=float(body.get("confidence", 0.0)),
                 )
             else:
-                raise ClassifierError(f"classifier: answer {key!r}: unknown type {kind!r}")
+                # The union is OPEN (§8B): a type the library does not model (e.g.
+                # Jev 1.14 "box") decodes to a RawAnswer instead of failing the
+                # whole decision.
+                answers[key] = RawAnswer(type=kind if isinstance(kind, str) else "", value=dict(body))
         except (KeyError, TypeError, ValueError) as e:
             raise ClassifierError(f"classifier: answer {key!r}: malformed {kind} answer: {e}") from None
     u = raw.get("usage") or {}
@@ -615,11 +772,31 @@ class Classifier:
         client: Optional[Client] = None,
         evaluate: Optional[Callable[..., Any]] = None,
         decisions: Optional[list[RecordedDecision]] = None,
+        backend: str = "typesafe",
+        supports: Optional[Union[ClassifierSupports, Mapping[str, Any]]] = None,
+        cache: Optional["ClassifierCache"] = None,
+        key_env_explicit: Optional[bool] = None,
     ) -> None:
         self.style = style
+        self.backend = backend
+        self.preset = CLASSIFIER_BACKENDS[backend]
+        if supports is not None:
+            self.supports = _as_supports(supports)
+        elif self.preset.supports is not None:
+            self.supports = self.preset.supports(model)
+        else:
+            self.supports = ClassifierSupports()
+        #: Opt-in answer cache (§8B). ``None`` = no caching. Consulted by style
+        #: ``systemone`` only; stores only replies that pass :func:`validate_decision`.
+        self.cache = cache
         self.base_url = base_url
         self.model = model
         self.api_key_env = api_key_env
+        # Did the caller NAME the key variable? A named one goes wherever base_url
+        # points; the preset's own only to its own host (classifier_key_env, #155).
+        if key_env_explicit is None:
+            key_env_explicit = api_key_env not in (self.preset.api_key_env, DEFAULT_CLASSIFIER_API_KEY_ENV)
+        self.key_env_explicit = key_env_explicit
         self.headers = dict(headers or {})
         self.timeout = timeout
         self.http_transport: ClassifierTransport = http_transport or _UrllibTransport()
@@ -662,10 +839,33 @@ class Classifier:
         backend that cannot guarantee that reports ``calibrated=False``, which
         carries both caveats.
         """
+        return await self._evaluate(state, questions, False)
+
+    def state(self, value: Any) -> "ClassifierState":
+        """Bind a state; nothing is sent until ``.evaluate(*questions)`` (§8B)."""
+        return ClassifierState(self, value)
+
+    def states(self, *values: Any) -> "ClassifierStates":
+        """Bind a batch of states; see :meth:`ClassifierStates.evaluate`."""
+        return ClassifierStates(self, list(values))
+
+    async def _evaluate(self, state: Any, questions: Mapping[str, Question], validate: bool) -> Decision:
+        """The one path. ``validate`` = fail closed on :func:`validate_decision` (the
+        value builders); plain :meth:`evaluate` keeps its old behaviour."""
         t0 = time.monotonic()
+        # L1: count + hash of the canonical request on every evaluate event.
+        try:
+            q_hash = hashlib.sha256(canonical_request(self.model, questions)).hexdigest()
+        except Exception:  # noqa: BLE001 — an unencodable question set hashes to ""
+            q_hash = ""
+        n_questions = len(questions)
+
+        def emit_error(err: BaseException) -> None:
+            self._emit_error(t0, err, n_questions, q_hash)
+
         if not questions:
             err = ClassifierError("classifier: no questions to evaluate")
-            self._emit_error(t0, err)
+            emit_error(err)
             raise err
         # Limits are enforced CLIENT-SIDE, before the request. Keys are walked in
         # sorted order so the same malformed set always names the same key first.
@@ -673,7 +873,7 @@ class Classifier:
             try:
                 _validate_question(key, questions[key])
             except ClassifierError as err:
-                self._emit_error(t0, err)
+                emit_error(err)
                 raise
         # Detection, never repair (ADR 0020/0021): the request goes out
         # BYTE-UNCHANGED and the warning is the entire observable effect.
@@ -689,9 +889,13 @@ class Classifier:
             elif self.style == "llm":
                 d = await self._evaluate_llm(state, questions)
             else:
-                d = await self._evaluate_systemone(state, questions)
+                d = await self._evaluate_wire(state, questions, validate)
+            if validate and self.style != "systemone":
+                verr = validate_decision(questions, d)
+                if verr is not None:
+                    raise verr
         except Exception as err:  # noqa: BLE001 — re-raised verbatim after the metric
-            self._emit_error(t0, err)
+            emit_error(err)
             raise
         self._emit(
             {
@@ -701,6 +905,9 @@ class Classifier:
                 "ms": int((time.monotonic() - t0) * 1000),
                 "prompt_tokens": d.usage.input_tokens,
                 "completion_tokens": d.usage.output_tokens,
+                "questions": n_questions,
+                "questions_hash": q_hash,
+                "cached": d.cached,
             }
         )
         return d
@@ -768,16 +975,34 @@ class Classifier:
     # Backends
     # ----------------------------------------------------------------------- #
 
-    def _body(self, state: Any, questions: Mapping[str, Question]) -> bytes:
+    def _body(
+        self, state: Any, questions: Mapping[str, Question], images: Optional[list["_LiftedImage"]] = None
+    ) -> bytes:
         """Assemble the request: the canonical ``model`` + ``questions``, plus
-        ``state`` VERBATIM as the host supplied it, then the §8 Gap 1 pipeline in
-        §8 order (base → ``request_params`` merge → ``body_transform`` → marshal).
+        ``state`` VERBATIM as the host supplied it (after image lifting, when it
+        carried parts), then the §8 Gap 1 pipeline in §8 order (base →
+        ``request_params`` merge → ``body_transform`` → marshal).
+
+        The ``cloudflare`` wire nests the same fields under ``input`` and carries
+        images as data URLs in collection order.
         """
-        body: dict[str, Any] = {
-            "model": self.model,
-            "questions": {k: _question_wire(k, q) for k, q in questions.items()},
-            "state": state,
-        }
+        qs = {k: _question_wire(k, q) for k, q in questions.items()}
+        body: dict[str, Any]
+        if self.preset.wire == "decisions":
+            body = {
+                "model": self.model,
+                "input": _decisions_input(state, images),
+                "questions": _decisions_questions(self.backend, self.model, questions),
+            }
+        elif self.preset.wire == "cloudflare":
+            inp: dict[str, Any] = {"questions": qs, "state": state}
+            if images:
+                inp["images"] = [f"data:image/{im.format};base64,{im.data}" for im in images]
+            body = {"model": self.model, "input": inp}
+        else:
+            body = {"model": self.model, "questions": qs, "state": state}
+            if images:
+                body["assets"] = _assets(images)
         body.update(self.request_params)  # a request_params key WINS on collision
         if self.body_transform is not None:
             out = self.body_transform(body)
@@ -795,15 +1020,54 @@ class Classifier:
             raw = json.loads(raw)
         return _decision_from_wire(raw)
 
-    async def _evaluate_systemone(self, state: Any, questions: Mapping[str, Question]) -> Decision:
-        payload = await self._post(self._body(state, questions))
+    async def _evaluate_wire(self, state: Any, questions: Mapping[str, Question], validate: bool) -> Decision:
+        """Style ``systemone`` (every backend): lift, check, cache, post, decode."""
+        sent, images = _lift_images(state)
+        if images and not self.supports.images:
+            raise ClassifierUnsupported(self.backend, self.model, "images")
+        _check_images(images)
+        assets = _assets(images) if images else None
+        model_key = ""
+        if self.cache is not None:
+            model_key = classifier_model_cache_key(self.base_url, self.model)
+            served = await _maybe_await(self.cache.get(model_key))
+            if isinstance(served, str):
+                dk = classifier_decision_cache_key(self.base_url, served, sent, assets, questions)
+                hit = await _maybe_await(self.cache.get(dk))
+                if isinstance(hit, str):
+                    try:
+                        d = _decision_from_wire(json.loads(hit))
+                    except Exception:  # noqa: BLE001 — a corrupt entry is a miss
+                        d = None
+                    if d is not None and validate_decision(questions, d) is None:
+                        d.cached = True
+                        return d
+        extra = {IMAGES_HEADER: "true"} if images and self.preset.images_header else None
+        payload = await self._post(self._body(sent, questions, images), extra)
         try:
             parsed = json.loads(payload)
         except ValueError as e:
+            if self.preset.wire == "cloudflare":
+                raise ClassifierError("classifier: cloudflare: envelope not successful") from None
             raise ClassifierError(f"classifier: unparseable response: {e}") from None
-        return _decision_from_wire(parsed)
+        if self.preset.wire == "cloudflare":
+            parsed = _unwrap_cloudflare(parsed)
+            payload = canonical_json(parsed)
+        elif self.preset.wire == "decisions":
+            payload = _decisions_reply(parsed, questions)
+            parsed = json.loads(payload)
+        d = _decision_from_wire(parsed)
+        verr = validate_decision(questions, d)
+        if validate and verr is not None:
+            raise verr
+        if self.cache is not None and verr is None:
+            served = d.model or self.model
+            dk = classifier_decision_cache_key(self.base_url, served, sent, assets, questions)
+            await _maybe_await(self.cache.set(model_key, served))
+            await _maybe_await(self.cache.set(dk, payload.decode("utf-8", errors="replace")))
+        return d
 
-    async def _post(self, raw: bytes) -> bytes:
+    async def _post(self, raw: bytes, extra_headers: Optional[Mapping[str, str]] = None) -> bytes:
         """The one POST, with the §8 retry budget — the same ``ErrorInfo``/tier
         classifier and the same ``Retry-After`` delay-seconds rule. There is no
         second retry policy, and no ``"suspend"`` tier here either.
@@ -812,7 +1076,15 @@ class Classifier:
         authentication failure names the status and the endpoint and nothing else,
         and a 401/403 body is never echoed back.
         """
-        endpoint = self.base_url.rstrip("/") + "/systemone"
+        # ``endpoint`` is what errors name: the CONFIGURED base, ${ENV} unexpanded,
+        # so an account id in a templated URL never reaches an error. ``url`` is
+        # what is dialled, expanded at call time.
+        endpoint = self.base_url.rstrip("/")
+        if self.preset.wire == "decisions":
+            endpoint += "/decisions"
+        elif self.preset.wire != "cloudflare":
+            endpoint += "/systemone"
+        url = _expand_env(endpoint)
         retries = self.retries if self.retries > 0 else _DEFAULT_RETRIES
         base = (self.retry_base_ms if self.retry_base_ms > 0 else _DEFAULT_RETRY_BASE_MS) / 1000.0
         classify = self.on_error or (lambda info: "retry" if info.get("retryable") else "fail")
@@ -823,7 +1095,7 @@ class Classifier:
             retry_after_header: Optional[str] = None
             try:
                 res = await asyncio.to_thread(
-                    self.http_transport.post, endpoint, self._headers(), raw, self.timeout
+                    self.http_transport.post, url, self._headers(extra_headers, url), raw, self.timeout
                 )
                 status, retry_after_header = res.status, res.retry_after
                 if status < 300:
@@ -831,7 +1103,10 @@ class Classifier:
                 last = ClassifierError(f"classifier: POST {endpoint}: HTTP {status}{_cause(status, res.body)}")
             except Exception as e:  # noqa: BLE001 — a transport fault, not a status
                 err = e
-                last = ClassifierError(f"classifier: POST {endpoint}: {type(e).__name__}: {e}")
+                msg = str(e)
+                if url != endpoint:
+                    msg = msg.replace(url, endpoint)
+                last = ClassifierError(f"classifier: POST {endpoint}: {type(e).__name__}: {msg}")
             retryable = err is not None or status == 408 or _is_retryable_status(status, self.retryable_statuses)
             if attempt >= retries:
                 raise last
@@ -842,13 +1117,16 @@ class Classifier:
             await asyncio.sleep(delay if delay is not None else base * (2**attempt))
             attempt += 1
 
-    def _headers(self) -> dict[str, str]:
+    def _headers(self, extra: Optional[Mapping[str, str]] = None, url: str = "") -> dict[str, str]:
         """Built fresh per attempt: the credential is read from the NAMED env var
-        at call time, and ``${ENV_VAR}`` header references expand at call time."""
+        at call time, and ``${ENV_VAR}`` header references expand at call time.
+        ``extra`` (the images opt-in) goes before host headers, which win."""
         h = {"Content-Type": "application/json"}
-        key = os.environ.get(self.api_key_env)
+        key_env = self.api_key_env if self.key_env_explicit else classifier_key_env(self.backend, url)
+        key = os.environ.get(key_env) if key_env else None
         if key:
             h["Authorization"] = f"Bearer {key}"
+        h.update(extra or {})
         for k, v in self.headers.items():
             h[k] = _expand_env(v)
         return h
@@ -900,7 +1178,7 @@ class Classifier:
         if self.on_metric is not None:
             self.on_metric(ev)
 
-    def _emit_error(self, t0: float, err: Exception) -> None:
+    def _emit_error(self, t0: float, err: BaseException, questions: int = 0, questions_hash: str = "") -> None:
         self._emit(
             {
                 "event": METRIC_CLASSIFIER_EVALUATE,
@@ -908,6 +1186,9 @@ class Classifier:
                 "status": "error",
                 "ms": int((time.monotonic() - t0) * 1000),
                 "error": str(err),
+                "questions": questions,
+                "questions_hash": questions_hash,
+                "cached": False,
             }
         )
 
@@ -965,6 +1246,8 @@ def create_classifier(
     client: Optional[Client] = None,
     evaluate: Optional[Callable[..., Any]] = None,
     decisions: Optional[list[RecordedDecision]] = None,
+    supports: Optional[Union[ClassifierSupports, Mapping[str, Any]]] = None,
+    cache: Optional["ClassifierCache"] = None,
 ) -> Classifier:
     """Build a :class:`Classifier`, applying the §8B defaults and rejecting a style
     whose required option is missing BEFORE any call is made.
@@ -974,22 +1257,24 @@ def create_classifier(
     """
     if style not in ("systemone", "llm", "custom", "static"):
         raise ClassifierError(f"classifier: unknown style {style!r}")
-    if backend is not None:
-        if backend not in CLASSIFIER_BACKENDS:
-            raise ClassifierError(
-                f"classifier: unknown backend {backend!r} (known: {', '.join(sorted(CLASSIFIER_BACKENDS))})"
-            )
-        preset = CLASSIFIER_BACKENDS[backend]
-        # The preset is a UNIT; an explicit field still wins over it.
-        base_url = base_url or preset["base_url"]
-        model = model or preset["model"]
-        api_key_env = api_key_env or preset["api_key_env"]
-    effective_base = base_url or DEFAULT_CLASSIFIER_BASE_URL
-    effective_model = model or DEFAULT_CLASSIFIER_MODEL
+    backend_name = backend or "typesafe"
+    if backend_name not in CLASSIFIER_BACKENDS:
+        raise ClassifierError(
+            f'classifier: unknown backend "{backend}" (want "typesafe", "openrouter", '
+            '"cloudflare", "vercel", "openai" or "custom")'
+        )
+    if backend_name == "custom" and style == "systemone" and (not base_url or supports is None):
+        raise ClassifierError('classifier: backend "custom" requires baseUrl and supports')
+    preset = CLASSIFIER_BACKENDS[backend_name]
+    # The preset is a UNIT; an explicit field still wins over it.
+    effective_base = base_url or preset.base_url
+    effective_model = model or preset.model
+    explicit_key_env = bool(api_key_env)
+    api_key_env = api_key_env or preset.api_key_env
     if "openrouter.ai" in effective_base and effective_model in _TYPESAFE_ONLY_MODELS:
         raise ClassifierError(
             f'classifier: model "{effective_model}" is TypeSafe\'s spelling; '
-            'on openrouter.ai use "typesafe/jev-1.13"'
+            f'on openrouter.ai use "{CLASSIFIER_BACKENDS["openrouter"].model}"'
         )
     if style == "llm" and client is None:
         raise ClassifierError(f"classifier: style {style!r} requires client")
@@ -1000,6 +1285,7 @@ def create_classifier(
         base_url=effective_base,
         model=effective_model,
         api_key_env=api_key_env or DEFAULT_CLASSIFIER_API_KEY_ENV,
+        key_env_explicit=explicit_key_env,
         headers=headers,
         timeout=timeout if timeout else DEFAULT_CLASSIFIER_TIMEOUT,
         http_transport=http_transport,
@@ -1013,4 +1299,560 @@ def create_classifier(
         client=client,
         evaluate=evaluate,
         decisions=decisions,
+        backend=backend_name,
+        supports=supports,
+        cache=cache,
     )
+
+
+# --------------------------------------------------------------------------- #
+# Backends, images, cache and validation (SPEC §8B, change add-classifier-backends,
+# ADR 0038). Every default here is a PROPOSED default, owner to confirm
+# (openspec/changes/add-classifier-backends/design.md PD-1..PD-15).
+# --------------------------------------------------------------------------- #
+
+
+def _as_supports(v: Union[ClassifierSupports, Mapping[str, Any]]) -> ClassifierSupports:
+    if isinstance(v, ClassifierSupports):
+        return v
+    return ClassifierSupports(images=bool(v.get("images", False)))
+
+
+async def _maybe_await(v: Any) -> Any:
+    """A cache's ``get``/``set`` may be sync or async."""
+    if inspect.isawaitable(v):
+        return await v
+    return v
+
+
+@dataclass
+class _LiftedImage:
+    ref: str
+    #: The declared MIME type before :func:`_check_images`, the wire format after.
+    format: str
+    data: str
+
+
+def _assets(images: Sequence[_LiftedImage]) -> dict[str, Any]:
+    return {im.ref: {"type": "image", "format": im.format, "data_base64": im.data} for im in images}
+
+
+def _is_part(v: Any) -> bool:
+    from .content import ContentPart
+
+    return isinstance(v, ContentPart)
+
+
+def _contains_part(v: Any) -> bool:
+    if _is_part(v):
+        return True
+    if isinstance(v, Mapping):
+        return any(_contains_part(e) for e in v.values())
+    if isinstance(v, (list, tuple)):
+        return any(_contains_part(e) for e in v)
+    return False
+
+
+def _lift_images(state: Any) -> tuple[Any, list[_LiftedImage]]:
+    """The §8B lifting walk. A state with no content part is returned VERBATIM
+    (the same object), so a text-only state is byte-identical to before.
+
+    Depth-first, object keys in ASCII order, arrays in order: an image part with
+    inline data becomes a reference string (its key if unused, else the smallest
+    unused ``image<n>``); a text part becomes its text; any other part is an error.
+    """
+    if not _contains_part(state):
+        return state, []
+    used: set[str] = set()
+    images: list[_LiftedImage] = []
+
+    def next_ref() -> str:
+        n = 1
+        while f"image{n}" in used:
+            n += 1
+        return f"image{n}"
+
+    def walk(v: Any, key: str) -> Any:
+        if _is_part(v):
+            if v.type == "text":
+                return v.text or ""
+            if v.type == "image":
+                if not v.data:
+                    raise ClassifierError(
+                        "classifier: state: an image part needs inline data (a URL image cannot be sent)"
+                    )
+                ref = key if key and key not in used else next_ref()
+                used.add(ref)
+                images.append(_LiftedImage(ref=ref, format=v.mimeType or "", data=v.data))
+                return ref
+            raise ClassifierError(f"classifier: state: {v.type} parts are not supported")
+        if isinstance(v, Mapping):
+            return {k: walk(v[k], k) for k in sorted(v)}
+        if isinstance(v, (list, tuple)):
+            return [walk(e, "") for e in v]
+        return v
+
+    return walk(state, ""), images
+
+
+_IMAGE_FORMATS = {"image/png": "png", "image/jpeg": "jpeg", "image/jpg": "jpeg"}
+
+
+def _check_images(images: list[_LiftedImage]) -> None:
+    """Format, per-image and per-request limits, in collection order; normalises
+    ``format`` in place. Errors name the reference. Never resizes."""
+    total = 0
+    for im in images:
+        fmt = _IMAGE_FORMATS.get(im.format)
+        if fmt is None:
+            raise ClassifierError(
+                f'classifier: image "{im.ref}": type "{im.format}" is not supported (PNG or JPEG only)'
+            )
+        im.format = fmt
+        try:
+            raw = base64.b64decode(im.data, validate=True)
+        except Exception:  # noqa: BLE001
+            raise ClassifierError(f'classifier: image "{im.ref}": data is not base64') from None
+        if len(raw) > CLASSIFIER_IMAGE_MAX_BYTES:
+            raise ClassifierError(f'classifier: image "{im.ref}": {len(raw)} bytes, over 16 MiB')
+        size = _image_size(fmt, raw)
+        if size is None:
+            raise ClassifierError(f'classifier: image "{im.ref}": not a readable {fmt.upper()}')
+        w, h = size
+        lo, hi = CLASSIFIER_IMAGE_MIN_SIDE, CLASSIFIER_IMAGE_MAX_SIDE
+        if not (lo <= w <= hi and lo <= h <= hi):
+            raise ClassifierError(f'classifier: image "{im.ref}": {w}x{h}; each side must be {lo}..{hi} px')
+        total += len(raw)
+    if total > CLASSIFIER_REQUEST_IMAGE_BYTES:
+        raise ClassifierError(
+            f'classifier: image "{images[-1].ref}": request images total {total} bytes, over 32 MiB'
+        )
+
+
+def _image_size(fmt: str, b: bytes) -> Optional[tuple[int, int]]:
+    """Width/height from a PNG IHDR or the first JPEG SOF marker; ``None`` when
+    the bytes are not a readable header of that format."""
+    if fmt == "png":
+        if len(b) < 24 or b[:8] != b"\x89PNG\r\n\x1a\n" or b[12:16] != b"IHDR":
+            return None
+        return int.from_bytes(b[16:20], "big"), int.from_bytes(b[20:24], "big")
+    if len(b) < 4 or b[0] != 0xFF or b[1] != 0xD8:
+        return None
+    i = 2
+    while i + 3 < len(b):
+        if b[i] != 0xFF:
+            return None
+        m = b[i + 1]
+        if m == 0xFF:  # fill byte
+            i += 1
+            continue
+        if 0xC0 <= m <= 0xCF and m not in (0xC4, 0xC8, 0xCC):
+            if i + 8 >= len(b):
+                return None
+            return (b[i + 7] << 8) | b[i + 8], (b[i + 5] << 8) | b[i + 6]
+        i += 2 + ((b[i + 2] << 8) | b[i + 3])
+    return None
+
+
+# The Decisions API wire (SPEC §8B "Decisions wire", issue #157). OpenAI's POST
+# /v1/decisions takes the same three question kinds under other names (predicate
+# / choice / score) as an ORDERED LIST and answers in that order. These map a §8B
+# question set onto that list and read the answers back into a System One-shaped
+# body, so decode, validation and the cache stay one path.
+
+#: The Decisions API's per-request question cap.
+MAX_DECISIONS_QUESTIONS = 400
+_MAX_DECISIONS_CHOICES = 255
+
+
+def _decisions_questions(backend: str, model: str, questions: Mapping[str, Question]) -> list[dict[str, Any]]:
+    """The question list, in ASCII key order. Caller keys are NOT sent: they are
+    addressing, not content. Every check fires before any request."""
+    if len(questions) > MAX_DECISIONS_QUESTIONS:
+        raise ClassifierError(
+            f"classifier: the decisions wire takes at most {MAX_DECISIONS_QUESTIONS} questions, got {len(questions)}"
+        )
+    out: list[dict[str, Any]] = []
+    for k in sorted(questions):
+        q = questions[k]
+        if isinstance(q, NoulQuestion):
+            instr = q.instructions
+            if q.criteria is not None:
+                instr += f"\n\nTrue means: {q.criteria.true}\nFalse means: {q.criteria.false}"
+            out.append({"type": "predicate", "instructions": instr})
+        elif isinstance(q, ChoiceQuestion):
+            if len(q.criteria) < 2:
+                raise ClassifierError(
+                    f'classifier: question "{k}": the decisions wire needs 2..{_MAX_DECISIONS_CHOICES} '
+                    f"choice options, got {len(q.criteria)}"
+                )
+            choices: list[dict[str, Any]] = []
+            for cid in sorted(q.criteria):
+                c: dict[str, Any] = {"value": cid}
+                if q.criteria[cid]:
+                    c["description"] = q.criteria[cid]
+                choices.append(c)
+            out.append({"type": "choice", "instructions": q.instructions, "choices": choices})
+        elif isinstance(q, ScoreQuestion):
+            levels = [{"label": lv} for lv in q.criteria]
+            out.append({"type": "score", "instructions": q.instructions, "levels": levels})
+        elif isinstance(q, RawQuestion):
+            raise ClassifierUnsupported(backend, model, f'raw question type "{q.type}"')
+        else:
+            raise ClassifierError(f'classifier: question "{k}": unsupported question')
+    return out
+
+
+def _decisions_input(state: Any, images: Optional[Sequence["_LiftedImage"]]) -> Any:
+    """A string state verbatim, any other state as its canonical JSON text; with
+    images, one user message holding that text then the images as data URLs."""
+    txt = state if isinstance(state, str) else canonical_json(state).decode("utf-8")
+    if not images:
+        return txt
+    content: list[dict[str, Any]] = [{"type": "input_text", "text": txt}]
+    for im in images:
+        content.append({"type": "input_image", "image_url": f"data:image/{im.format};base64,{im.data}"})
+    return [{"role": "user", "content": content}]
+
+
+def _decisions_value(v: Any) -> str:
+    """A choice value or level index as the §8B key: a string as written, a bool
+    as ``true``/``false``, a number in its shortest form."""
+    if isinstance(v, str):
+        return v
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    if isinstance(v, float) and v.is_integer():
+        return str(int(v))
+    return str(v)
+
+
+def _num(v: Any) -> Any:
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        return 0
+    return v
+
+
+def _decisions_reply(reply: Any, questions: Mapping[str, Question]) -> bytes:
+    """A Decisions API reply as a System One-shaped body (canonical JSON).
+    ``calibrated`` is False: a Decisions model is not a System One model."""
+    malformed = ClassifierError("classifier: decisions: malformed reply")
+    if not isinstance(reply, dict) or not isinstance(reply.get("answers"), list):
+        raise malformed
+    keys = sorted(questions)
+    got = reply["answers"]
+    if len(got) != len(keys):
+        raise ClassifierError(f"classifier: decisions: {len(got)} answers for {len(keys)} questions")
+    want_type = {"noul": "predicate", "choice": "choice", "score": "score"}
+    answers: dict[str, Any] = {}
+    for k, a in zip(keys, got):
+        if not isinstance(a, dict):
+            raise malformed
+        t = a.get("type")
+        if t == "refusal":
+            raise ClassifierError(f'classifier: decisions: question "{k}" was refused')
+        q = questions[k]
+        want = want_type.get(getattr(q, "type", ""), "")
+        if t != want:
+            raise ClassifierError(f'classifier: decisions: answer "{k}" is a {t} answer, not {want}')
+        probs = {
+            _decisions_value(p.get("value")): _num(p.get("probability"))
+            for p in (a.get("probabilities") or [])
+            if isinstance(p, dict)
+        }
+        if isinstance(q, NoulQuestion):
+            answers[k] = {"type": "noul", "noul": _num(a.get("probability"))}
+        elif isinstance(q, ChoiceQuestion):
+            answers[k] = {"type": "choice", "choice": _decisions_value(a.get("choice")),
+                          "probabilities": probs, "confidence": _num(a.get("confidence"))}
+        elif isinstance(q, ScoreQuestion):
+            answers[k] = {"type": "score", "score": _num(a.get("score")),
+                          "legend": {str(i): lv for i, lv in enumerate(q.criteria)},
+                          "probabilities": probs, "confidence": _num(a.get("confidence"))}
+    usage = reply.get("usage") if isinstance(reply.get("usage"), dict) else {}
+    model = reply.get("model")
+    return canonical_json({
+        "answers": answers,
+        "calibrated": False,
+        "model": model if isinstance(model, str) else "",
+        "usage": {"input_tokens": int(_num(usage.get("input_tokens"))),
+                  "output_tokens": int(_num(usage.get("output_tokens")))},
+    })
+
+
+def _cloudflare_cause(env: Any) -> str:
+    """``": <code> <message>"`` from ``errors[0]`` of a failed envelope (SPEC §8B).
+    Cloudflare reports a missing balance, a bad model id and a malformed request
+    alike as HTTP 200 with ``success:false``, so this is the only thing that tells
+    them apart. ``""`` when there is nothing to show."""
+    errs = env.get("errors") if isinstance(env, Mapping) else None
+    if not isinstance(errs, list) or not errs or not isinstance(errs[0], Mapping):
+        return ""
+    code, msg = errs[0].get("code"), errs[0].get("message")
+    parts = []
+    if code is not None and not isinstance(code, (bool, dict, list)) and str(code) != "":
+        parts.append(str(code))
+    if isinstance(msg, str) and msg:
+        parts.append(msg)
+    text = capped_error_body(200, " ".join(parts))
+    return ": " + text if text else ""
+
+
+def _unwrap_cloudflare(env: Any) -> Any:
+    """The System One reply inside a Cloudflare ``/ai/run`` envelope. A failed
+    envelope surfaces only ``errors[0]`` as ``<code> <message>``, through the same
+    redaction and cap as :func:`_cause` (it can carry an account id)."""
+    if not isinstance(env, Mapping) or env.get("success") is not True:
+        raise ClassifierError("classifier: cloudflare: envelope not successful" + _cloudflare_cause(env))
+    res = env.get("result")
+    if isinstance(res, Mapping) and isinstance(res.get("state"), str):
+        if res["state"] != "Completed":
+            raise ClassifierError(f'classifier: cloudflare: run state "{res["state"]}"')
+        res = res.get("result")
+    return res
+
+
+# --------------------------------------------------------------------------- #
+# Cache
+# --------------------------------------------------------------------------- #
+
+
+class ClassifierCache(Protocol):
+    """An injected answer cache (§8B). Values are opaque strings: the served model
+    under a model key, the System One reply body under a decision key. ``get``
+    returns ``None`` when absent. Either method may be sync or async."""
+
+    def get(self, key: str) -> Any: ...
+
+    def set(self, key: str, value: str) -> Any: ...
+
+
+class MemoryCache:
+    """In-process TTL cache with a size cap (oldest-inserted out first), safe for
+    concurrent use. ``ttl`` in seconds, ``0`` = no expiry; ``max`` ``0`` =
+    unbounded. toolnexus persists nothing itself."""
+
+    def __init__(self, ttl: float = 0, max: int = 0) -> None:  # noqa: A002 — the §8B name
+        self.ttl = ttl
+        self.max = max
+        self._lock = threading.Lock()
+        self._m: dict[str, tuple[str, float]] = {}  # insertion order = age
+        self._now: Callable[[], float] = time.monotonic
+
+    def get(self, key: str) -> Optional[str]:
+        with self._lock:
+            e = self._m.get(key)
+            if e is None:
+                return None
+            if self.ttl > 0 and self._now() - e[1] > self.ttl:
+                del self._m[key]
+                return None
+            return e[0]
+
+    def set(self, key: str, value: str) -> None:
+        with self._lock:
+            self._m.pop(key, None)  # a re-set counts as a fresh insertion
+            self._m[key] = (value, self._now())
+            while self.max > 0 and len(self._m) > self.max:
+                del self._m[next(iter(self._m))]
+
+
+def classifier_model_cache_key(endpoint: str, model: str) -> str:
+    """§8B model key: which model an endpoint+alias served last. ``endpoint`` is
+    the configured ``base_url``, ``${ENV}`` unexpanded."""
+    b = canonical_json({"endpoint": endpoint, "kind": "model", "model": model})
+    return hashlib.sha256(b).hexdigest()
+
+
+def classifier_decision_cache_key(
+    endpoint: str,
+    served_model: str,
+    state: Any,
+    assets: Optional[Mapping[str, Any]],
+    questions: Mapping[str, Question],
+) -> str:
+    """§8B decision key, on the SERVED model. Empty/``None`` assets ⇒ the
+    ``assets`` member is omitted."""
+    m: dict[str, Any] = {
+        "endpoint": endpoint,
+        "kind": "decision",
+        "model": served_model,
+        "questions": {k: _question_wire(k, q) for k, q in questions.items()},
+        "state": state,
+    }
+    if assets:
+        m["assets"] = dict(assets)
+    return hashlib.sha256(canonical_json(m)).hexdigest()
+
+
+# --------------------------------------------------------------------------- #
+# V1 / T1 / C1
+# --------------------------------------------------------------------------- #
+
+
+def _question_type(q: Question) -> str:
+    return q.type
+
+
+def validate_decision(questions: Mapping[str, Question], decision: Decision) -> Optional[ClassifierError]:
+    """Fail closed on a reply that does not answer exactly the questions asked,
+    within their schema (ADR 0038 V1). Returns the FIRST failure in the §8B order,
+    or ``None`` when valid. Every message starts ``classifier: invalid decision: ``."""
+
+    def bad(msg: str) -> ClassifierError:
+        return ClassifierError("classifier: invalid decision: " + msg)
+
+    def in01(p: float) -> bool:
+        return not math.isnan(p) and 0 <= p <= 1
+
+    answers = decision.answers
+    keys = sorted(questions)
+    for k in keys:
+        if k not in answers:
+            return bad(f'no answer "{k}"')
+    extra = sorted(k for k in answers if k not in questions)
+    if extra:
+        return bad(f'unexpected answer "{extra[0]}"')
+
+    def dist(k: str, probs: Mapping[str, float], offered: Callable[[str], bool]) -> Optional[ClassifierError]:
+        total = 0.0
+        for o in sorted(probs):
+            if not offered(o):
+                return bad(f'answer "{k}": probability for "{o}", which was not offered')
+            if not in01(probs[o]):
+                return bad(f'answer "{k}": probability {probs[o]} outside [0,1]')
+            total += probs[o]
+        if probs and abs(total - 1) > 0.02:
+            return bad(f'answer "{k}": probabilities sum to {total:.4f}')
+        return None
+
+    for k in keys:
+        q, a = questions[k], answers[k]
+        qt = _question_type(q)
+        if a.type != qt:
+            return bad(f'answer "{k}" is a {a.type} answer, not {qt}')
+        if isinstance(a, NoulAnswer):
+            if not in01(a.noul):
+                return bad(f'answer "{k}": noul {a.noul} outside [0,1]')
+        elif isinstance(a, ChoiceAnswer):
+            crit = q.criteria if isinstance(q, ChoiceQuestion) else {}
+            offered = crit.__contains__
+            if not offered(a.choice):
+                return bad(f'answer "{k}": choice "{a.choice}" was not offered')
+            err = dist(k, a.probabilities, offered)
+            if err is not None:
+                return err
+            if not in01(a.confidence):
+                return bad(f'answer "{k}": confidence {a.confidence} outside [0,1]')
+        elif isinstance(a, ScoreAnswer):
+            n = len(q.criteria) if isinstance(q, ScoreQuestion) else 0
+            if math.isnan(a.score) or a.score < 0 or a.score > n - 1:
+                return bad(f'answer "{k}": score {a.score} outside [0,{n - 1}]')
+            levels = {str(i) for i in range(n)}
+            err = dist(k, a.probabilities, levels.__contains__)
+            if err is not None:
+                return err
+            if not in01(a.confidence):
+                return bad(f'answer "{k}": confidence {a.confidence} outside [0,1]')
+    return None
+
+
+@dataclass(frozen=True)
+class Thresholds:
+    """jevx's INCLUSIVE cut-points (ADR 0038 T1), alongside the exclusive
+    :class:`toolnexus.judge.Bands`, which stays the default of ``ask``/``gate``."""
+
+    yes: float = 0.8
+    no: float = 0.2
+    min_confidence: float = 0.6
+
+    def band(self, answer: DecisionAnswer) -> str:
+        """noul ``p >= yes`` ⇒ yes, ``p <= no`` ⇒ no, else uncertain; choice/score
+        ``confidence >= min_confidence`` ⇒ yes, else uncertain (no near-uniform
+        demotion). A raw answer is uncertain."""
+        if isinstance(answer, NoulAnswer):
+            if answer.noul >= self.yes:
+                return "yes"
+            if answer.noul <= self.no:
+                return "no"
+        elif isinstance(answer, (ChoiceAnswer, ScoreAnswer)):
+            if answer.confidence >= self.min_confidence:
+                return "yes"
+        return "uncertain"
+
+
+#: 0.8 / 0.2 / 0.6 (jevx's builtin profile).
+DEFAULT_THRESHOLDS = Thresholds()
+
+
+def chunk_questions(questions: Mapping[str, Question], size: int) -> list[dict[str, Question]]:
+    """Split a question set into chunks of ``size``, keys in ASCII order. A helper,
+    not automatic: joint calibration across a split is unproven (§8B)."""
+    if size < 1:
+        raise ClassifierError(f"classifier: chunk size must be at least 1, got {size}")
+    keys = sorted(questions)
+    return [{k: questions[k] for k in keys[i : i + size]} for i in range(0, len(keys), size)]
+
+
+# --------------------------------------------------------------------------- #
+# Value builders
+# --------------------------------------------------------------------------- #
+
+#: At most this many states in flight in :meth:`ClassifierStates.evaluate`.
+_STATES_CONCURRENCY = 16
+
+
+def _named_questions(qs: Sequence[tuple[str, Question]]) -> dict[str, Question]:
+    out: dict[str, Question] = {}
+    for name, q in qs:
+        if name in out:
+            raise ClassifierError(f'duplicate question name "{name}"')
+        out[name] = q
+    return out
+
+
+@dataclass
+class BatchResult:
+    """One state's outcome: exactly one of ``decision`` / ``error`` is set."""
+
+    decision: Optional[Decision] = None
+    error: Optional[BaseException] = None
+
+
+class ClassifierState:
+    """A bound state — a VALUE, not a session: nothing is sent until :meth:`evaluate`."""
+
+    def __init__(self, classifier: Classifier, value: Any) -> None:
+        self.classifier = classifier
+        self.value = value
+
+    async def evaluate(self, *qs: tuple[str, Question]) -> Decision:
+        """Ask the named questions (``judge.noul(...)`` etc.) in one request, and
+        validate the reply fail-closed (:func:`validate_decision`)."""
+        return await self.classifier._evaluate(self.value, _named_questions(qs), True)
+
+
+class ClassifierStates:
+    """A batch of bound states."""
+
+    def __init__(self, classifier: Classifier, values: list[Any]) -> None:
+        self.classifier = classifier
+        self.values = values
+
+    async def evaluate(self, *qs: tuple[str, Question]) -> list[BatchResult]:
+        """``state(v).evaluate`` per state, at most 16 in flight, one result per state
+        in order. One state's failure never fails the batch; only a question-set
+        error (duplicate name) raises, before any request."""
+        questions = _named_questions(qs)
+        if not self.values:
+            return []
+        sem = asyncio.Semaphore(_STATES_CONCURRENCY)
+
+        async def one(v: Any) -> BatchResult:
+            async with sem:
+                try:
+                    return BatchResult(decision=await self.classifier._evaluate(v, questions, True))
+                except Exception as e:  # noqa: BLE001 — carried per item
+                    return BatchResult(error=e)
+
+        return list(await asyncio.gather(*(one(v) for v in self.values)))

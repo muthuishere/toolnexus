@@ -5,9 +5,9 @@ description: Every tool source — MCP servers, agent skills, your own functions
 
 import { Aside } from '@astrojs/starlight/components';
 
-The insight toolnexus is built on: **MCP server tools, agent skills, your own functions, remote
+The insight Toolnexus is built on: **MCP server tools, agent skills, your own functions, remote
 HTTP endpoints, the built-in shell/file tools, remote A2A agents, and in-process sub-agents are
-the same thing to an LLM** — a named, described, schema'd callable. toolnexus unifies every source
+the same thing to an LLM** — a named, described, schema'd callable. Toolnexus unifies every source
 behind one `Tool` interface, emits the schema in OpenAI / Anthropic / Gemini formats, and drives
 any model with them.
 
@@ -34,14 +34,14 @@ context and tokens rolled up.
 
 The unified client ships a built-in tool-calling loop: system prompt, skills injection into the
 prompt, parallel **and** chained tool calls, hooks (before/after tool), streaming, retries,
-conversation memory, and observability metrics. You bring a model endpoint; toolnexus runs the
+conversation memory, and observability metrics. You bring a model endpoint; Toolnexus runs the
 conversation.
 
 ## Inbound, too
 
-toolnexus is not only a consumer of tools — `toolkit.serve(addr, …)` exposes *your* toolkit to
+Toolnexus is not only a consumer of tools — `toolkit.serve(addr, …)` exposes *your* toolkit to
 the outside world as a remote **A2A agent**: an Agent Card plus JSON-RPC over the same client
-loop. Your toolkit becomes something another toolnexus (in any of the eight languages) can call as
+loop. Your toolkit becomes something another Toolnexus (in any of the eight languages) can call as
 a tool.
 
 <Aside type="tip">

@@ -8,8 +8,11 @@ from __future__ import annotations
 from .acp import (
     ACPClient,
     ACPError,
+    ACPExitedError,
+    ACPLaunchError,
     ACPOptions,
     ACPPermissionTimeoutError,
+    ACPCancelledError,
     load_acp,
 )
 from .a2a import (
@@ -41,6 +44,7 @@ from .translate import TranslatedToolCall, TranslateResult
 from .client import (
     Client,
     ClientStyle,
+    ContextOverflowError,
     Conversation,
     WaitFor,
     ConversationStore,
@@ -61,8 +65,27 @@ from .client import (
     UrllibTransport,
     create_client,
     create_in_process_client,
+    is_context_overflow,
 )
 from .classifier import (
+    BatchResult,
+    CLASSIFIER_BACKENDS,
+    ClassifierBackendPreset,
+    ClassifierCache,
+    ClassifierState,
+    ClassifierStates,
+    ClassifierSupports,
+    ClassifierUnsupported,
+    DEFAULT_THRESHOLDS,
+    IMAGES_HEADER,
+    MemoryCache,
+    RawAnswer,
+    RawQuestion,
+    Thresholds,
+    chunk_questions,
+    classifier_decision_cache_key,
+    classifier_model_cache_key,
+    validate_decision,
     ChoiceAnswer,
     ChoiceQuestion,
     Classifier,
@@ -104,6 +127,7 @@ from .judge import (
     noul,
     question_from_wire,
     questions,
+    raw,
     score,
     state,
     static_classifier,
@@ -138,6 +162,7 @@ from .builtin import (
 from .http import DEFAULT_TIMEOUT as HTTP_DEFAULT_TIMEOUT
 from .http import http_tool
 from .native import define_tool, tool
+from .transcript_search import TRANSCRIPT_SEARCH_DESCRIPTION, transcript_search_tool
 from .media import (
     Media,
     MediaError,
@@ -188,17 +213,50 @@ from .mcp_source import (
     OnServer,
     mcp_hints,
 )
+from .mcp2026 import MemoryTokenStore, Token, TokenStore
 from .builtin_extras import BackgroundShellInfo, BackgroundShells, WebSearchResult
 from .client import ModelInfo, list_models
 from .prompt_cache import PromptCacheOptions
 from .tool_tiers import TIER_CORE, TIER_DEFERRED, TIER_LISTED, ToolTier, ToolTierOptions
 from .tool_concurrency import DEFAULT_MAX_TOOL_CONCURRENCY, is_concurrency_safe, resolve_max_tool_concurrency
 from .mcp_serve import (
+    LoopbackMCPServer,
     MCPServeConfig,
     OnCall,
     build_mcp_server,
     exposed_mcp_tools,
 )
+from .mcp_handler import (
+    MCP_ALLOW,
+    MCP_CONFIRM,
+    MCP_DENY,
+    MCP_HANDLER_IMPLEMENTED_VERSIONS,
+    MCP_PROTOCOL_2026,
+    MCP_SKILLS_EXTENSION,
+    McpAuthError,
+    McpCallEvent,
+    McpContext,
+    McpDecision,
+    McpHandler,
+    McpHandlerConfig,
+    McpPrompt,
+    McpPromptArgument,
+    McpPromptMessage,
+    McpPromptResult,
+    McpRequest,
+    McpResource,
+    McpResourceContent,
+    McpServerInfo,
+    McpSessionIds,
+    McpSkill,
+    McpSkillFile,
+    identity_from,
+    load_mcp_skills,
+    mcp_request_meta_from,
+    mcp_session_id_from,
+    request_from,
+)
+from .mcp_server_auth import McpPrincipal, McpServerAuth
 from .serve import (
     A2AConfig,
     FileTaskStore,
@@ -217,6 +275,7 @@ from .skill import (
     SkillInfo,
     SkillInventory,
     SkillSkip,
+    SkillWarning,
     SkillSource,
     list_skills,
     load_skills,
@@ -228,6 +287,7 @@ from .types import (
     McpStatus,
     Request,
     Tool,
+    ToolAnnotations,
     ToolContext,
     ToolHints,
     ToolResult,
@@ -241,6 +301,38 @@ from .types import (
 )
 
 __all__ = [
+    # embeddable MCP handler (SPEC §7C.1)
+    "MCP_ALLOW",
+    "MCP_CONFIRM",
+    "MCP_DENY",
+    "MCP_HANDLER_IMPLEMENTED_VERSIONS",
+    "MCP_PROTOCOL_2026",
+    "MCP_SKILLS_EXTENSION",
+    "McpAuthError",
+    "McpPrincipal",
+    "McpServerAuth",
+    "McpSkill",
+    "McpSkillFile",
+    "load_mcp_skills",
+    "McpCallEvent",
+    "McpContext",
+    "McpDecision",
+    "McpHandler",
+    "McpHandlerConfig",
+    "McpPrompt",
+    "McpPromptArgument",
+    "McpPromptMessage",
+    "McpPromptResult",
+    "McpRequest",
+    "McpResource",
+    "McpResourceContent",
+    "McpServerInfo",
+    "McpSessionIds",
+    "ToolAnnotations",
+    "identity_from",
+    "mcp_request_meta_from",
+    "mcp_session_id_from",
+    "request_from",
     # media generation (SPEC §7G)
     "Media",
     "MediaError",
@@ -292,6 +384,9 @@ __all__ = [
     "ACPError",
     "ACPOptions",
     "ACPPermissionTimeoutError",
+    "ACPCancelledError",
+    "ACPExitedError",
+    "ACPLaunchError",
     "load_acp",
     # types
     "JSONSchema",
@@ -342,6 +437,10 @@ __all__ = [
     "parse_mcp_config",
     "elicitation_to_request",
     "answer_to_elicit_result",
+    # mcp oauth (§2A.1a)
+    "MemoryTokenStore",
+    "Token",
+    "TokenStore",
     # skill
     "SKILL_TOOL_DESCRIPTION",
     "SKILLS_PROMPT_PREAMBLE",
@@ -349,6 +448,7 @@ __all__ = [
     "SkillInfo",
     "SkillInventory",
     "SkillSkip",
+    "SkillWarning",
     "SkillSource",
     "list_skills",
     "load_skills",
@@ -370,6 +470,8 @@ __all__ = [
     # native tools
     "tool",
     "define_tool",
+    "TRANSCRIPT_SEARCH_DESCRIPTION",
+    "transcript_search_tool",
     # http tools
     "http_tool",
     "HTTP_DEFAULT_TIMEOUT",
@@ -392,6 +494,7 @@ __all__ = [
     "OnTask",
     # mcp serve (inbound)
     "MCPServeConfig",
+    "LoopbackMCPServer",
     "OnCall",
     "build_mcp_server",
     "exposed_mcp_tools",
@@ -416,6 +519,8 @@ __all__ = [
     "RunResult",
     "RunTimeout",
     "WaitFor",
+    "ContextOverflowError",
+    "is_context_overflow",
     "create_client",
     "create_in_process_client",
     # typed decisions (SPEC.md §8B)
@@ -440,6 +545,24 @@ __all__ = [
     "canonical_request",
     "choice_over",
     "create_classifier",
+    "BatchResult",
+    "CLASSIFIER_BACKENDS",
+    "ClassifierBackendPreset",
+    "ClassifierCache",
+    "ClassifierState",
+    "ClassifierStates",
+    "ClassifierSupports",
+    "ClassifierUnsupported",
+    "DEFAULT_THRESHOLDS",
+    "IMAGES_HEADER",
+    "MemoryCache",
+    "RawAnswer",
+    "RawQuestion",
+    "Thresholds",
+    "chunk_questions",
+    "classifier_decision_cache_key",
+    "classifier_model_cache_key",
+    "validate_decision",
     "near_uniform",
     "question_wire",
     "questions_wire",
@@ -479,6 +602,7 @@ __all__ = [
     "question_from_wire",
     "questions",
     "score",
+    "raw",
     "state",
     "static_classifier",
 ]

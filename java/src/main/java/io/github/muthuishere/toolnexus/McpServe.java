@@ -117,13 +117,15 @@ public final class McpServe {
     }
 
     /** Convert a uniform {@link Tool} into an SDK {@link McpSchema.Tool} (name verbatim). */
-    private static McpSchema.Tool toMcpTool(Tool t) {
+    static McpSchema.Tool toMcpTool(Tool t) {
         Map<String, Object> schema = t.inputSchema() == null ? new LinkedHashMap<>() : t.inputSchema();
-        return McpSchema.Tool.builder()
+        McpSchema.Tool.Builder b = McpSchema.Tool.builder()
                 .name(t.name())
                 .description(t.description() == null ? "" : t.description())
-                .inputSchema(schema)
-                .build();
+                .inputSchema(schema);
+        // SPEC §1: outputSchema rides along only when the tool sets one (absent ⇒ byte-identical).
+        if (t.outputSchema() != null) b.outputSchema(t.outputSchema());
+        return b.build();
     }
 
     /**
@@ -142,6 +144,7 @@ public final class McpServe {
             String msg = e.getMessage() == null ? String.valueOf(e) : e.getMessage();
             result = ToolResult.error(msg);
         }
+        if (result == null) result = ToolResult.ok("");
         if (onCall != null) {
             try {
                 onCall.accept(new OnCallEvent(tool.name(), tool.source(),
@@ -150,9 +153,22 @@ public final class McpServe {
                 // Host callback errors are isolated.
             }
         }
+        return toCallToolResult(result);
+    }
+
+    /**
+     * Map a {@link ToolResult} to the SDK {@link McpSchema.CallToolResult}: output → text part (the
+     * JSON of {@code structured} when output is empty), {@code structured} → structuredContent,
+     * {@code meta} → _meta (both omitted when absent), then §1B parts.
+     */
+    static McpSchema.CallToolResult toCallToolResult(ToolResult result) {
+        String text = result.output();
+        if (result.structured() != null && text.isEmpty()) text = Json.stringify(result.structured());
         McpSchema.CallToolResult.Builder out = McpSchema.CallToolResult.builder()
-                .addTextContent(result.output())
+                .addTextContent(text)
                 .isError(result.isError());
+        if (result.structured() != null) out.structuredContent(result.structured());
+        if (result.meta() != null) out.meta(result.meta());
         // §1B parts ride back out as native MCP content blocks, appended after the text part in
         // order: image ⇒ image content, audio ⇒ audio content, file ⇒ an embedded resource.
         if (result.parts() != null) {
@@ -223,6 +239,82 @@ public final class McpServe {
         return spec.build();
     }
 
+    /**
+     * A running {@link Toolkit#asMcpServer} endpoint (SPEC §8C): {@code url} is
+     * {@code http://127.0.0.1:<port>/mcp}; every request must carry
+     * {@code Authorization: Bearer <token>}. {@link #close()} is idempotent. The token is never logged.
+     */
+    public static final class LocalServer implements AutoCloseable {
+        private final String url;
+        private final String token;
+        private final com.sun.net.httpserver.HttpServer http;
+        private final java.util.concurrent.ExecutorService executor;
+        private final java.util.concurrent.atomic.AtomicBoolean closed = new java.util.concurrent.atomic.AtomicBoolean();
+
+        private LocalServer(String url, String token, com.sun.net.httpserver.HttpServer http,
+                            java.util.concurrent.ExecutorService executor) {
+            this.url = url;
+            this.token = token;
+            this.http = http;
+            this.executor = executor;
+        }
+
+        public String url() { return url; }
+        public String token() { return token; }
+
+        @Override
+        public void close() {
+            if (!closed.compareAndSet(false, true)) return;
+            http.stop(0);
+            executor.shutdownNow();
+        }
+
+        @Override
+        public String toString() { return "McpServe.LocalServer[url=" + url + "]"; }
+    }
+
+    /** Serves {@code tools} on loopback behind a fresh bearer token — {@link Toolkit#asMcpServer}. */
+    static LocalServer serveLocal(List<Tool> tools, MCPServeConfig cfg) throws IOException {
+        JdkStatelessHttpTransport transport = new JdkStatelessHttpTransport();
+        buildStatelessServer(transport, exposedMcpTools(tools, cfg), cfg, null);
+        byte[] raw = new byte[32];
+        new java.security.SecureRandom().nextBytes(raw);
+        String token = java.util.HexFormat.of().formatHex(raw);
+        byte[] want = ("Bearer " + token).getBytes(StandardCharsets.UTF_8);
+        var http = com.sun.net.httpserver.HttpServer.create(
+                new java.net.InetSocketAddress(java.net.InetAddress.getLoopbackAddress(), 0), 0);
+        http.createContext("/", ex -> {
+            try {
+                if (!"/mcp".equals(ex.getRequestURI().getPath())) {
+                    ex.sendResponseHeaders(404, -1);
+                    return;
+                }
+                String got = ex.getRequestHeaders().getFirst("Authorization");
+                if (got == null || !java.security.MessageDigest.isEqual(got.getBytes(StandardCharsets.UTF_8), want)) {
+                    byte[] body = "unauthorized\n".getBytes(StandardCharsets.UTF_8);
+                    ex.getResponseHeaders().set("WWW-Authenticate", "Bearer");
+                    ex.getResponseHeaders().set("Content-Type", "text/plain; charset=utf-8");
+                    ex.sendResponseHeaders(401, body.length);
+                    try (OutputStream os = ex.getResponseBody()) {
+                        os.write(body);
+                    }
+                    return;
+                }
+                transport.handle(ex);
+            } finally {
+                ex.close();
+            }
+        });
+        var executor = java.util.concurrent.Executors.newCachedThreadPool(r -> {
+            Thread t = new Thread(r, "toolnexus-local-mcp");
+            t.setDaemon(true);
+            return t;
+        });
+        http.setExecutor(executor);
+        http.start();
+        return new LocalServer("http://127.0.0.1:" + http.getAddress().getPort() + "/mcp", token, http, executor);
+    }
+
     // -----------------------------------------------------------------------
     // streamable-HTTP transport shim — bridges the JDK HttpServer to the SDK's
     // stateless MCP handler (the SDK's own HTTP transports are servlet-based;
@@ -253,6 +345,7 @@ public final class McpServe {
             String method = exchange.getRequestMethod();
             if (!"POST".equals(method)) {
                 // Stateless: no standalone SSE stream. Matches the SDK servlet's doGet → 405.
+                exchange.getResponseHeaders().set("Allow", "POST");
                 sendText(exchange, 405, "");
                 return;
             }

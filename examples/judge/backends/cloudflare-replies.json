@@ -1,0 +1,205 @@
+{
+  "why": "The Cloudflare /ai/run envelope and its nested run-state unwrap. A failed envelope surfaces errors[0] as '<code> <message>' through the §8B cause policy (account identifiers redacted, 200-char cap); nothing else of the envelope is echoed.",
+  "questions": {
+    "q": {
+      "instructions": "Is the object red?",
+      "type": "noul"
+    }
+  },
+  "cases": [
+    {
+      "name": "flat",
+      "reply": {
+        "success": true,
+        "result": {
+          "model": "jev-1.13.0",
+          "answers": {
+            "q": {
+              "type": "noul",
+              "noul": 0.91
+            }
+          },
+          "usage": {
+            "input_tokens": 10,
+            "output_tokens": 1
+          }
+        }
+      },
+      "expect": {
+        "model": "jev-1.13.0",
+        "noul": 0.91
+      }
+    },
+    {
+      "name": "nested-completed",
+      "reply": {
+        "success": true,
+        "result": {
+          "state": "Completed",
+          "result": {
+            "model": "jev-1.13.0",
+            "answers": {
+              "q": {
+                "type": "noul",
+                "noul": 0.91
+              }
+            },
+            "usage": {
+              "input_tokens": 10,
+              "output_tokens": 1
+            }
+          }
+        }
+      },
+      "expect": {
+        "model": "jev-1.13.0",
+        "noul": 0.91
+      }
+    },
+    {
+      "name": "nested-running",
+      "reply": {
+        "success": true,
+        "result": {
+          "state": "Running"
+        }
+      },
+      "expect": {
+        "error": "classifier: cloudflare: run state \"Running\""
+      }
+    },
+    {
+      "name": "no-success-field",
+      "reply": {
+        "result": {
+          "model": "jev-1.13.0",
+          "answers": {
+            "q": {
+              "type": "noul",
+              "noul": 0.91
+            }
+          },
+          "usage": {
+            "input_tokens": 10,
+            "output_tokens": 1
+          }
+        }
+      },
+      "expect": {
+        "error": "classifier: cloudflare: envelope not successful"
+      }
+    },
+    {
+      "name": "unsuccessful",
+      "reply": {
+        "success": false,
+        "errors": [
+          {
+            "code": 2021,
+            "message": "Insufficient balance"
+          }
+        ],
+        "result": null
+      },
+      "expect": {
+        "error": "classifier: cloudflare: envelope not successful: 2021 Insufficient balance"
+      }
+    },
+    {
+      "name": "unsuccessful-string-code",
+      "reply": {
+        "success": false,
+        "errors": [
+          {
+            "code": "7000",
+            "message": "No route for that URI"
+          },
+          {
+            "code": 1,
+            "message": "second is ignored"
+          }
+        ]
+      },
+      "expect": {
+        "error": "classifier: cloudflare: envelope not successful: 7000 No route for that URI"
+      }
+    },
+    {
+      "name": "unsuccessful-message-only",
+      "reply": {
+        "success": false,
+        "errors": [
+          {
+            "message": "bad model"
+          }
+        ]
+      },
+      "expect": {
+        "error": "classifier: cloudflare: envelope not successful: bad model"
+      }
+    },
+    {
+      "name": "unsuccessful-code-only",
+      "reply": {
+        "success": false,
+        "errors": [
+          {
+            "code": 9109
+          }
+        ]
+      },
+      "expect": {
+        "error": "classifier: cloudflare: envelope not successful: 9109"
+      }
+    },
+    {
+      "name": "unsuccessful-redacted",
+      "reply": {
+        "success": false,
+        "errors": [
+          {
+            "code": 7000,
+            "message": "rejected {\"account_id\": \"0123abcd\"} here"
+          }
+        ]
+      },
+      "expect": {
+        "error": "classifier: cloudflare: envelope not successful: 7000 rejected {\"account_id\": \"«redacted»\"} here"
+      }
+    },
+    {
+      "name": "unsuccessful-capped",
+      "reply": {
+        "success": false,
+        "errors": [
+          {
+            "code": 1,
+            "message": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+          }
+        ]
+      },
+      "expect": {
+        "error": "classifier: cloudflare: envelope not successful: 1 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx…"
+      }
+    },
+    {
+      "name": "unsuccessful-no-errors",
+      "reply": {
+        "success": false
+      },
+      "expect": {
+        "error": "classifier: cloudflare: envelope not successful"
+      }
+    },
+    {
+      "name": "unsuccessful-empty-errors",
+      "reply": {
+        "success": false,
+        "errors": []
+      },
+      "expect": {
+        "error": "classifier: cloudflare: envelope not successful"
+      }
+    }
+  ]
+}

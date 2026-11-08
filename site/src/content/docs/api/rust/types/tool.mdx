@@ -19,6 +19,8 @@ pub struct Tool {
     pub source: ToolSource,
     pub execute: ExecuteFn,
     pub hints: Option<ToolHints>,
+    pub output_schema: Option<Value>,          // §1, MCP outputSchema
+    pub annotations: Option<ToolAnnotations>,  // §7C.1
 }
 ```
 
@@ -56,6 +58,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         input_schema: empty_schema(),
         source: ToolSource::Custom,
         hints: None,
+        output_schema: None,
+        annotations: None,
         execute: Arc::new(|_args, _ctx| Box::pin(async { ToolResult::ok("pong") })),
     };
     // `call` passes a null args value through as `{}`.
@@ -126,6 +130,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             input_schema: json!({"type":"object","properties":{"id":{"type":"string"}}}),
             source: ToolSource::Custom,
             hints: None,
+            output_schema: None,
+            annotations: None,
             execute: Arc::new(move |args, ctx| {
                 Box::pin(async move {
                     if ctx.cancel.is_cancelled() {

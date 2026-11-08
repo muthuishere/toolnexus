@@ -18,6 +18,18 @@
 //                so a test can prove a session was opened once and the session/prompt count keeps
 //                climbing across calls made on the SAME AcpClient (warm session reuse).
 //
+// Conformance flags (conformance/acp-client/cases.json, SPEC §8C), read from the environment
+// and applied on top of any scenario:
+//   TN_FAKE_REC=<file>         append one JSON line {method, params} per received request
+//   TN_FAKE_REJECT_MODE=1      reject session/set_mode (-32602 "unknown mode")
+//   TN_FAKE_NO_CONFIG_OPTION=1 reject session/set_config_option (-32601) so set_model is used
+//   TN_FAKE_DRIP=1             on session/prompt: a thought, then three chunks 200ms apart
+//   TN_FAKE_TOOLUPDATE=1       on session/prompt: stream.acpToolUpdate's updates (tool_call, then
+//                              tool_call_updates carrying title/rawInput), a "done" chunk, end_turn
+//   TN_FAKE_EXIT_ON_PROMPT=1   on session/prompt: exit without replying
+//   TN_FAKE_FS_REQUEST=1       on session/prompt: send fs/read_text_file and wait for the answer;
+//                              reply "ok" iff it was a -32601 error
+//
 // Protocol subset implemented: initialize, session/new, session/set_mode, session/prompt
 // (request/response) and session/update, session/request_permission (server->client
 // notifications/requests interleaved on the SAME stream).
@@ -44,6 +56,8 @@ long promptN = 0;
 var historyLock = new object();
 var history = new List<string>();
 var permReplies = new ConcurrentDictionary<string, TaskCompletionSource<JsonElement>>();
+var recPath = Environment.GetEnvironmentVariable("TN_FAKE_REC");
+bool Flag(string name) => Environment.GetEnvironmentVariable(name) == "1";
 
 void Send(object value)
 {
@@ -176,8 +190,23 @@ void HandleNoisy(object id, string sessionId, string userText)
     static Dictionary<string, object?> Text(string t) => new() { ["type"] = "text", ["text"] = t };
 }
 
+void Chunk(string sessionId, string kind, string text) =>
+    SendNotification("session/update", new Dictionary<string, object?>
+    {
+        ["sessionId"] = sessionId,
+        ["update"] = new Dictionary<string, object?>
+        {
+            ["sessionUpdate"] = kind,
+            ["content"] = new Dictionary<string, object?> { ["type"] = "text", ["text"] = text },
+        },
+    });
+
 var stdin = Console.OpenStandardInput();
 using var reader = new StreamReader(stdin, Encoding.UTF8);
+
+object? cancelPendingId = null; // "cancel" scenario: the turn held open until session/cancel
+var cancelCount = 0;
+var cancelHadId = false;
 
 string? line;
 while ((line = await reader.ReadLineAsync().ConfigureAwait(false)) is not null)
@@ -197,13 +226,21 @@ while ((line = await reader.ReadLineAsync().ConfigureAwait(false)) is not null)
         {
             // A reply to one of OUR server-initiated requests (session/request_permission).
             var key = idEl.ValueKind == JsonValueKind.String ? idEl.GetString() ?? "" : idEl.GetRawText();
-            if (permReplies.TryRemove(key, out var tcs))
-                tcs.TrySetResult(root.Clone());
+            // GetOrAdd, not TryRemove: a fast client can answer before the scenario
+            // registers its waiter, and a dropped reply hangs the turn.
+            permReplies.GetOrAdd(key, _ => new TaskCompletionSource<JsonElement>(TaskCreationOptions.RunContinuationsAsynchronously))
+                .TrySetResult(root.Clone());
             continue;
         }
 
         if (!hasMethod) continue;
         var method = methodEl.GetString()!;
+        if (!string.IsNullOrEmpty(recPath))
+            File.AppendAllText(recPath, JsonSerializer.Serialize(new Dictionary<string, object?>
+            {
+                ["method"] = method,
+                ["params"] = root.TryGetProperty("params", out var recP) ? recP.Clone() : null,
+            }) + "\n");
 
         switch (method)
         {
@@ -221,11 +258,37 @@ while ((line = await reader.ReadLineAsync().ConfigureAwait(false)) is not null)
                 break;
 
             case "session/set_mode":
+                if (Flag("TN_FAKE_REJECT_MODE"))
+                    Send(new Dictionary<string, object?>
+                    {
+                        ["jsonrpc"] = "2.0", ["id"] = IdValue(idEl),
+                        ["error"] = new Dictionary<string, object?> { ["code"] = -32602, ["message"] = "unknown mode" },
+                    });
+                else Reply(IdValue(idEl), new Dictionary<string, object?>());
+                break;
+
+            case "session/set_config_option":
+                if (Flag("TN_FAKE_NO_CONFIG_OPTION"))
+                    Send(new Dictionary<string, object?>
+                    {
+                        ["jsonrpc"] = "2.0", ["id"] = IdValue(idEl),
+                        ["error"] = new Dictionary<string, object?> { ["code"] = -32601, ["message"] = "method not found" },
+                    });
+                else Reply(IdValue(idEl), new Dictionary<string, object?>());
+                break;
+
+            case "session/set_model":
                 Reply(IdValue(idEl), new Dictionary<string, object?>());
                 break;
 
             case "session/cancel":
-                Reply(IdValue(idEl), new Dictionary<string, object?>());
+                cancelCount++;
+                if (hasId) { cancelHadId = true; Reply(IdValue(idEl), new Dictionary<string, object?>()); }
+                if (cancelPendingId is { } held)
+                {
+                    cancelPendingId = null;
+                    Reply(held, new Dictionary<string, object?> { ["stopReason"] = "cancelled" });
+                }
                 break;
 
             case "session/prompt":
@@ -251,6 +314,65 @@ while ((line = await reader.ReadLineAsync().ConfigureAwait(false)) is not null)
                 }
 
                 var id = IdValue(idEl);
+                if (Flag("TN_FAKE_EXIT_ON_PROMPT"))
+                {
+                    outWriter.Flush();
+                    Environment.Exit(0);
+                }
+                if (Flag("TN_FAKE_DRIP"))
+                {
+                    _ = Task.Run(async () =>
+                    {
+                        Chunk(sessionId, "agent_thought_chunk", "pondering");
+                        var drips = new[] { "drip-1 ", "drip-2 ", "drip-3" };
+                        for (var i = 0; i < drips.Length; i++)
+                        {
+                            if (i > 0) await Task.Delay(200).ConfigureAwait(false);
+                            Chunk(sessionId, "agent_message_chunk", drips[i]);
+                        }
+                        Reply(id, new Dictionary<string, object?> { ["stopReason"] = "end_turn" });
+                    });
+                    break;
+                }
+                if (Flag("TN_FAKE_TOOLUPDATE"))
+                {
+                    var t1 = new[]
+                    {
+                        new Dictionary<string, object?> { ["sessionUpdate"] = "tool_call", ["toolCallId"] = "t1",
+                            ["title"] = "Write", ["kind"] = "edit", ["status"] = "pending" },
+                        new Dictionary<string, object?> { ["sessionUpdate"] = "tool_call_update", ["toolCallId"] = "t1",
+                            ["status"] = "in_progress", ["title"] = "Write /tmp/a.txt",
+                            ["rawInput"] = new Dictionary<string, object?> { ["file_path"] = "/tmp/a.txt", ["content"] = "hi" } },
+                        new Dictionary<string, object?> { ["sessionUpdate"] = "tool_call_update", ["toolCallId"] = "t1",
+                            ["status"] = "in_progress" },
+                        new Dictionary<string, object?> { ["sessionUpdate"] = "tool_call_update", ["toolCallId"] = "t1",
+                            ["status"] = "completed",
+                            ["content"] = new object[] { new Dictionary<string, object?> { ["type"] = "content",
+                                ["content"] = new Dictionary<string, object?> { ["type"] = "text", ["text"] = "wrote" } } } },
+                    };
+                    foreach (var u in t1)
+                        SendNotification("session/update", new Dictionary<string, object?> { ["sessionId"] = sessionId, ["update"] = u });
+                    Chunk(sessionId, "agent_message_chunk", "done");
+                    Reply(id, new Dictionary<string, object?> { ["stopReason"] = "end_turn" });
+                    break;
+                }
+                if (Flag("TN_FAKE_FS_REQUEST"))
+                {
+                    _ = Task.Run(async () =>
+                    {
+                        var reqId = SendRequest("fs/read_text_file", new Dictionary<string, object?>
+                        {
+                            ["sessionId"] = sessionId, ["path"] = "/etc/hosts",
+                        });
+                        var answer = await permReplies.GetOrAdd(reqId,
+                            _ => new TaskCompletionSource<JsonElement>(TaskCreationOptions.RunContinuationsAsynchronously)).Task.ConfigureAwait(false);
+                        var ok = answer.TryGetProperty("error", out var err) &&
+                                 err.TryGetProperty("code", out var code) && code.GetInt32() == -32601;
+                        Chunk(sessionId, "agent_message_chunk", ok ? "ok" : "bad:" + answer.GetRawText());
+                        Reply(id, new Dictionary<string, object?> { ["stopReason"] = "end_turn" });
+                    });
+                    break;
+                }
                 switch (scenario)
                 {
                     case "stale":
@@ -266,6 +388,15 @@ while ((line = await reader.ReadLineAsync().ConfigureAwait(false)) is not null)
                             },
                         });
                         // Deliberately never reply to session/prompt.
+                        break;
+                    case "cancel" when n == 1:
+                        // Hold the turn open until a session/cancel arrives.
+                        Chunk(sessionId, "agent_message_chunk", "working");
+                        cancelPendingId = id;
+                        break;
+                    case "cancel":
+                        Chunk(sessionId, "agent_message_chunk", $"warm:cancels={cancelCount};withId={cancelHadId}");
+                        Reply(id, new Dictionary<string, object?> { ["stopReason"] = "end_turn" });
                         break;
                     case "permission":
                         _ = Task.Run(() => HandlePermissionAsync(id, sessionId, userText));

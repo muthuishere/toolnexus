@@ -26,6 +26,14 @@ pub struct MetricEvent {
     pub question: String,
     /// The `classifier.warning` text (never a failure: `error` stays empty).
     pub warning: String,
+    /// The number of questions a `classifier.evaluate` asked (L1).
+    pub questions: i64,
+    /// sha256 hex of the canonical request (model + questions) of a
+    /// `classifier.evaluate` — the fixtures' `canonicalSha256` (L1).
+    pub questions_hash: String,
+    /// A `classifier.evaluate` answered from the classifier cache, with no
+    /// request sent.
+    pub cached: bool,
 }
 
 const BUCKETS: [f64; 10] = [0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0];

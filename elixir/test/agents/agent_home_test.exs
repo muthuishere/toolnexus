@@ -116,6 +116,35 @@ defmodule Toolnexus.Agents.HomeTest do
   end
 
   # ── H4 — frozen snapshot: a mid-session write hits disk, not the live prompt ─
+  # A memory write keeps an existing file's permission bits (the atomic rename must
+  # not hand MEMORY.md the temp file's mode). POSIX only.
+  if match?({:unix, _}, :os.type()) do
+    test "memory write keeps an existing file's permission bits" do
+      dir = mkdir(%{"MEMORY.md" => "- a\n"})
+      file = Path.join(dir, "MEMORY.md")
+      File.chmod!(file, 0o640)
+      refute Home.memory_tool(dir).execute.(%{"action" => "add", "text" => "b"}, nil).is_error
+      assert Bitwise.band(File.stat!(file).mode, 0o777) == 0o640
+    end
+  end
+
+  # H3_memoryWriteOver2MBPreservesDisk — the cap is a soul-injection cap only; the
+  # memory tool edits the FULL file and never bakes the truncation notice into disk.
+  if @fixture["expect"]["H3_memoryWriteOver2MBPreservesDisk"] do
+    test "H3 memory write over a >2 MB MEMORY.md preserves the on-disk bytes" do
+      big = String.duplicate("a", @fixture["maxFileBytes"] + 100_000)
+      dir = mkdir(%{"MEMORY.md" => big})
+      tool = Home.memory_tool(dir)
+      refute tool.execute.(%{"action" => "add", "text" => "x"}, nil).is_error
+
+      after_write = File.read!(Path.join(dir, "MEMORY.md"))
+      assert String.starts_with?(after_write, big)
+      assert String.ends_with?(after_write, "- x\n")
+      refute after_write =~ "[truncated"
+      assert File.ls!(dir) == ["MEMORY.md"]
+    end
+  end
+
   test "H4 write lands on disk; the NEXT session's snapshot carries it" do
     dir = mkdir(%{"USER.md" => "The user is new."})
 

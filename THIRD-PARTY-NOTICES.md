@@ -43,8 +43,11 @@ Indirect, pulled in by the above: `github.com/google/jsonschema-go`, `github.com
 | dependency | version | license |
 |---|---|---|
 | `io.modelcontextprotocol.sdk:mcp` | 2.0.0 | MIT |
-| `com.fasterxml.jackson.core:jackson-databind` | 2.18.2 | Apache-2.0 |
+| `tools.jackson.core:jackson-databind` (via the MCP SDK; with `com.fasterxml.jackson.core:jackson-annotations`) | 3.0.3 | Apache-2.0 |
 | `org.yaml:snakeyaml` | 2.3 | Apache-2.0 |
+
+The stdio MCP client for local servers is in-house (`StdioMcpClient`, plus `Mcp2026` for 2026-07-28
+servers); the MCP SDK is still used for remote HTTP/SSE servers, the serve side and the schema records.
 
 ## csharp — `Toolnexus` (NuGet)
 
@@ -83,6 +86,36 @@ does not extend EPL terms to toolnexus.
 
 Release tooling (`tools.build`) is reachable only through the `:build` alias and is never on a
 consumer's classpath.
+
+## rust — `toolnexus` (crates.io)
+
+The stdio MCP client (frozen path) and the 2026-07-28 client are in-house. `rmcp` is used only
+for remote streamable-HTTP/SSE servers on the frozen path and for the serve side (`serve`
+feature). Versions are the ones `Cargo.lock` resolves.
+
+| dependency | version | license |
+|---|---|---|
+| `rmcp` | 3.8.0 | **Apache-2.0** |
+| `tokio` | 1.54.1 | MIT |
+| `tokio-util` | 0.7.20 | MIT |
+| `serde` | 1.0.229 | MIT OR Apache-2.0 |
+| `serde_json` | 1.0.154 | MIT OR Apache-2.0 |
+| `thiserror` | 2.0.21 | MIT OR Apache-2.0 |
+| `yaml-rust2` | 0.13.0 | MIT OR Apache-2.0 |
+| `reqwest` | 0.13.5 | MIT OR Apache-2.0 |
+| `regex` | 1.13.1 | MIT OR Apache-2.0 |
+| `base64` | 0.22.1 | MIT OR Apache-2.0 |
+| `sha2` | 0.10.9 | MIT OR Apache-2.0 |
+| `url` | 2.5.8 | MIT OR Apache-2.0 |
+| `futures-util` | 0.3.34 | MIT OR Apache-2.0 |
+| `process-wrap` | 10.0.1 | Apache-2.0 OR MIT |
+| `uuid` | 1.26.1 | Apache-2.0 OR MIT |
+| `libc` (unix) | 0.2.191 | MIT OR Apache-2.0 |
+| `http` (optional) | 1.5.0 | MIT OR Apache-2.0 |
+| `hyper` (optional) | 1.12.0 | MIT |
+| `hyper-util` (optional) | 0.1.21 | MIT |
+| `http-body-util` (optional) | 0.1.5 | MIT |
+| `ring` (optional) | 0.17.14 | Apache-2.0 AND ISC |
 
 ## Keeping this current
 

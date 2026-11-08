@@ -21,15 +21,21 @@ from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import Any, Callable, Optional
 
+import httpx
 from mcp import ClientSession
 from mcp.client.sse import sse_client
 from mcp.client.stdio import StdioServerParameters, stdio_client
 from mcp.client.streamable_http import streamablehttp_client
 from mcp.shared.exceptions import McpError
-from mcp.types import ElicitResult, ErrorData
+from mcp.types import CallToolResult, ElicitResult, ErrorData
 from mcp.types import Tool as McpToolDef
 
 from .content import describe_part
+from .mcp2026.auth import AuthPending, OAuth, OpenUrl, TokenStore
+from .mcp2026.session import STDIO_PROBE_MAX, Session2026, merged_env, probe_http, probe_stdio
+from .mcp2026.stdio import StdioConn, sdk_streams
+from .mcp2026.wire import bm25_rank
+from .skill import SkillDef, _parse_frontmatter
 from .types import (
     Answer,
     JSONSchema,
@@ -427,6 +433,60 @@ def mcp_hints(annotations: Any) -> Optional[ToolHints]:
     return h
 
 
+def _map_call_result(server: str, result: Any) -> ToolResult:
+    """Map an MCP ``CallToolResult`` onto a :class:`ToolResult` (§2.F *Behaviour*) — shared
+    by the frozen SDK path and the 2026 path so both map byte-identically."""
+    # Parts are collected BEFORE any branch returns — the error path and the
+    # structuredContent short-circuit both keep their non-text content (§0.4).
+    parts = _collect_parts(result.content)
+    if result.isError:
+        return ToolResult(
+            output=_format_tool_error_content(result.content),
+            is_error=True,
+            metadata={"server": server},
+            parts=parts,
+        )
+    if result.structuredContent is not None:
+        return ToolResult(
+            # §2: JSON.stringify — compact separators, non-ASCII kept (byte-identical across ports).
+            output=json.dumps(result.structuredContent, separators=(",", ":"), ensure_ascii=False),
+            is_error=False,
+            metadata={"server": server},
+            parts=parts,
+        )
+    output = _join_text_content(result.content)
+    if not output and parts:
+        output = _describe_parts(parts)
+    return ToolResult(
+        output=output,
+        is_error=False,
+        metadata={"server": server},
+        parts=parts,
+    )
+
+
+def _convert_tool_2026(server: str, defn: McpToolDef, session: Session2026) -> Tool:
+    """A 2026-path server tool: same name/schema/hints/result mapping as :func:`_convert_tool`;
+    ``tools/call`` runs MRTR rounds through §10 (inline ``wait_for`` or a resumable pending)."""
+
+    def map_result(res: dict[str, Any]) -> ToolResult:
+        return _map_call_result(server, CallToolResult.model_validate(res))
+
+    async def execute(
+        args: Optional[dict[str, Any]] = None, ctx: Optional[ToolContext] = None
+    ) -> ToolResult:
+        return await session.call_tool(defn.name, args or {}, ctx, map_result, server)
+
+    return Tool(
+        name=sanitize(server) + "_" + sanitize(defn.name),
+        description=defn.description or "",
+        input_schema=_build_input_schema(defn),
+        source="mcp",
+        execute=execute,
+        hints=mcp_hints(getattr(defn, "annotations", None)),
+    )
+
+
 def _convert_tool(
     server: str, defn: McpToolDef, session: ClientSession, timeout: float
 ) -> Tool:
@@ -438,32 +498,7 @@ def _convert_tool(
         eff_timeout = ctx.timeout if (ctx and ctx.timeout is not None) else timeout
         try:
             result = await _call_with_idle_timeout(session, defn.name, args or {}, eff_timeout)
-            # Parts are collected BEFORE any branch returns — the error path and the
-            # structuredContent short-circuit both keep their non-text content (§0.4).
-            parts = _collect_parts(result.content)
-            if result.isError:
-                return ToolResult(
-                    output=_format_tool_error_content(result.content),
-                    is_error=True,
-                    metadata={"server": server},
-                    parts=parts,
-                )
-            if result.structuredContent is not None:
-                return ToolResult(
-                    output=json.dumps(result.structuredContent),
-                    is_error=False,
-                    metadata={"server": server},
-                    parts=parts,
-                )
-            output = _join_text_content(result.content)
-            if not output and parts:
-                output = _describe_parts(parts)
-            return ToolResult(
-                output=output,
-                is_error=False,
-                metadata={"server": server},
-                parts=parts,
-            )
+            return _map_call_result(server, result)
         except Exception as e:  # noqa: BLE001 - failures isolated per call
             return ToolResult(output=str(e), is_error=True, metadata={"server": server})
 
@@ -475,6 +510,151 @@ def _convert_tool(
         execute=execute,
         hints=mcp_hints(getattr(defn, "annotations", None)),
     )
+
+
+SEARCH_TOOLS_SCHEMA: JSONSchema = {
+    "type": "object",
+    "properties": {"query": {"type": "string"}, "limit": {"type": "integer"}},
+    "required": ["query"],
+}
+CALL_TOOL_SCHEMA: JSONSchema = {
+    "type": "object",
+    "properties": {"name": {"type": "string"}, "arguments": {"type": "object"}},
+    "required": ["name"],
+}
+
+
+class _ToolSearch:
+    """Lazy exposure (§2.8): ``search_tools`` + ``call_tool`` instead of every server tool.
+    ``tools/list`` is cached for its ``ttlMs`` (no hint ⇒ fetched once per load)."""
+
+    def __init__(self, server: str, cfg: ServerConfig, session: Any, defs: list[McpToolDef], timeout: float):
+        self.server = server
+        self.cfg = cfg
+        self.session = session
+        self.timeout = timeout
+        desc = cfg.get("description")
+        self.description = desc if isinstance(desc, str) else ""
+        self._lock = asyncio.Lock()
+        self._set(defs)
+
+    def _set(self, defs: list[McpToolDef]) -> None:
+        self.defs = defs
+        self.by_name = {d.name: _server_tool(self.server, d, self.session, self.timeout) for d in defs}
+        ttl = getattr(self.session, "tools_ttl_ms", None)
+        self.expiry = time.monotonic() + ttl / 1000.0 if ttl else None
+
+    async def _current(self) -> list[McpToolDef]:
+        async with self._lock:
+            if self.expiry is not None and time.monotonic() >= self.expiry:
+                defs = await _paginate_tools(self.session)
+                dis = set(self.cfg.get("_disable_tools") or ())
+                defs = apply_tools_filter(self.server, defs, self.cfg.get("tools"))
+                self._set([d for d in defs if sanitize(self.server) + "_" + sanitize(d.name) not in dis])
+            return self.defs
+
+    def tools(self) -> list[Tool]:
+        about = self.description or self.server
+
+        async def search(args: Optional[dict[str, Any]] = None, ctx: Optional[ToolContext] = None) -> ToolResult:
+            args = args or {}
+            try:
+                defs = await self._current()
+            except Exception as e:  # noqa: BLE001
+                return ToolResult(output=str(e), is_error=True, metadata={"server": self.server})
+            limit = args.get("limit")
+            n = int(limit) if isinstance(limit, (int, float)) and not isinstance(limit, bool) and limit > 0 else 5
+            order = bm25_rank([(d.name, d.description or "") for d in defs], str(args.get("query") or ""))
+            hits = [
+                {"name": defs[i].name, "description": defs[i].description, "inputSchema": defs[i].inputSchema,
+                 "server": self.description}
+                for i in order[:n]
+            ]
+            return ToolResult(output=json.dumps(hits, separators=(",", ":"), ensure_ascii=False), is_error=False, metadata={"server": self.server})
+
+        async def call(args: Optional[dict[str, Any]] = None, ctx: Optional[ToolContext] = None) -> ToolResult:
+            args = args or {}
+            name = str(args.get("name") or "")
+            try:
+                await self._current()
+            except Exception as e:  # noqa: BLE001
+                return ToolResult(output=str(e), is_error=True, metadata={"server": self.server})
+            t = self.by_name.get(name)
+            if t is None:
+                return ToolResult(
+                    output=f'unknown tool "{name}" on {self.server}', is_error=True, metadata={"server": self.server}
+                )
+            a = args.get("arguments")
+            return await t.execute(a if isinstance(a, dict) else {}, ctx)
+
+        prefix = sanitize(self.server) + "_"
+        return [
+            Tool(
+                name=prefix + "search_tools",
+                description=(
+                    f"Search the tools of {about} by keywords. Returns name, description and inputSchema "
+                    "of the best matches; run one with call_tool."
+                ),
+                input_schema=SEARCH_TOOLS_SCHEMA,
+                source="mcp",
+                execute=search,
+            ),
+            Tool(
+                name=prefix + "call_tool",
+                description="Run a tool found with search_tools.",
+                input_schema=CALL_TOOL_SCHEMA,
+                source="mcp",
+                execute=call,
+            ),
+        ]
+
+
+def _server_tool(server: str, defn: McpToolDef, session: Any, timeout: float) -> Tool:
+    if isinstance(session, Session2026):
+        return _convert_tool_2026(server, defn, session)
+    return _convert_tool(server, defn, session, timeout)
+
+
+def _server_tools(
+    server: str, cfg: ServerConfig, session: Any, defs: list[McpToolDef], timeout: float
+) -> list[Tool]:
+    """The Tools one connected server contributes: every (filtered) server tool, or — with
+    ``toolSearch: true`` — the two lazy meta-tools (§2.8)."""
+    if cfg.get("toolSearch") is True:
+        # Disable lists apply BEFORE search (by the final name the tool would have had).
+        dis = set(cfg.get("_disable_tools") or ())
+        defs = [d for d in defs if sanitize(server) + "_" + sanitize(d.name) not in dis]
+        return _ToolSearch(server, cfg, session, defs, timeout).tools()
+    return [_server_tool(server, d, session, timeout) for d in defs]
+
+
+async def _remote_skills(name: str, session: Any) -> list[SkillDef]:
+    """Remote skills (§2.7) of a 2026-path server as logical :class:`SkillDef` s (base
+    ``skill://<name>/``) — they join the same ``skill`` tool inventory as local skills. A
+    failure is isolated: warned, and the server's tools stay connected."""
+    if not isinstance(session, Session2026) or not session.has_skills():
+        return []
+    try:
+        fetched = await session.fetch_skills()
+    except Exception as e:  # noqa: BLE001
+        print(f'[toolnexus] MCP server "{name}" skills failed: {e}', file=sys.stderr)
+        return []
+    out: list[SkillDef] = []
+    for skill_name, text, resources in fetched:
+        data, content, malformed, _ = _parse_frontmatter(text)
+        if malformed or data.get("name") != skill_name:
+            print(f'[toolnexus] MCP server "{name}" skill "{skill_name}" skipped: bad frontmatter', file=sys.stderr)
+            continue
+        out.append(
+            SkillDef(
+                name=skill_name,
+                content=content,
+                description=data.get("description"),
+                resources=resources,
+                base=f"skill://{skill_name}/",
+            )
+        )
+    return out
 
 
 @dataclass
@@ -501,6 +681,9 @@ class McpSource:
     _stack: AsyncExitStack = field(repr=False)
     # Connected sessions by server name, with each server's timeout (resource_tools).
     _sessions: dict[str, tuple[ClientSession, float]] = field(default_factory=dict, repr=False)
+    # Remote skills (§2.7) from servers that offer the skills extension; the toolkit merges
+    # them into the ``skill`` tool inventory. Empty for every pre-2026 server.
+    skills: list[SkillDef] = field(default_factory=list)
 
     async def close(self) -> None:
         await self._stack.aclose()
@@ -659,35 +842,125 @@ def _make_elicitation_callback(wait_for: Any) -> Any:
     return _callback
 
 
+@dataclass
+class _LoadOpts:
+    """Load options for the OAuth client (§2A.1a): one token store per load, and how
+    ``auto`` mode opens the browser."""
+
+    token_store: Optional[TokenStore] = None
+    open_url: Optional[OpenUrl] = None
+
+    def __post_init__(self) -> None:
+        if self.token_store is None:
+            from .mcp2026.auth import MemoryTokenStore
+
+            self.token_store = MemoryTokenStore()
+
+    def oauth(self, cfg: ServerConfig) -> OAuth:
+        auth = cfg.get("auth")
+        return OAuth(auth if isinstance(auth, dict) else None, store=self.token_store, open_url=self.open_url)
+
+
+class _SdkBearerAuth(httpx.Auth):
+    """Carries the OAuth bearer on the frozen fallback's SDK HTTP transport (§2A.1a): the
+    token is attached per request, and a 401/403 challenge runs the same flow once."""
+
+    def __init__(self, oauth: OAuth, resource: str, wait_for: Any) -> None:
+        self.oauth = oauth
+        self.resource = resource
+        self.wait_for = wait_for
+
+    async def async_auth_flow(self, request: httpx.Request):  # type: ignore[override]
+        tok = await asyncio.to_thread(self.oauth.bearer, self.resource)
+        if tok:
+            request.headers["Authorization"] = "Bearer " + tok
+        response = yield request
+        www = response.headers.get("WWW-Authenticate", "")
+        if response.status_code not in (401, 403) or not www:
+            return
+        try:
+            await asyncio.to_thread(self.oauth.challenge, self.resource, response.status_code, www, tok)
+        except AuthPending as ap:
+            if self.wait_for is None:
+                return
+            ans = self.wait_for(ap.request)
+            if inspect.isawaitable(ans):
+                ans = await ans
+            cb = (ans.data or {}).get("callbackUrl") if getattr(ans, "ok", False) else None
+            if not isinstance(cb, str):
+                return
+            try:
+                await asyncio.to_thread(self.oauth.complete, ap.request.id, cb)
+            except Exception:  # noqa: BLE001 - the 401 stands
+                return
+        except Exception:  # noqa: BLE001 - the 401 stands
+            return
+        tok = await asyncio.to_thread(self.oauth.bearer, self.resource)
+        if tok:
+            request.headers["Authorization"] = "Bearer " + tok
+            yield request
+
+
+def _connect_budget(cfg: ServerConfig, timeout: float) -> float:
+    """The bound on connect + init + list. A stdio server whose discover goes silent spends up to
+    ``min(timeout, 5 s)`` in the probe before the frozen path even starts (§2.2a); that probe window is
+    bounded on its own, so it is added rather than eating the frozen path's ``timeout``."""
+    return timeout if is_remote(cfg) else timeout + min(timeout, STDIO_PROBE_MAX)
+
+
 async def _connect_session(
-    stack: AsyncExitStack, name: str, cfg: ServerConfig, wait_for: Any = None
-) -> ClientSession:
-    """Open the right transport and an initialized ClientSession on `stack`."""
+    stack: AsyncExitStack,
+    name: str,
+    cfg: ServerConfig,
+    wait_for: Any = None,
+    opts: Optional[_LoadOpts] = None,
+) -> Any:
+    """Discover first (§2.2): a server answering ``server/discover`` with 2026-07-28 gets a
+    :class:`Session2026`; anything else falls back to the frozen SDK path (§2.F), which
+    opens the right transport and an initialized ClientSession on `stack`."""
     timeout = _to_seconds(cfg.get("timeout", DEFAULT_TIMEOUT * 1000))
+    opts = opts or _LoadOpts()
 
     if is_remote(cfg):
         url = cfg["url"]
         headers = expand_env_headers(cfg.get("headers"))
+        oauth = opts.oauth(cfg)
+        s26 = await probe_http(name, url, headers, timeout, oauth, wait_for)
+        if s26 is not None:
+            stack.callback(s26.close)
+            return s26
+        bearer = _SdkBearerAuth(oauth, url, wait_for)
         try:
             read, write, _ = await stack.enter_async_context(
-                streamablehttp_client(url, headers=headers, timeout=timeout)
+                streamablehttp_client(url, headers=headers, timeout=timeout, auth=bearer)
             )
         except Exception:
             # fall back to SSE
             read, write = await stack.enter_async_context(
-                sse_client(url, headers=headers)
+                sse_client(url, headers=headers, auth=bearer)
             )
     else:
         argv = normalize_command(name, cfg)
-        cmd, args = argv[0], argv[1:]
-        merged_env = {**os.environ, **(cfg.get("environment") or cfg.get("env") or {})}
-        params = StdioServerParameters(
-            command=cmd,
-            args=args,
-            cwd=cfg.get("cwd"),
-            env=merged_env,
+        s26 = await probe_stdio(
+            name, argv, merged_env(cfg.get("environment") or cfg.get("env")), cfg.get("cwd"), timeout, wait_for
         )
-        read, write = await stack.enter_async_context(stdio_client(params))
+        if isinstance(s26, StdioConn):
+            # §2.2a reuse: the server replied to discover without 2026 — continue into
+            # ``initialize`` on the SAME child (no kill + respawn).
+            read, write = await stack.enter_async_context(sdk_streams(s26))
+        elif s26 is not None:
+            stack.callback(s26.close)
+            return s26
+        else:  # discover silence: the probe child was killed; spawn afresh
+            cmd, args = argv[0], argv[1:]
+            env = {**os.environ, **(cfg.get("environment") or cfg.get("env") or {})}
+            params = StdioServerParameters(
+                command=cmd,
+                args=args,
+                cwd=cfg.get("cwd"),
+                env=env,
+            )
+            read, write = await stack.enter_async_context(stdio_client(params))
 
     # Advertise elicitation + register the bridge ONLY when a wait_for exists to
     # satisfy it — a wait_for-less host degrades cleanly (the server won't elicit).
@@ -721,6 +994,8 @@ async def load_mcp(
     wait_for: Any = None,
     *,
     on_server: Optional[OnServer] = None,
+    token_store: Optional[TokenStore] = None,
+    open_url: Optional[OpenUrl] = None,
 ) -> McpSource:
     """Connect to every enabled server, list + convert tools. Failures are isolated:
     one bad server records status ``"failed"`` and never breaks the toolkit.
@@ -729,7 +1004,9 @@ async def load_mcp(
     ``LoadMcpWithContext``); a healthy config behaves byte-identically to before.
     ``on_server`` — see :func:`load_mcp_with_context`.
     """
-    return await load_mcp_with_context(input, wait_for=wait_for, on_server=on_server)
+    return await load_mcp_with_context(
+        input, wait_for=wait_for, on_server=on_server, token_store=token_store, open_url=open_url
+    )
 
 
 async def load_mcp_with_context(
@@ -738,6 +1015,9 @@ async def load_mcp_with_context(
     *,
     cancel: Optional[asyncio.Event] = None,
     on_server: Optional[OnServer] = None,
+    token_store: Optional[TokenStore] = None,
+    open_url: Optional[OpenUrl] = None,
+    disable_tools: Optional[list[str]] = None,
 ) -> McpSource:
     """Cancellation/timeout-aware MCP load (§2 Gap 3). Mirrors Go
     ``LoadMcpWithContext``: each server's connect + list is bounded by that server's
@@ -754,11 +1034,24 @@ async def load_mcp_with_context(
     are serialized. The load still returns only after every server finished, and
     ``cancel`` still aborts it and closes every client — including ones whose tools
     were already handed out. Without it the load is byte-identical to before.
+
+    Every server is asked ``server/discover`` first (§2.2): a 2026-07-28 server is driven
+    by the in-house client, anything else by the frozen SDK path (§2.F). ``token_store``
+    (``load/save/delete`` by server URL; default in-memory per load) and ``open_url`` (how
+    ``auto`` OAuth opens the browser; default the OS opener) configure the OAuth client
+    (§2A.1a).
     """
     config = parse_mcp_config(input)
+    if disable_tools:
+        config = {
+            k: ({**v, "_disable_tools": list(disable_tools)} if isinstance(v, dict) and v.get("toolSearch") is True else v)
+            for k, v in config.items()
+        }
+    opts = _LoadOpts(token_store=token_store, open_url=open_url)
     if on_server is not None:
-        return await _load_mcp_concurrent(config, wait_for, cancel, on_server)
+        return await _load_mcp_concurrent(config, wait_for, cancel, on_server, opts)
     tools: list[Tool] = []
+    remote_skills: list[SkillDef] = []
     status: dict[str, McpStatus] = {}
     sessions: dict[str, tuple[ClientSession, float]] = {}
     stack = AsyncExitStack()
@@ -782,12 +1075,13 @@ async def load_mcp_with_context(
                 # asyncio.timeout bounds connect + init + list (SSE fallback included)
                 # in the CURRENT task, so the anyio transports are entered/exited in the
                 # same task (no cross-task cancel-scope error).
-                async with asyncio.timeout(timeout):
-                    session = await _connect_session(server_stack, name, cfg, wait_for)
+                async with asyncio.timeout(_connect_budget(cfg, timeout)):
+                    session = await _connect_session(server_stack, name, cfg, wait_for, opts)
                     defs = await _paginate_tools(session)
+                    server_skills = await _remote_skills(name, session)
                 defs = apply_tools_filter(name, defs, cfg.get("tools"))
-                for defn in defs:
-                    tools.append(_convert_tool(name, defn, session, timeout))
+                tools.extend(_server_tools(name, cfg, session, defs, timeout))
+                remote_skills.extend(server_skills)
                 # hand the server's lifetime to the parent stack
                 await stack.enter_async_context(server_stack)
                 sessions[name] = (session, timeout)
@@ -821,7 +1115,7 @@ async def load_mcp_with_context(
             pass
         raise
 
-    return McpSource(tools=tools, status=status, _stack=stack, _sessions=sessions)
+    return McpSource(tools=tools, status=status, _stack=stack, _sessions=sessions, skills=remote_skills)
 
 
 async def _server_worker(
@@ -831,22 +1125,24 @@ async def _server_worker(
     timeout: float,
     ready: "asyncio.Future[tuple[Any, Any, Optional[BaseException]]]",
     close_evt: asyncio.Event,
+    opts: Optional[_LoadOpts] = None,
 ) -> None:
     """Own one server's transport for its whole life (on_server path). The anyio
     transports must be entered and exited in the same task, so this task connects,
     reports through ``ready``, then holds the connection until ``close_evt``."""
     server_stack = AsyncExitStack()
     try:
-        async with asyncio.timeout(timeout):
-            session = await _connect_session(server_stack, name, cfg, wait_for)
+        async with asyncio.timeout(_connect_budget(cfg, timeout)):
+            session = await _connect_session(server_stack, name, cfg, wait_for, opts)
             defs = await _paginate_tools(session)
+            skills = await _remote_skills(name, session)
     except BaseException as e:  # noqa: BLE001 - reported as this server's failure
         await _safe_aclose(server_stack)
         if not ready.done():
             err = TimeoutError("timed out") if isinstance(e, asyncio.CancelledError) else e
             ready.set_result((None, None, err))
         return
-    ready.set_result((session, defs, None))
+    ready.set_result((session, (defs, skills), None))
     try:
         await close_evt.wait()
     finally:
@@ -858,8 +1154,10 @@ async def _load_mcp_concurrent(
     wait_for: Any,
     cancel: Optional[asyncio.Event],
     on_server: OnServer,
+    opts: Optional[_LoadOpts] = None,
 ) -> McpSource:
     tools: list[Tool] = []
+    remote_skills: list[SkillDef] = []
     status: dict[str, McpStatus] = {}
     sessions: dict[str, tuple[ClientSession, float]] = {}
     close_evt = asyncio.Event()
@@ -899,7 +1197,7 @@ async def _load_mcp_concurrent(
             timeout = _to_seconds(cfg.get("timeout", DEFAULT_TIMEOUT * 1000))
             ready: asyncio.Future[Any] = loop.create_future()
             task = asyncio.ensure_future(
-                _server_worker(name, cfg, wait_for, timeout, ready, close_evt)
+                _server_worker(name, cfg, wait_for, timeout, ready, close_evt, opts)
             )
             workers.append((task, ready))
             waiting[ready] = (name, cfg, timeout)
@@ -912,14 +1210,16 @@ async def _load_mcp_concurrent(
             for fut in done:
                 pending_set.discard(fut)
                 name, cfg, timeout = waiting[fut]
-                session, defs, err = fut.result()
+                session, listed, err = fut.result()
                 if err is not None:
                     status[name] = "failed"
                     print(f'[toolnexus] MCP server "{name}" failed: {err}', file=sys.stderr)
                     await report(McpServerResult(name=name, status="failed", error=err))
                     continue
+                defs, server_skills = listed
                 defs = apply_tools_filter(name, defs, cfg.get("tools"))
-                converted = [_convert_tool(name, d, session, timeout) for d in defs]
+                converted = _server_tools(name, cfg, session, defs, timeout)
+                remote_skills.extend(server_skills)
                 tools.extend(converted)
                 sessions[name] = (session, timeout)
                 status[name] = "connected"
@@ -934,7 +1234,7 @@ async def _load_mcp_concurrent(
     finally:
         if cancel_task is not None:
             cancel_task.cancel()
-    return McpSource(tools=tools, status=status, _stack=stack, _sessions=sessions)
+    return McpSource(tools=tools, status=status, _stack=stack, _sessions=sessions, skills=remote_skills)
 
 
 # ---------------------------------------------------------------------------
@@ -968,6 +1268,8 @@ async def list_mcp_tools(
     input: str | dict[str, Any],
     *,
     cancel: Optional[asyncio.Event] = None,
+    token_store: Optional[TokenStore] = None,
+    open_url: Optional[OpenUrl] = None,
 ) -> McpInventory:
     """Connect to every enabled server, list tool definitions, and DISCONNECT before
     returning — no toolkit, no skills/builtins/agents, no Execute wiring, nothing left
@@ -977,6 +1279,7 @@ async def list_mcp_tools(
     per-server ``tools`` allowlists. Mirrors Go ``ListMcpTools``.
     """
     config = parse_mcp_config(input)
+    opts = _LoadOpts(token_store=token_store, open_url=open_url)
     by_server: dict[str, list[ToolInfo]] = {}
     status: dict[str, McpStatus] = {}
 
@@ -989,8 +1292,8 @@ async def list_mcp_tools(
         timeout = _to_seconds(cfg.get("timeout", DEFAULT_TIMEOUT * 1000))
         server_stack = AsyncExitStack()
         try:
-            async with asyncio.timeout(timeout):
-                session = await _connect_session(server_stack, name, cfg, None)
+            async with asyncio.timeout(_connect_budget(cfg, timeout)):
+                session = await _connect_session(server_stack, name, cfg, None, opts)
                 defs = await _paginate_tools(session)
             by_server[name] = [
                 ToolInfo(

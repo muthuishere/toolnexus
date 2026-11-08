@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# Build the Rust interop runners (one incremental cargo build).
+set -euo pipefail
+ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
+export CARGO_TARGET_DIR="$HOME/.cache/cargo-target-shared"
+cd "$ROOT/rust"
+cargo build --example interop_mcp2026_server --example interop_mcp2026_client

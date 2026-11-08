@@ -27,7 +27,15 @@ export default defineConfig({
 	},
 	integrations: [
 		starlight({
-			title: 'toolnexus',
+			title: 'Toolnexus',
+			// The mark: three tool connectors converging on one hub that points forward.
+			logo: { light: './src/assets/logo-light.svg', dark: './src/assets/logo-dark.svg' },
+			favicon: '/favicon.svg',
+			head: [
+				{ tag: 'link', attrs: { rel: 'icon', href: '/toolnexus/favicon.ico', sizes: '32x32' } },
+				{ tag: 'link', attrs: { rel: 'icon', type: 'image/png', href: '/toolnexus/favicon-32.png', sizes: '32x32' } },
+				{ tag: 'link', attrs: { rel: 'apple-touch-icon', href: '/toolnexus/apple-touch-icon.png' } },
+			],
 			// Remove the right-hand "On this page" table of contents site-wide.
 			tableOfContents: false,
 			description:
@@ -39,6 +47,16 @@ export default defineConfig({
 						'A small, vendor-neutral library that gives any LLM dynamic tool-calling: an MCP host, agent skills, native + HTTP + built-in tools, remote A2A agents, a human-in-the-loop suspension layer, and a unified client loop — byte-identical across JavaScript, Python, Go, Java, C#, Elixir, Clojure and Rust — all eight published to their registries.',
 					details:
 						'toolnexus unifies every tool source (MCP servers, agent skills, your own functions via defineTool, HTTP/REST endpoints, built-in shell/file tools, and remote A2A agents) behind one Tool interface, emits schema in OpenAI/Anthropic/Gemini formats, and ships a client with a built-in tool-calling loop (skills injection, parallel + chained calls, hooks, streaming, retries, conversation memory, observability). The same examples/ fixtures produce identical behavior in all eight ports, each held to the full tier by a shared conformance gate. The Rust port is async on tokio. The Clojure port runs one .cljc source tree on both the JVM and cljgo, published to Clojars.',
+					// One plain-markdown file per recipe set, listed in llms.txt, so a coding agent can
+					// fetch exactly the in-process client recipes (/_llms-txt/in-process-client.txt).
+					customSets: [
+						{
+							label: 'In-process client',
+							description:
+								'Copy-pasteable recipes in all eight ports: createInProcessClient, serving a toolkit to an agent (asMcpServer), driving any ACP agent, one CLI process per turn, and how to extend them.',
+							paths: ['in-process-client', 'in-process-client/**'],
+						},
+					],
 				}),
 				// Splits the whole site into topics, each with its own dedicated sidebar (switchable
 				// via the topic picker at the top of the nav): the main "Docs" topic below, plus one
@@ -91,6 +109,7 @@ export default defineConfig({
 									items: [
 										{ label: 'Zero to agent', slug: 'cookbook/zero-to-agent' },
 										{ label: 'MCP servers', slug: 'cookbook/mcp-servers' },
+										{ label: 'Hosted MCP & OAuth', slug: 'cookbook/mcp-oauth' },
 										{ label: 'Agent skills', slug: 'cookbook/agent-skills' },
 										{ label: 'Native tools', slug: 'cookbook/native-tool' },
 										{ label: 'HTTP / REST tools', slug: 'cookbook/http-tool' },
@@ -98,6 +117,7 @@ export default defineConfig({
 										{ label: 'Attachments & multimodal', slug: 'cookbook/attachments' },
 										{ label: 'Images, video & speech', slug: 'cookbook/media' },
 										{ label: 'Bring your own HTTP client', slug: 'cookbook/bring-your-own-http-client' },
+										{ label: 'Run without a model (mock server)', slug: 'cookbook/mock-server' },
 										{ label: 'Local & in-process models', slug: 'cookbook/local-and-in-process-models' },
 										{ label: 'Fail fast, or retry', slug: 'cookbook/fail-fast-or-retry' },
 										{ label: 'API key by host', slug: 'cookbook/api-key-by-host' },
@@ -111,8 +131,18 @@ export default defineConfig({
 									],
 								},
 								{
+									label: 'In-process client',
+									items: [
+										{ label: 'Overview', slug: 'in-process-client' },
+										{ label: 'Recipe: ACP agent', slug: 'in-process-client/acp-agent' },
+										{ label: 'Recipe: one-shot CLI', slug: 'in-process-client/one-shot-cli' },
+										{ label: 'Extend it', slug: 'in-process-client/extend' },
+									],
+								},
+								{
 									label: 'Benchmarks & comparison',
 									items: [
+										{ label: 'Where toolnexus stands — Nov 2026', slug: 'standing-2026-11' },
 										{ label: 'Comparison — Spring AI · LangGraph · ADK · Mastra', slug: 'comparison' },
 										{ label: 'Performance benchmarks', slug: 'performance' },
 										{ label: 'Resilience benchmark', slug: 'resilience' },
@@ -134,6 +164,7 @@ export default defineConfig({
 										{ label: 'Media generation', slug: 'media' },
 										{ label: 'Sub-agents & teams', slug: 'subagents' },
 										{ label: 'Persona agents', slug: 'persona-agents' },
+										{ label: 'Dreaming', slug: 'dreaming' },
 										{ label: 'Suspension & the human loop', slug: 'suspension' },
 									],
 								},
@@ -164,7 +195,32 @@ export default defineConfig({
 					{ exclude: ['index'] },
 				),
 			],
-			customCss: ['@fontsource-variable/inter', './src/styles/deemwar.css'],
+			customCss: [
+				'@fontsource-variable/source-sans-3',
+				'@fontsource-variable/source-serif-4/opsz.css',
+				'@fontsource-variable/jetbrains-mono',
+				'./src/styles/theme.css',
+			],
+			// Code blocks set like plates in a manual: paper/slate ground matched to the
+			// page theme, square corners, the mono face from the theme.
+			expressiveCode: {
+				themes: ['github-dark-default', 'github-light'],
+				styleOverrides: {
+					borderRadius: '2px',
+					borderColor: 'var(--sl-color-hairline)',
+					codeFontFamily: 'var(--sl-font-mono)',
+					uiFontFamily: 'var(--sl-font)',
+					codeFontSize: '0.875rem',
+					codeBackground: ({ theme }) => (theme.type === 'dark' ? '#151c1a' : '#f4f6f5'),
+					frames: {
+						editorTabBarBackground: ({ theme }) => (theme.type === 'dark' ? '#121816' : '#fbfcfb'),
+						editorActiveTabBackground: ({ theme }) => (theme.type === 'dark' ? '#151c1a' : '#f4f6f5'),
+						terminalTitlebarBackground: ({ theme }) => (theme.type === 'dark' ? '#121816' : '#fbfcfb'),
+						terminalBackground: ({ theme }) => (theme.type === 'dark' ? '#151c1a' : '#f4f6f5'),
+						frameBoxShadowCssValue: 'none',
+					},
+				},
+			},
 			social: [
 				{ icon: 'github', label: 'GitHub', href: 'https://github.com/muthuishere/toolnexus' },
 			],

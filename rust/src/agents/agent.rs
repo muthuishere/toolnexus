@@ -81,6 +81,8 @@ pub struct Spec {
 pub struct Agent {
     pub name: String,
     pub spec: Spec,
+    /// Set by `from_dir(…, dream)`, read by `start_agent` (SPEC §7E "Dreaming").
+    pub(crate) dream: Option<Arc<super::home::DreamConfig>>,
 }
 
 impl std::fmt::Debug for Agent {
@@ -96,6 +98,7 @@ pub fn new(name: impl Into<String>, spec: Spec) -> Agent {
     Agent {
         name: name.into(),
         spec,
+        dream: None,
     }
 }
 
@@ -202,6 +205,8 @@ impl Agent {
     pub fn as_tool_with(&self, per: AsToolOptionsFn) -> Tool {
         let agent = self.clone();
         Tool {
+            output_schema: None,
+            annotations: None,
             concurrency_safe: None,
             name: self.name.clone(),
             description: self.spec.does.clone(),

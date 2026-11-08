@@ -442,6 +442,14 @@ func startA2AServer(opts startServerOptions) (*ServeHandle, error) {
 		// MCP streamable-HTTP profile, checked first so /mcp is never shadowed by
 		// the A2A POST handler (which would otherwise treat it as JSON-RPC).
 		if mcpHandler != nil && r.URL.Path == "/mcp" {
+			// Stateless profile: no server-initiated SSE stream exists, so only
+			// POST is served. Refuse anything else at once (§7C) rather than let
+			// the SDK hold a GET stream open that will never carry a message.
+			if r.Method != http.MethodPost {
+				w.Header().Set("Allow", "POST")
+				w.WriteHeader(http.StatusMethodNotAllowed)
+				return
+			}
 			mcpHandler.ServeHTTP(w, r)
 			return
 		}

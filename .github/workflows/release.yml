@@ -311,6 +311,9 @@ jobs:
         with:
           distribution: temurin
           java-version: "21"
+      - name: Gradle from GitHub mirror (services.gradle.org has returned 504s)
+        env: { GH_TOKEN: "${{ github.token }}" }
+        run: ./scripts/ci-gradle-dist.sh
       - run: ./gradlew publishAndReleaseToMavenCentral --no-daemon --no-configuration-cache
 
   hex:

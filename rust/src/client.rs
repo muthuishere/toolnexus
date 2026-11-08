@@ -12,6 +12,7 @@ mod emit;
 mod inprocess;
 mod metrics;
 mod models;
+mod overflow;
 mod tiers;
 mod translate;
 
@@ -35,6 +36,7 @@ pub use inprocess::{
 };
 pub use metrics::MetricEvent;
 pub use models::{ModelInfo, list_models};
+pub use overflow::{ContextOverflowError, is_context_overflow};
 pub use tiers::{CountTokensFn, ToolTier, ToolTierOptions, UsageCountFn};
 pub use translate::{TranslateRequest, TranslateResult, TranslatedToolCall};
 
@@ -71,6 +73,9 @@ pub type WaitForFn = Arc<dyn Fn(Request) -> BoxFuture<Result<Answer, String>> + 
 /// §10 host slot with the turn's cancellation (a pending question ends with its turn).
 pub type WaitForCtxFn =
     Arc<dyn Fn(CancellationToken, Request) -> BoxFuture<Result<Answer, String>> + Send + Sync>;
+/// §8 `after_round`: the round-boundary hook (#192).
+pub type AfterRoundHook =
+    Arc<dyn Fn(AfterRoundEvent) -> BoxFuture<Result<Option<RoundInjection>, String>> + Send + Sync>;
 pub type OnMetricFn = Arc<dyn Fn(&MetricEvent) + Send + Sync>;
 pub type OnErrorFn = Arc<dyn Fn(&ErrorInfo) -> ErrorTier + Send + Sync>;
 pub type BodyTransformFn = Arc<dyn Fn(Value) -> Option<Value> + Send + Sync>;
@@ -82,6 +87,26 @@ pub struct Hooks {
     pub after_llm: Option<AfterLlmHook>,
     pub before_tool: Option<BeforeToolHook>,
     pub after_tool: Option<AfterToolHook>,
+    /// At each round boundary (§8, #192): after a round's tool results
+    /// (`final == false`), or when the model stopped with a turn remaining
+    /// (`final == true`, `text` = its answer). Each `inject` string is appended
+    /// as a user message; a non-empty inject on a final round CONTINUES the loop.
+    pub after_round: Option<AfterRoundHook>,
+}
+
+/// The `after_round` hook event.
+#[derive(Debug, Clone)]
+pub struct AfterRoundEvent {
+    pub turn: usize,
+    pub r#final: bool,
+    pub text: String,
+    pub messages: Vec<Value>,
+}
+
+/// What an `after_round` hook may return.
+#[derive(Debug, Clone, Default)]
+pub struct RoundInjection {
+    pub inject: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -165,6 +190,10 @@ pub struct ClientOptions {
     pub system_prompt: String,
     /// 0 ⇒ 10.
     pub max_turns: usize,
+    /// SPEC §8 "Stop-reason recovery" (default false): answer a malformed tool call with a
+    /// corrective message (once), a truncated reply (length/max_tokens) with a continue
+    /// message (up to 3 times, text joined) and an empty answer with a nudge (once).
+    pub stop_recovery: bool,
     /// Cap on concurrency-safe tool calls of one response running at once (SPEC §8
     /// "Tool scheduling"). 0 ⇒ env `TOOLNEXUS_MAX_TOOL_CONCURRENCY` when a positive
     /// integer, else 10. Unsafe calls (anything not read-only) always run alone.
@@ -176,6 +205,10 @@ pub struct ClientOptions {
     pub retry_base_ms: u64,
     /// Extra statuses to retry, ADDED to 429/500/502/503/504/529.
     pub retryable_statuses: Vec<u16>,
+    /// Ordered fallback models tried on overload (503/529) once the retry budget is
+    /// spent (§8 Resilience). Empty ⇒ off. Env `TOOLNEXUS_DISABLE_MODEL_FALLBACK=1|true`
+    /// disables it per call.
+    pub fallback_models: Vec<String>,
     /// Whole-run deadline in ms (0 = none).
     pub timeout_ms: u64,
     /// `None` ⇒ in-memory.
@@ -196,6 +229,10 @@ pub struct ClientOptions {
     pub max_part_bytes: usize,
     /// `"error"` | `"text"` | empty (strict for attached parts, placeholder for tool parts).
     pub on_unsupported_part: String,
+    /// Reactive compaction on context overflow (§7F.1): a `before_llm`-shaped
+    /// hook called when the provider rejects the prompt as too long. `None` ⇒
+    /// the overflow surfaces as `ClientError::Provider`, unchanged.
+    pub compact_on_overflow: Option<BeforeLlmHook>,
 }
 
 // ---------------------------------------------------------------------------
@@ -301,8 +338,9 @@ pub struct RunResult {
     pub pending: Option<Request>,
 }
 
-/// A streaming event. `kind`: `text` | `tool_call` | `tool_result` | `usage` |
-/// `pending` | `done` | `error`.
+/// A streaming event. `kind`: `text` | `thought` | `tool_call` | `tool_result` |
+/// `usage` | `retry` | `pending` | `done` | `error`. `thought` (an ACP agent's
+/// `agent_thought_chunk`, `via: "acp"`) is never part of the answer text.
 #[derive(Debug, Clone, Default)]
 pub struct StreamEvent {
     pub kind: String,
@@ -319,9 +357,37 @@ pub struct StreamEvent {
     pub result: Option<Box<RunResult>>,
     pub request: Option<Request>,
     pub error: Option<ClientError>,
+    /// `retry` only (streaming): the 1-based failed attempt about to be retried.
+    pub attempt: u32,
+    /// `retry` only: the effective retry budget (`retries`).
+    pub max: u32,
+    /// `retry` only: the exact wait about to be slept, in milliseconds.
+    pub delay_ms: u64,
+    /// `retry` only: the HTTP status; `None` on a network error.
+    pub status: Option<u16>,
+    /// `retry` only: `"HTTP <status>"` or `"network"`.
+    pub reason: String,
+    /// `"fallback"` events: the model being left.
+    pub from: String,
+    /// `"fallback"` events: the model being switched to.
+    pub to: String,
 }
 
 impl StreamEvent {
+    fn retry(attempt: u32, max: u32, delay: Duration, status: Option<u16>) -> Self {
+        Self {
+            kind: "retry".into(),
+            attempt,
+            max,
+            delay_ms: delay.as_millis() as u64,
+            status,
+            reason: match status {
+                Some(s) => format!("HTTP {s}"),
+                None => "network".into(),
+            },
+            ..Default::default()
+        }
+    }
     fn of(kind: &str) -> Self {
         Self {
             kind: kind.into(),
@@ -421,6 +487,9 @@ pub enum ClientError {
     /// A durable resume (`run_with_answer` / `ask_with_answer`) was refused.
     #[error("{0}")]
     Resume(String),
+    /// Reactive compaction could not make the prompt fit (§7F.1).
+    #[error("{0}")]
+    ContextOverflow(ContextOverflowError),
 }
 
 /// What a run starts from.
@@ -464,6 +533,16 @@ fn is_retryable_status(status: u16, extra: &[u16]) -> bool {
     DEFAULT_RETRYABLE.contains(&status) || extra.contains(&status)
 }
 
+/// Parse an `x-should-retry` value: trimmed `true`/`false` (case-insensitive)
+/// overrides the default retry classification; anything else is ignored.
+pub fn should_retry_header(v: &str) -> Option<bool> {
+    match v.trim().to_ascii_lowercase().as_str() {
+        "true" => Some(true),
+        "false" => Some(false),
+        _ => None,
+    }
+}
+
 /// Parse a `Retry-After` header: plain non-negative integer seconds ≤ i32::MAX only.
 pub fn retry_after_seconds(v: &str) -> Option<Duration> {
     let s = v.trim();
@@ -491,6 +570,9 @@ pub(crate) enum RespBody {
 pub(crate) struct RawResponse {
     pub status: u16,
     pub retry_after: String,
+    /// The `x-should-retry` override (SPEC § Resilience): `Some` only when the
+    /// header's trimmed value is `true`/`false` (case-insensitive).
+    pub should_retry: Option<bool>,
     pub body: RespBody,
 }
 
@@ -511,6 +593,40 @@ impl RawResponse {
                 Ok(out)
             }
         }
+    }
+}
+
+/// Run `fut` on a runtime worker thread when the runtime is multi-threaded.
+///
+/// A host usually awaits a run from `block_on` (`#[tokio::main]`), whose
+/// thread is not a worker: every wake from the I/O driver (HTTP reply, MCP
+/// reply) then has to unpark that thread. On a worker the run is woken in
+/// place, one hand-off per run instead of one per await. Dropping the
+/// returned future aborts the task (cancel-on-drop, as before); a panic
+/// inside resumes on the caller.
+pub(crate) async fn on_worker<F>(fut: F) -> F::Output
+where
+    F: std::future::Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    use tokio::runtime::{Handle, RuntimeFlavor};
+    let multi =
+        Handle::try_current().is_ok_and(|h| h.runtime_flavor() == RuntimeFlavor::MultiThread);
+    if !multi {
+        return fut.await;
+    }
+    struct AbortOnDrop<T>(tokio::task::JoinHandle<T>);
+    impl<T> Drop for AbortOnDrop<T> {
+        fn drop(&mut self) {
+            self.0.abort();
+        }
+    }
+    let mut h = AbortOnDrop(tokio::spawn(fut));
+    match (&mut h.0).await {
+        Ok(v) => v,
+        Err(e) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
+        // we abort only when dropped, so this is a runtime shutting down
+        Err(e) => panic!("toolnexus: run task cancelled by the runtime: {e}"),
     }
 }
 
@@ -612,6 +728,58 @@ struct RunState {
     last_model: String,
     /// The transcript was built (an error after this point keeps a partial).
     started: bool,
+    /// The last response stopped at the output token limit (length / max_tokens).
+    truncated: bool,
+    /// The last response had a tool call whose arguments are not a JSON object.
+    malformed: bool,
+    /// Stop-reason recovery budgets + carried text (per run).
+    rec: StopRecovery,
+}
+
+/// The three pinned user messages of SPEC §8 "Stop-reason recovery" — byte-exact in every port.
+pub const STOP_RECOVERY_NUDGE: &str =
+    "Your previous response contained no answer. Continue and give your answer.";
+pub const STOP_RECOVERY_CONTINUE: &str = "Your previous response was cut off at the output token limit. Continue exactly where it stopped, without repeating anything.";
+pub const STOP_RECOVERY_CORRECTIVE: &str = "Your previous tool call could not be used: its arguments were not a valid JSON object. Call the tool again with arguments that are a single valid JSON object matching its input schema.";
+
+#[derive(Default)]
+struct StopRecovery {
+    correct: u8,
+    cont: u8,
+    nudges: u8,
+    carry: String,
+}
+
+impl StopRecovery {
+    /// Classifies one response (SPEC §8 order): the pinned text to append, and whether the
+    /// assistant message is dropped. `None` ⇒ no recovery.
+    fn decide(
+        &mut self,
+        has_calls: bool,
+        malformed: bool,
+        truncated: bool,
+        text: &str,
+    ) -> Option<(&'static str, bool)> {
+        if has_calls && malformed && self.correct < 1 {
+            self.correct += 1;
+            Some((STOP_RECOVERY_CORRECTIVE, true))
+        } else if !has_calls && truncated && self.cont < 3 {
+            self.cont += 1;
+            self.carry.push_str(text);
+            Some((STOP_RECOVERY_CONTINUE, false))
+        } else if !has_calls && !truncated && text.trim().is_empty() && self.nudges < 1 {
+            self.nudges += 1;
+            Some((STOP_RECOVERY_NUDGE, true))
+        } else {
+            None
+        }
+    }
+}
+
+/// A raw tool-arguments string that is not a JSON object (empty/whitespace is `{}`).
+fn malformed_args(raw: &str) -> bool {
+    let t = raw.trim();
+    !t.is_empty() && !matches!(serde_json::from_str::<Value>(t), Ok(Value::Object(_)))
 }
 
 enum TurnEnd {
@@ -1115,9 +1283,15 @@ impl Client {
                     .and_then(|v| v.to_str().ok())
                     .unwrap_or("")
                     .to_owned();
+                let should_retry = resp
+                    .headers()
+                    .get("x-should-retry")
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(should_retry_header);
                 Ok(RawResponse {
                     status: resp.status().as_u16(),
                     retry_after,
+                    should_retry,
                     body: RespBody::Http(resp),
                 })
             }
@@ -1141,6 +1315,77 @@ impl Client {
         cancel: &CancellationToken,
         side: Option<&Tx>,
     ) -> Result<RawResponse, ClientError> {
+        self.llm_fetch_x(endpoint, headers, raw, cancel, side)
+            .await
+            .map(|(r, _)| r)
+    }
+
+    /// The model chain for one call: `[turn_model, ...fallback_models]`, empties and
+    /// duplicates skipped; just `[turn_model]` when off, in-process, or kill-switched.
+    fn model_chain(&self, turn_model: &str) -> Vec<String> {
+        let mut chain = vec![turn_model.to_owned()];
+        if matches!(self.inner.transport, Transport::InProcess(_)) {
+            return chain;
+        }
+        let kill = std::env::var("TOOLNEXUS_DISABLE_MODEL_FALLBACK").unwrap_or_default();
+        if kill == "1" || kill.eq_ignore_ascii_case("true") {
+            return chain;
+        }
+        for m in &self.opts().fallback_models {
+            if !m.is_empty() && !chain.contains(m) {
+                chain.push(m.clone());
+            }
+        }
+        chain
+    }
+
+    /// [`Self::llm_fetch`] over the model chain (§8 `fallbackModels`): advances to the
+    /// next model only when the retry budget is spent and the final status is 503/529.
+    /// Returns the response and the model that served it.
+    #[allow(clippy::too_many_arguments)]
+    async fn llm_fetch_chain(
+        &self,
+        turn_model: &str,
+        make_raw: &(dyn Fn(&str) -> Result<Vec<u8>, ClientError> + Sync),
+        endpoint: &str,
+        headers: &[(String, String)],
+        cancel: &CancellationToken,
+        side: Option<&Tx>,
+    ) -> Result<(RawResponse, String), ClientError> {
+        let chain = self.model_chain(turn_model);
+        let mut i = 0;
+        loop {
+            let model = &chain[i];
+            let raw = make_raw(model)?;
+            let (resp, exhausted) = self
+                .llm_fetch_x(endpoint, headers, &raw, cancel, side)
+                .await?;
+            if exhausted && matches!(resp.status, 503 | 529) && i + 1 < chain.len() {
+                drop(resp);
+                if let Some(tx) = side {
+                    let _ = tx.send(StreamEvent {
+                        kind: "fallback".into(),
+                        from: model.clone(),
+                        to: chain[i + 1].clone(),
+                        ..Default::default()
+                    });
+                }
+                i += 1;
+                continue;
+            }
+            return Ok((resp, model.clone()));
+        }
+    }
+
+    /// The retry loop; the flag says the budget was spent without an `on_error` "fail".
+    async fn llm_fetch_x(
+        &self,
+        endpoint: &str,
+        headers: &[(String, String)],
+        raw: &[u8],
+        cancel: &CancellationToken,
+        side: Option<&Tx>,
+    ) -> Result<(RawResponse, bool), ClientError> {
         let retries = self.retries();
         let classify = |info: &ErrorInfo| match &self.opts().on_error {
             Some(f) => f(info),
@@ -1172,26 +1417,37 @@ impl Client {
                     if tier == ErrorTier::Fail || attempt == retries {
                         return Err(ClientError::Transport(e));
                     }
-                    self.sleep(self.backoff(attempt, ""), cancel).await?;
+                    let d = self.backoff(attempt, "");
+                    send(side, StreamEvent::retry(attempt + 1, retries, d, None));
+                    self.sleep(d, cancel).await?;
                 }
                 Ok(resp) => {
                     if resp.status < 300 {
-                        return Ok(resp);
+                        return Ok((resp, false));
                     }
-                    let retryable =
-                        is_retryable_status(resp.status, &self.opts().retryable_statuses);
+                    let retryable = resp.should_retry.unwrap_or_else(|| {
+                        is_retryable_status(resp.status, &self.opts().retryable_statuses)
+                    });
                     let tier = classify(&ErrorInfo {
                         error: format!("LLM {}", resp.status),
                         status: resp.status,
                         attempt,
                         retryable,
                     });
-                    if tier == ErrorTier::Fail || attempt == retries {
-                        return Ok(resp);
+                    if tier == ErrorTier::Fail {
+                        return Ok((resp, false));
                     }
-                    let ra = resp.retry_after.clone();
+                    if attempt == retries {
+                        return Ok((resp, true));
+                    }
+                    let (ra, status) = (resp.retry_after.clone(), resp.status);
                     drop(resp);
-                    self.sleep(self.backoff(attempt, &ra), cancel).await?;
+                    let d = self.backoff(attempt, &ra);
+                    send(
+                        side,
+                        StreamEvent::retry(attempt + 1, retries, d, Some(status)),
+                    );
+                    self.sleep(d, cancel).await?;
                 }
             }
             attempt += 1;
@@ -1265,7 +1521,7 @@ impl Client {
         let streaming = tx.is_some();
         let wire = self.wire(&st.messages)?;
         let mut body = Map::new();
-        body.insert("model".into(), json!(model));
+        body.insert("model".into(), json!(""));
         if style == Style::Anthropic {
             body.insert("max_tokens".into(), json!(4096));
         }
@@ -1285,21 +1541,37 @@ impl Client {
                 body.insert("tool_choice".into(), json!("auto"));
             }
         }
-        let body = self.finalize_body(body);
-        let raw = serde_json::to_vec(&body).map_err(|e| ClientError::Decode(e.to_string()))?;
+        let make_raw = |m: &str| {
+            let mut b = body.clone();
+            b.insert("model".into(), json!(m));
+            let b = self.finalize_body(b);
+            serde_json::to_vec(&b).map_err(|e| ClientError::Decode(e.to_string()))
+        };
         let t0 = Instant::now();
         st.last_model = model.into();
         let before = st.usage;
-        let resp = match self
-            .llm_fetch(&self.endpoint(), &self.auth_headers(key), &raw, cancel, tx)
-            .await
-        {
-            Ok(r) => r,
+        let fetched = self
+            .llm_fetch_chain(
+                model,
+                &make_raw,
+                &self.endpoint(),
+                &self.auth_headers(key),
+                cancel,
+                tx,
+            )
+            .await;
+        let resp = match fetched {
+            Ok((r, served)) => {
+                st.last_model = served;
+                r
+            }
             Err(e) => {
                 self.emit_llm(model, "error", t0, 0, 0);
                 return Err(e);
             }
         };
+        let served = st.last_model.clone();
+        let model = served.as_str();
         if !(200..300).contains(&resp.status) {
             self.emit_llm(model, "error", t0, 0, 0);
             return Err(Self::provider_error(resp).await);
@@ -1369,6 +1641,22 @@ impl Client {
                 .and_then(Value::as_str)
                 .unwrap_or("")
                 .to_owned();
+            st.truncated = data
+                .pointer("/choices/0/finish_reason")
+                .and_then(Value::as_str)
+                == Some("length");
+            st.malformed = msg
+                .get("tool_calls")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .any(|tc| {
+                    malformed_args(
+                        tc.pointer("/function/arguments")
+                            .and_then(Value::as_str)
+                            .unwrap_or(""),
+                    )
+                });
             let mut asst = json!({"role": "assistant", "content": content});
             let calls: Vec<Call> = msg
                 .get("tool_calls")
@@ -1412,6 +1700,7 @@ impl Client {
             }
             return Ok((Some(asst), TurnEnd::Final(content), data));
         }
+        st.truncated = data.get("stop_reason").and_then(Value::as_str) == Some("max_tokens");
         let mut content = Vec::new();
         let mut text = String::new();
         let mut calls = Vec::new();
@@ -1431,6 +1720,7 @@ impl Client {
                     let id = b.get("id").and_then(Value::as_str).unwrap_or("");
                     let name = b.get("name").and_then(Value::as_str).unwrap_or("");
                     let input = b.get("input").cloned().unwrap_or(Value::Null);
+                    st.malformed |= !matches!(input, Value::Null | Value::Object(_));
                     content
                         .push(json!({"type": "tool_use", "id": id, "name": name, "input": input}));
                     calls.push(Call {
@@ -1472,6 +1762,7 @@ impl Client {
         }
         let mut blocks: Vec<(i64, Block)> = Vec::new();
         let mut stop_reason = String::new();
+        let mut finish = String::new();
         let mut done = false;
 
         let mut handle = |line: &str, st: &mut RunState| -> bool {
@@ -1491,6 +1782,13 @@ impl Client {
             if style == Style::OpenAI {
                 if let Some(u) = j.get("usage").filter(|u| u.is_object()) {
                     add_usage(&mut st.usage, u, style);
+                }
+                if let Some(fr) = j
+                    .pointer("/choices/0/finish_reason")
+                    .and_then(Value::as_str)
+                    && !fr.is_empty()
+                {
+                    finish = fr.to_owned();
                 }
                 let Some(d) = j
                     .get("choices")
@@ -1669,6 +1967,8 @@ impl Client {
         }
         let streamed = json!({"streamed": true});
         if style == Style::OpenAI {
+            st.truncated = finish == "length";
+            st.malformed = acc.iter().any(|(_, _, a)| malformed_args(a));
             if acc.is_empty() {
                 let asst = json!({"role": "assistant", "content": content});
                 return Ok((Some(asst), TurnEnd::Final(content), streamed));
@@ -1691,11 +1991,13 @@ impl Client {
                 .collect();
             return Ok((Some(asst), TurnEnd::Calls(calls), streamed));
         }
+        st.truncated = stop_reason == "max_tokens";
         let mut content_blocks = Vec::new();
         let mut text = String::new();
         let mut calls = Vec::new();
         for (_, b) in blocks {
             if b.typ == "tool_use" {
+                st.malformed |= malformed_args(&b.json);
                 let input = safe_json_args(&b.json);
                 content_blocks
                     .push(json!({"type": "tool_use", "id": b.id, "name": b.name, "input": input}));
@@ -1951,6 +2253,7 @@ impl Client {
             Style::OpenAI => to_openai(&req_tools),
             Style::Anthropic => to_anthropic(&req_tools),
         };
+        let mut breaker = overflow::OverflowBreaker::default();
         for turn in 0..self.max_turns() {
             st.turns += 1;
             let mut turn_model = self.opts().model.clone();
@@ -1975,17 +2278,68 @@ impl Client {
                     }
                 }
             }
-            let (asst, end) = self
-                .call_model(st, &key, &turn_model, &system, &tools, turn, cancel, tx)
-                .await?;
+            st.truncated = false;
+            st.malformed = false;
+            let (asst, end) = loop {
+                match self
+                    .call_model(st, &key, &turn_model, &system, &tools, turn, cancel, tx)
+                    .await
+                {
+                    Ok(r) => {
+                        breaker.ok();
+                        break r;
+                    }
+                    Err(e) => {
+                        st.messages = self
+                            .react_overflow(
+                                &mut breaker,
+                                e,
+                                &st.messages,
+                                &tools,
+                                &turn_model,
+                                turn,
+                            )
+                            .await?;
+                    }
+                }
+            };
+            let had_asst = asst.is_some();
             if let Some(a) = asst {
                 st.messages.push(a);
             }
+            if self.opts().stop_recovery && turn + 1 < self.max_turns() {
+                let (has_calls, text) = match &end {
+                    TurnEnd::Calls(_) => (true, ""),
+                    TurnEnd::Final(t) => (false, t.as_str()),
+                    TurnEnd::Empty => (false, ""),
+                };
+                let (malformed, truncated) = (st.malformed, st.truncated);
+                if let Some((msg, drop)) = st.rec.decide(has_calls, malformed, truncated, text) {
+                    if drop && had_asst {
+                        st.messages.pop();
+                    }
+                    st.messages.push(json!({"role": "user", "content": msg}));
+                    continue;
+                }
+            }
             let calls = match end {
-                TurnEnd::Empty => return Ok(self.end_run(st, String::new(), tx)),
-                TurnEnd::Final(text) => return Ok(self.end_run(st, text, tx)),
+                TurnEnd::Empty => {
+                    let text = std::mem::take(&mut st.rec.carry);
+                    if self.round_end(st, turn, true, text.clone()).await? {
+                        continue;
+                    }
+                    return Ok(self.end_run(st, text, tx));
+                }
+                TurnEnd::Final(text) => {
+                    let text = std::mem::take(&mut st.rec.carry) + &text;
+                    if self.round_end(st, turn, true, text.clone()).await? {
+                        continue;
+                    }
+                    return Ok(self.end_run(st, text, tx));
+                }
                 TurnEnd::Calls(c) => c,
             };
+            st.rec.carry.clear();
             for c in &calls {
                 send(tx, self.call_event(c));
             }
@@ -2098,6 +2452,7 @@ impl Client {
             if let Some(req) = halt {
                 return Ok(self.pending_run(st, req, tx));
             }
+            self.round_end(st, turn, false, String::new()).await?;
         }
         let text = if style == Style::OpenAI {
             last_text(&st.messages)
@@ -2120,6 +2475,40 @@ impl Client {
             );
         }
         Ok(res)
+    }
+
+    /// §8 `after_round`: fire the round-boundary hook and append its
+    /// injections as user messages. `Ok(true)` when something was appended.
+    /// A final round fires only when a turn remains.
+    async fn round_end(
+        &self,
+        st: &mut RunState,
+        turn: usize,
+        r#final: bool,
+        text: String,
+    ) -> Result<bool, ClientError> {
+        let Some(h) = &self.opts().hooks.after_round else {
+            return Ok(false);
+        };
+        if r#final && turn + 1 >= self.max_turns() {
+            return Ok(false);
+        }
+        let out = h(AfterRoundEvent {
+            turn,
+            r#final,
+            text,
+            messages: st.messages.clone(),
+        })
+        .await
+        .map_err(ClientError::Hook)?;
+        let mut added = false;
+        for m in out.map(|o| o.inject).unwrap_or_default() {
+            if !m.is_empty() {
+                st.messages.push(json!({"role": "user", "content": m}));
+                added = true;
+            }
+        }
+        Ok(added)
     }
 
     fn end_run(&self, st: &RunState, text: String, tx: Option<&Tx>) -> RunResult {
@@ -2282,7 +2671,8 @@ impl Client {
                 validate_part(p, self.opts().max_part_bytes).map_err(ClientError::Part)?;
             }
         }
-        self.drive(&prompt, tk, history, cancel, None).await.0
+        let (this, tk) = (self.clone(), tk.clone());
+        on_worker(async move { this.drive(&prompt, &tk, history, cancel, None).await.0 }).await
     }
 
     /// Resume a run that halted with status `pending` (§10 durable path,

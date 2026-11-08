@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+    <!--
+      TEST SUPPORT ONLY (never shipped): an MCP 2026-07-28 fixture server (examples/mcp-2026/fixture.json),
+      server-side OAuth and a dev authorization server, ported from spikes/mcp-2026/csharp. Run as a child
+      process it serves the fixture over stdio (`stdio-fixture`). The library's client never references it.
+    -->
+  </PropertyGroup>
+
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+
+</Project>

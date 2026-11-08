@@ -53,6 +53,33 @@ func (m *McpSource) ResourceTools() []Tool {
 			var items []any
 			for _, name := range names {
 				c, _ := conn(name)
+				if c.v26 != nil {
+					ctx, cancel := context.WithTimeout(parent(tctx), c.timeout)
+					r, err := c.v26.c.call(ctx, "resources/list", nil)
+					cancel()
+					if err != nil {
+						lines = append(lines, fmt.Sprintf("%s: error: %v", name, err))
+						continue
+					}
+					rs, _ := r["resources"].([]any)
+					for _, x := range rs {
+						m, _ := x.(map[string]any)
+						str := func(k string) string { v, _ := m[k].(string); return v }
+						line := fmt.Sprintf("%s %s", name, str("uri"))
+						if str("name") != "" {
+							line += " — " + str("name")
+						}
+						if str("mimeType") != "" {
+							line += " (" + str("mimeType") + ")"
+						}
+						if str("description") != "" {
+							line += ": " + str("description")
+						}
+						lines = append(lines, line)
+						items = append(items, map[string]any{"server": name, "uri": str("uri"), "name": str("name"), "mimeType": str("mimeType"), "description": str("description")})
+					}
+					continue
+				}
 				ctx, cancel := context.WithTimeout(parent(tctx), c.timeout)
 				res, err := c.client.ListResources(ctx, mcp.ListResourcesRequest{})
 				cancel()
@@ -102,6 +129,24 @@ func (m *McpSource) ResourceTools() []Tool {
 			}
 			ctx, cancel := context.WithTimeout(parent(tctx), c.timeout)
 			defer cancel()
+			if c.v26 != nil {
+				r, err := c.v26.c.call(ctx, "resources/read", map[string]any{"uri": uri})
+				if err != nil {
+					return ToolResult{Output: fmt.Sprintf("read_mcp_resource: %v", err), IsError: true}, nil
+				}
+				var parts []string
+				cs, _ := r["contents"].([]any)
+				for _, x := range cs {
+					m, _ := x.(map[string]any)
+					if t, ok := m["text"].(string); ok {
+						parts = append(parts, t)
+					} else if b, ok := m["blob"].(string); ok {
+						mt, _ := m["mimeType"].(string)
+						parts = append(parts, fmt.Sprintf("[binary %s, %d base64 chars]", mt, len(b)))
+					}
+				}
+				return ToolResult{Output: strings.Join(parts, "\n"), Metadata: map[string]any{"server": server, "uri": uri}}, nil
+			}
 			req := mcp.ReadResourceRequest{}
 			req.Params.URI = uri
 			res, err := c.client.ReadResource(ctx, req)

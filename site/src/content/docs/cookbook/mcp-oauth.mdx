@@ -1,0 +1,188 @@
+---
+title: Hosted MCP servers and OAuth
+description: Connect to MCP 2026-07-28 servers, log in to OAuth-protected ones (browser or pause/resume), use skills a server publishes, and search a big server's tools lazily, in all eight languages.
+---
+
+import { Tabs, TabItem, Aside } from '@astrojs/starlight/components';
+
+<Aside type="tip" title="Why you need this">
+Hosted MCP servers (GitHub's among them) speak the **2026-07-28** protocol and most of them ask you to
+log in with OAuth. Before, you pasted a bearer token into `headers` and refreshed it by hand. Now
+Toolnexus asks every server `server/discover` first, talks 2026-07-28 to the ones that answer, keeps the
+old client for the ones that don't, and runs the OAuth login itself when a server answers `401`.
+</Aside>
+
+Nothing in an existing `mcp.json` has to change. Three keys are new and optional, per server:
+
+| key | what it does |
+|---|---|
+| `auth` | OAuth settings: `clientId`, `clientSecret`, `tokenAuthMethod`, `clientIds` (per issuer), `clientMetadataUrl` (CIMD), `redirectUri`, `mode` (`auto` \| `pause`), `omitRefreshResource`, `allowHttp` (tests only) |
+| `toolSearch` | `true` replaces the server's tools with `<server>_search_tools` and `<server>_call_tool` |
+| `description` | what the server is for; the search tool's description uses it |
+
+```json
+{
+  "mcpServers": {
+    "docs": {
+      "url": "https://mcp.example.com/mcp",
+      "auth": { "clientId": "YOUR_CLIENT_ID" },
+      "toolSearch": true,
+      "description": "the product docs"
+    }
+  }
+}
+```
+
+## 1. Log in: which client identity?
+
+The authorization server has to know your app. Toolnexus uses, in order:
+
+1. a **pre-registered** `clientId` (or `clientIds[<issuer>]`), with `clientSecret` if the app has one;
+2. a **Client ID Metadata Document** URL (`clientMetadataUrl`), when the server advertises CIMD support.
+
+**Dynamic Client Registration is not supported, on purpose.** The MCP spec has deprecated it, and
+GitHub, for example, supports neither DCR nor CIMD, so a registered `clientId` is the universal
+answer. With neither available you get an error that names the issuer and tells you to set
+`auth.clientId`.
+
+## 2. Two login modes
+
+- **`auto`** (default): Toolnexus opens the browser with `openUrl` and takes the callback on
+  `http://127.0.0.1:<random>/callback`. Good for CLIs and desktop apps.
+- **`pause`**: no browser. Your host receives a §10 request
+  `{kind: "authorization", id: "auth-…", url}` through `waitFor`. Send the person to `url`; when the
+  authorization server redirects to your `redirectUri`, answer with
+  `{id, ok: true, data: {callbackUrl: "<the full URL it redirected to>"}}`. The paused tool call then
+  runs **once**. Hosts that already answer URL elicitation get this for free.
+
+Tokens go into a `tokenStore` (default: in memory, per load). They are refreshed before they expire,
+re-requested with a wider scope on `insufficient_scope`, and never written to logs or error text.
+
+<Tabs syncKey="lang">
+<TabItem label="JavaScript">
+```ts
+import { Toolkit } from "toolnexus"
+
+const toolkit = await Toolkit.create({
+  mcpConfig: "mcp.json",
+  waitFor,                       // MRTR input + pause-mode authorization
+  tokenStore,                    // { load(resource), save(resource, token), delete(resource) }
+  openUrl: (url) => open(url),   // auto mode; default is the OS opener
+})
+```
+</TabItem>
+<TabItem label="Python">
+```python
+from toolnexus import create_toolkit
+
+tk = await create_toolkit("mcp.json",
+                          wait_for=wait_for,      # MRTR input + pause-mode authorization
+                          token_store=my_store,   # load/save/delete(resource); default in-memory
+                          open_url=my_opener)     # auto mode; default the OS opener
+```
+</TabItem>
+<TabItem label="Go">
+```go
+tk, err := toolnexus.CreateToolkit(ctx, toolnexus.Options{
+	McpConfig:  "mcp.json",
+	WaitFor:    waitFor,                                   // MRTR input + pause-mode authorization
+	TokenStore: myStore,                                   // nil = in memory
+	OpenURL:    func(u string) error { return open(u) },   // auto mode; nil = the OS opener
+})
+```
+</TabItem>
+<TabItem label="Java">
+```java
+var tk = Toolkit.create(new Toolkit.Options()
+    .mcpConfig("mcp.json")
+    .waitFor(waitFor)                 // MRTR input + pause-mode authorization
+    .tokenStore(store)                // default in memory
+    .openUrl(url -> browser.open(url)));
+```
+</TabItem>
+<TabItem label="C#">
+```csharp
+await using var tk = await Toolkit.CreateAsync(new Toolkit.Options
+{
+    McpConfig = "mcp.json",
+    WaitFor = WaitFor,                 // MRTR input + pause-mode authorization
+    TokenStore = myStore,              // ITokenStore; default in memory
+    OpenUrl = url => OpenBrowser(url), // auto mode; default is the OS opener
+});
+```
+</TabItem>
+<TabItem label="Rust">
+```rust
+let tk = create_toolkit(ToolkitOptions {
+    mcp_config: Some(McpConfigInput::Path("mcp.json".into())),
+    wait_for: Some(wait_for),     // MRTR input + pause-mode authorization
+    token_store: Some(store),     // default in memory
+    open_url: Some(opener),       // auto mode; default the OS opener
+    ..Default::default()
+}).await?;
+```
+</TabItem>
+<TabItem label="Elixir">
+```elixir
+tk =
+  Toolnexus.Toolkit.build(
+    mcp_config: "mcp.json",
+    wait_for: &MyHost.wait_for/1,          # MRTR input + pause-mode authorization
+    token_store: MyHost.TokenStore.new(),  # default in memory
+    open_url: &MyHost.open/1               # auto mode; default the OS opener
+  )
+```
+</TabItem>
+<TabItem label="Clojure">
+```clojure
+(core/build {:mcp         (slurp "mcp.json")
+             :wait-for    (fn [request] ...)          ; MRTR input + pause-mode authorization
+             :token-store {:load f :save f :delete f} ; default in memory
+             :open-url    (fn [url] ...)})            ; auto mode; default the OS opener
+```
+</TabItem>
+</Tabs>
+
+## 3. Questions a tool asks mid-call
+
+A 2026 server can answer `tools/call` with `input_required` ("what name?"). Toolnexus turns each
+question into a §10 request through your `waitFor`: a form becomes `kind: "input"` (the JSON schema is
+in `data.schema`), a URL becomes `kind: "authorization"`. Without a `waitFor` the call returns
+`{status: "pending"}`, and resuming it continues from the round it stopped at, so earlier answers are
+never asked again.
+
+Toolnexus **never re-sends a `tools/call`** after a timeout, a 5xx or a dropped connection, because the
+server may already have run it. It re-sends only after a `401` or a `403 insufficient_scope`, which a
+server returns before it runs anything.
+
+## 4. Skills a server publishes
+
+A server that offers the MCP skills extension adds its skills to the same `skill` tool as your local
+`skills/` folder. Each download is checked against its sha256 digest and must stay inside the skill.
+
+## 5. Big servers: search instead of listing
+
+With `"toolSearch": true` the model sees two tools for that server instead of hundreds:
+
+- `docs_search_tools {query, limit?}` returns a JSON array of the best matches
+  (`name`, `description`, `inputSchema`, `server`), ranked by BM25 over the tool name and description.
+- `docs_call_tool {name, arguments}` runs one of them. The result is the same as a direct call.
+
+Your per-server `tools` filter and `disableTools` apply first, so a hidden tool can be neither found nor
+called.
+
+## What is supported
+
+| | 2026-07-28 server | older server |
+|---|---|---|
+| tools (list, call, filters, naming) | yes | yes, the client you had before |
+| questions mid-call (`input_required` / elicitation) | yes, via `waitFor` | yes, via `waitFor` |
+| OAuth login | yes | yes in JS, Python, Java, C#; Rust, Elixir and Clojure send the token as a fixed header, without refreshing it mid-session |
+| skills over MCP | yes | no |
+| tool search | yes | yes |
+| `list_mcp_resources` / `read_mcp_resource` | not yet | yes |
+| progress notifications | no (dropped by the 2026 spec) | yes |
+| roots, sampling, logging, Tasks, DCR | no | no |
+
+Serving a toolkit **as** a 2026-07-28 MCP server, with `auth` protecting it, is the next step; until
+then `serve /mcp` speaks the previous protocol. Contract: SPEC §2 and §2A.

@@ -1,0 +1,59 @@
+// MCP 2026-07-28 spike, Java port. JDK only (java.net.http, com.sun.net.httpserver, java.security)
+// plus Jackson for JSON. No MCP SDK.
+plugins {
+    id 'java'
+    id 'application'
+}
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(21)
+    }
+}
+
+repositories {
+    mavenCentral()
+}
+
+sourceSets {
+    // examples/NN-name/Main.java, one runnable program per user story (package exNN).
+    examples {
+        java { srcDirs = file('examples').listFiles().findAll { it.isDirectory() }.sort() }
+        compileClasspath += sourceSets.main.output + sourceSets.main.compileClasspath
+        runtimeClasspath += sourceSets.main.output + sourceSets.main.runtimeClasspath
+    }
+}
+
+dependencies {
+    implementation 'com.fasterxml.jackson.core:jackson-databind:2.18.2'
+    examplesImplementation 'com.fasterxml.jackson.core:jackson-databind:2.18.2'
+    testImplementation sourceSets.examples.output // KeycloakTest reuses examples/09's HeadlessLogin
+    testImplementation platform('org.junit:junit-bom:5.11.4')
+    testImplementation 'org.junit.jupiter:junit-jupiter'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = 'UTF-8'
+}
+
+application {
+    mainClass = 'io.github.muthuishere.toolnexus.mcp2026.Spike'
+}
+
+// ./gradlew -q runExample -Pex=01-connect-http
+tasks.register('runExample', JavaExec) {
+    classpath = sourceSets.examples.runtimeClasspath
+    mainClass = 'ex' + (project.findProperty('ex') ?: '01').toString().substring(0, 2) + '.Main'
+    environment System.getenv()
+}
+
+test {
+    useJUnitPlatform()
+    dependsOn 'examplesClasses'
+    systemProperty 'examples.classpath', sourceSets.examples.runtimeClasspath.asPath
+    systemProperty 'test.runtime.classpath', sourceSets.test.runtimeClasspath.asPath
+    // gated suites read KEYCLOAK / GITHUB_OAUTH / GITHUB_MCP_CLIENT_* from the environment
+    testLogging { events 'failed', 'skipped'; exceptionFormat 'full'; showStandardStreams = false }
+    outputs.upToDateWhen { false }
+}

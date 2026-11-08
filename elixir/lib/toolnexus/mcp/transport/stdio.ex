@@ -30,13 +30,17 @@ defmodule Toolnexus.Mcp.Transport.Stdio do
           {String.to_charlist(to_string(k)), String.to_charlist(to_string(v))}
         end
 
-      opts = [
-        :binary,
-        :exit_status,
-        # `exec "$0" "$@" 2>/dev/null`: sh execs into the real command, so the
-        # port's os_pid is the child's pid and stderr is discarded.
-        args: ["-c", ~S(exec "$0" "$@" 2>/dev/null), path | args]
-      ]
+      # `exec "$0" "$@" 2>/dev/null`: sh execs into the real command, so the
+      # port's os_pid is the child's pid and stderr is discarded — unless the
+      # config names a `stderr_path`, which then receives the child's stderr
+      # (appended) for error messages (SPEC §8C, the ACP agent's stderr).
+      sh_args =
+        case cfg["stderr_path"] do
+          p when is_binary(p) and p != "" -> ["-c", ~S(f="$0"; exec "$@" 2>>"$f"), p, path | args]
+          _ -> ["-c", ~S(exec "$0" "$@" 2>/dev/null), path | args]
+        end
+
+      opts = [:binary, :exit_status, args: sh_args]
 
       opts = if env == [], do: opts, else: [{:env, env} | opts]
 

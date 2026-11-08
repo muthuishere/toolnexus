@@ -1,6 +1,6 @@
 [package]
 name = "toolnexus"
-version = "0.23.0"
+version = "0.28.0"
 edition = "2024"
 rust-version = "1.85"
 description = "Vendor-neutral tool layer for LLM agents: ACP agents, MCP servers, agent skills behind one Tool interface (Rust port of toolnexus)."
@@ -11,6 +11,8 @@ documentation = "https://docs.rs/toolnexus"
 readme = "README.md"
 keywords = ["llm", "agents", "mcp", "acp", "tools"]
 categories = ["api-bindings", "asynchronous"]
+# Interop-matrix runners (interop/mcp2026/rust) are test tooling: never published.
+exclude = ["examples/interop_*"]
 
 [features]
 default = ["mcp-http", "serve"]
@@ -25,19 +27,22 @@ serve = [
     "dep:hyper",
     "dep:hyper-util",
     "dep:http-body-util",
+    "dep:ring",
 ]
 
 [dependencies]
 tokio = { version = "1", features = ["process", "io-util", "sync", "time", "rt", "macros"] }
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde_json = { version = "1", features = ["raw_value"] }
 thiserror = "2"
 yaml-rust2 = "0.13"
 tokio-util = "0.7"
-rmcp = { version = "3.8", default-features = false, features = ["client", "transport-child-process"] }
+rmcp = { version = "3.8", default-features = false, features = ["client"] }
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "stream", "json"] }
 regex = "1"
 base64 = "0.22"
+sha2 = "0.10"
+url = "2"
 futures-util = "0.3"
 http = { version = "1", optional = true }
 process-wrap = { version = "10", features = ["tokio1"] }
@@ -45,13 +50,39 @@ uuid = { version = "1", features = ["v4"] }
 hyper = { version = "1", features = ["server", "http1"], optional = true }
 hyper-util = { version = "0.1", features = ["tokio"], optional = true }
 http-body-util = { version = "0.1", optional = true }
+# serve: RS256 verify/sign + SHA-256 for the MCP 2026 server auth (SPEC §7C.2).
+# ring is already in the tree via rustls.
+ring = { version = "0.17", optional = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
 [dev-dependencies]
+# rsa generates the test-only dev authorization server's key (ring cannot
+# generate RSA keys); tests/common_dev_auth.
+rsa = { version = "0.9", default-features = false, features = ["std", "u64_digit", "getrandom"] }
 serde = { version = "1", features = ["derive"] }
 tokio = { version = "1", features = ["full"] }
 
 [target.'cfg(unix)'.dev-dependencies]
 libc = "0.2"
+
+[[example]]
+name = "mcp_handler"
+required-features = ["serve", "mcp-http"]
+
+# MCP 2026-07-28 interop runners (interop/mcp2026/rust); excluded from the package.
+[[example]]
+name = "interop_mcp2026_server"
+required-features = ["serve", "mcp-http"]
+
+[[example]]
+name = "interop_mcp2026_client"
+required-features = ["serve", "mcp-http"]
+
+# The test-only dev authorization server generates a 2048-bit RSA key per start; keep that
+# fast in debug test builds. (Profiles apply only when this crate is the root.)
+[profile.dev.package.num-bigint-dig]
+opt-level = 3
+[profile.dev.package.rsa]
+opt-level = 3

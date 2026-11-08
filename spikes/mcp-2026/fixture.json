@@ -1,0 +1,16 @@
+{
+  "server": { "name": "toolnexus-spike", "version": "0.0.1" },
+  "tools": [
+    {
+      "name": "echo",
+      "description": "Echo the given text back.",
+      "inputSchema": { "type": "object", "properties": { "text": { "type": "string" } }, "required": ["text"] }
+    },
+    {
+      "name": "greet",
+      "description": "Greet the user; asks for their name via input_required.",
+      "inputSchema": { "type": "object", "properties": {} }
+    }
+  ],
+  "skillsDir": "../../examples/skills"
+}

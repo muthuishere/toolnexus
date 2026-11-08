@@ -65,6 +65,8 @@ def main() -> None:
         "last_option_id": None,
         "received_cwd": None,
         "received_mcp_servers": None,
+        "cancel_pending": None,
+        "cancel_seen": False,
     }
     next_srv_id = [0]
     perm_replies: dict[str, dict] = {}
@@ -102,6 +104,20 @@ def main() -> None:
             state["prompt_count"] += 1
             state["history"].append(user_text)
             history_snapshot = list(state["history"])
+
+        if scenario == "cancel":
+            # A prompt containing "block" streams "working" and holds the turn until a
+            # session/cancel notification; any later prompt reports whether one came.
+            if "block" in user_text:
+                send_message_chunk(session_id, "working")
+                with state_lock:
+                    state["cancel_pending"] = msg_id
+                return
+            with state_lock:
+                seen = state["cancel_seen"]
+            send_message_chunk(session_id, f"after-cancel-seen:{str(seen).lower()}")
+            reply(msg_id, {"stopReason": "end_turn"})
+            return
 
         if scenario == "hang":
             # Never reply, never ask permission. The client's own safety-net
@@ -235,7 +251,13 @@ def main() -> None:
             text = "".join(p.get("text", "") for p in (params.get("prompt") or []))
             threading.Thread(target=handle_prompt, args=(msg_id, session_id, text), daemon=True).start()
         elif method == "session/cancel":
-            reply(msg_id, {})
+            if msg_id is not None:
+                reply(msg_id, {})
+            with state_lock:
+                state["cancel_seen"] = True
+                pending, state["cancel_pending"] = state["cancel_pending"], None
+            if pending is not None:
+                reply(pending, {"stopReason": "cancelled"})
         elif method == "diagnostics/get":
             with state_lock:
                 reply(msg_id, dict(state))

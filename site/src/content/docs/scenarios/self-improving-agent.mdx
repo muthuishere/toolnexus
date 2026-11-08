@@ -59,7 +59,7 @@ conversation. It is worse on three axes, and understanding why is what makes the
 
 That last row is the security argument, and it is the one people skip. A reviewer's job is to
 *write a note*. Giving it shell access because it happened to be spawned by an agent that had
-shell access is how a "reflection step" becomes an incident. In toolnexus, **scoping is the
+shell access is how a "reflection step" becomes an incident. In Toolnexus, **scoping is the
 security model** — the child sees only the tools you list in `uses`.
 
 ## Part 1 — the reviewer
@@ -564,6 +564,15 @@ your bill.
 
 ## Part 4 — the consolidator (the "dream" pattern)
 
+<Aside type="tip" title="Now built in: Dreaming">
+The consolidator below can only tidy what memory already says. It cannot tell a true entry from
+a wrong one. [Dreaming](/toolnexus/dreaming/) is its built-in successor: one `dream` option on
+`fromDir` runs a dreamer that checks every memory line against the **transcripts**, fixes or
+drops what they contradict, keeps `MEMORY.md` a short index over linked notes, and logs every
+change to `memory/log.md`. Use it instead of hand-writing this `HEARTBEAT.md`. The recipe stays
+below because it shows how little the pattern needs.
+</Aside>
+
 A reviewer that only appends produces the classic failure: after three weeks `MEMORY.md` has
 forty entries, eight of which say the same thing in different words, three of which contradict
 each other, and all of which are in the prompt prefix of every session. Append-only memory is a
@@ -717,7 +726,7 @@ back on the next session; a **heartbeat** keeps the notes clean.
 | **Bad lessons** | `git` on the home directory | No way to undo a wrong lesson. Commit `personas/ava/`; a bad entry becomes a revert. |
 
 <Aside type="caution" title="What the library does not promise">
-There is no learning **policy** in toolnexus, and that is on purpose. It does not score runs, it
+There is no learning **policy** in Toolnexus, and that is on purpose. It does not score runs, it
 does not decide what a lesson is, it does not deduplicate for you, and it does not stop a
 reviewer from writing something wrong. It guarantees the mechanics: the child runs in an
 isolated context with only the tools you scoped, its tokens roll up into the parent's ledger,

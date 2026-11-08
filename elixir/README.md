@@ -16,7 +16,7 @@ this port ships the **full** elicitation bridge (form *and* URL mode).
 
 ```elixir
 def deps do
-  [{:toolnexus, "~> 0.23"}]
+  [{:toolnexus, "~> 0.28"}]
 end
 ```
 
@@ -113,6 +113,80 @@ Batteries (SPEC §8B): `Toolnexus.Judge.ToolGuard`, `ToolRelevance`, `SkillRelev
 verdict from `check`/`select`/`filter`/`pick`, and `as_hook(battery, next)` where a hook seam
 exists. A `before_llm` hook may also return `%{model: "id"}` to override the model for that turn.
 
+### Backends, images, cache and helpers
+
+Proposed defaults, owner to confirm (`openspec/changes/add-classifier-backends`, SPEC §8B).
+
+```elixir
+alias Toolnexus.Classifier
+alias Toolnexus.Classifier.{MemoryCache, Thresholds}
+import Toolnexus.Judge
+
+# Backends are data: Classifier.backends() — typesafe (default) | openrouter
+# (typesafe/jev-1.14) | cloudflare | vercel | openai (Decisions API) | custom. ${NAME} in base_url expands at
+# call time; errors name the endpoint unexpanded. custom needs base_url + supports.
+{:ok, c} = Classifier.create(backend: "openrouter", cache: MemoryCache.new(3_600_000, 1000))
+
+# A ContentPart image in the state is lifted into `assets` (PNG/JPEG, 280..1568 px
+# a side, 16 MiB each, 32 MiB a request; never resized). A backend whose row says no
+# images fails BEFORE the network with %Classifier.Unsupported{}; `supports:` overrides.
+photo = Toolnexus.ContentPart.image!("listing.png")
+
+{:ok, d} = c |> Classifier.state(%{"photo" => photo}) |> Classifier.evaluate([noul(:red, "Is the photo's object red?")])
+d.cached # true when served from the cache, no request sent
+
+# Batch: per-item %BatchResult{decision | error}, state order, 16 in flight.
+{:ok, results} = c |> Classifier.states(["a", "b"]) |> Classifier.evaluate([noul(:q, "…")])
+```
+
+- `state(v) |> evaluate(qs)` validates the reply fail-closed (`validate_decision/2`); plain
+  `evaluate/3` keeps its old behaviour and does not.
+- The cache is opt-in (`%{get:, set:}` or `MemoryCache`), per request, keyed on the SERVED model,
+  and stores only valid replies. Key bytes match every port (`model_cache_key/2`,
+  `decision_cache_key/5`).
+- Helpers: `validate_decision/2`, `Thresholds.band/2` (inclusive 0.8 / 0.2 / 0.6; `ask`/`gate` keep
+  their bands), `chunk_questions/2`, `Judge.raw/4` (an unmodelled question type; unknown answer
+  types decode to `%RawAnswer{}`).
+- `classifier.evaluate` metric events carry `questions`, `questions_hash` and `cached`.
+- `style: "llm"` is **deprecated**: it still works unchanged for at least one minor release, with
+  no runtime warning.
+
+## MCP 2026-07-28 + OAuth
+
+Every MCP server is probed with `server/discover` first (SPEC §2.2). A server on
+`2026-07-28` is used directly — no `initialize`, no session, stdio and HTTP, MRTR input
+requests through `wait_for` — and anything older drops to the existing (frozen) client.
+Nothing in `mcp.json` has to change.
+
+```elixir
+tk =
+  Toolnexus.Toolkit.build(
+    mcp_config: %{
+      "mcpServers" => %{
+        "docs" => %{
+          "url" => "https://mcp.example.com/mcp",
+          "auth" => %{"clientId" => "my-registered-app"},   # or clientMetadataUrl (CIMD); never DCR
+          "toolSearch" => true,                             # expose docs_search_tools + docs_call_tool
+          "description" => "the product docs"
+        }
+      }
+    },
+    wait_for: &MyHost.wait_for/1,                # MRTR input + auth "pause" answered here
+    token_store: MyHost.TokenStore.new(),        # optional; default in-memory per load
+    open_url: &MyHost.open/1                     # optional; "auto" mode browser opener
+  )
+```
+
+- `auth.mode` is `"auto"` (browser + loopback callback) or `"pause"` (a §10
+  `kind:"authorization"` request; answer it with `data: %{"callbackUrl" => url}`).
+  Without `wait_for`, a pause during load marks the server `failed` (`authorization
+  pending`); during a tool call it returns a §10 pending result, resumed by the next
+  execution carrying `ctx.answer`.
+- Remote skills (the MCP skills extension) join the same `skill` tool as local skills.
+- Tokens are never logged; `inspect/1` on a `Toolnexus.Mcp.Token` is redacted.
+- **Gap:** the frozen fallback gets the bearer token as a static `Authorization` header
+  when it starts; a 401 *later* on the fallback path does not re-run the OAuth flow.
+
 ## Why the BEAM port
 
 Long-running agents want supervision. Every MCP connection is a supervised process; a crashed
@@ -172,6 +246,60 @@ keys are set; `MEDIA_VIDEO=1` adds Grok video, `MEDIA_PAID=1` paid video/talk. I
 path or URL, mime, size and usage per file, exits 1 if a step fails, and exits 0 with a hint when no
 client is available.
 
+## Embeddable MCP handler
+
+`Toolnexus.mcp_handler(toolkit, cfg)` is a `Plug` you mount on **your** listener (Bandit, Phoenix),
+behind your own TLS, CORS and OAuth. Every policy is a hook: `authenticate` (401 +
+`www_authenticate`), `list_tools` per request (a name outside it is never executed), `before_call`
+(`:allow` / `{:deny, msg}` / `{:confirm, msg}` — confirm elicits on the same POST's SSE stream when
+the client can), `on_call`, `server_info`, resources/prompts, pluggable `session_ids`, `stateless`.
+`Toolnexus.McpHandler.notify_tools_changed/1` pushes `tools/list_changed` to open GET streams.
+SPEC §7C.1; runnable: `mix run examples/mcp_handler.exs`.
+
+```elixir
+handler =
+  Toolnexus.mcp_handler(toolkit,
+    authenticate: fn conn -> MyAuth.verify(conn) end,          # {:ok, identity} | {:error, _}
+    list_tools: fn ctx -> MyTools.for(Toolnexus.McpHandler.identity(ctx)) end,
+    before_call: fn _ctx, tool, _args ->
+      if tool.annotations && tool.annotations.destructive_hint, do: {:confirm, "Sure?"}, else: :allow
+    end
+  )
+
+Bandit.start_link(plug: {Toolnexus.McpHandler, handler}, port: 4000)
+```
+
+Tools may also return `%ToolResult{structured: map, meta: map}` (→ `structuredContent` / `_meta`)
+and declare `output_schema` / `annotations`; absent, the wire is unchanged.
+
+### MCP 2026-07-28 (opt-in)
+
+List `"2026-07-28"` in `protocol_versions` (alone, or next to `"2025-06-18"` for both wires on one
+mount) and the handler also speaks the stateless 2026 wire: `server/discover`, header validation,
+`resultType` + `_meta` serverInfo, and MRTR — a `{:confirm, msg}` or a tool's §10 suspension
+answers `input_required`, and the retry's answer reaches the tool as `ctx.answer`. `initialize`
+never negotiates 2026-07-28; without it in the list the handler is unchanged. `list_skills`
+publishes skills (`skills/list`, `skills/get`, `skill://` reads); `Toolnexus.load_mcp_skills/1`
+builds them from a directory. `Toolnexus.McpServerAuth` makes the handler an OAuth protected
+resource: bearer JWT (RS256, JWKS discovered from the issuer) or your own `verify`, per-tool
+scopes, exact 401/403 challenges, and an RFC 9728 metadata plug. SPEC §7C.2.
+
+```elixir
+auth = Toolnexus.McpServerAuth.new(issuer: "https://login.example", scopes: %{"*" => ["mcp"], "wipe" => ["mcp:admin"]})
+
+handler =
+  Toolnexus.mcp_handler(toolkit,
+    protocol_versions: ["2026-07-28", "2025-06-18"],
+    authenticate: Toolnexus.McpServerAuth.authenticator(auth),  # identity = %Toolnexus.McpPrincipal{}
+    list_skills: fn _ctx -> Toolnexus.load_mcp_skills("skills") end
+  )
+# mount {Toolnexus.McpHandler, handler} at /mcp and
+# Toolnexus.McpServerAuth.metadata(auth) at /.well-known/oauth-protected-resource[/mcp]
+```
+
+Bring your own authorization server: `Toolnexus.McpServerAuth` verifies its tokens. The auto-approving dev
+authorization server the suite uses is test tooling (`test/support/mcp_dev_auth_server.ex`), not part of the library.
+
 ## Documentation
 
 Everything else — the full surface, with runnable examples — lives on the docs site:
@@ -181,8 +309,25 @@ Everything else — the full surface, with runnable examples — lives on the do
 | **Start here** | [Quickstart](https://muthuishere.github.io/toolnexus/quickstart/) · [Concepts](https://muthuishere.github.io/toolnexus/concepts/) · [Install](https://muthuishere.github.io/toolnexus/install/) |
 | **Tool sources** | [MCP](https://muthuishere.github.io/toolnexus/mcp/) · [Skills](https://muthuishere.github.io/toolnexus/skills/) · [Native](https://muthuishere.github.io/toolnexus/native/) · [HTTP](https://muthuishere.github.io/toolnexus/http/) · [Built-ins](https://muthuishere.github.io/toolnexus/builtins/) · [A2A](https://muthuishere.github.io/toolnexus/a2a/) |
 | **The loop** | [Streaming](https://muthuishere.github.io/toolnexus/streaming/) · [Memory](https://muthuishere.github.io/toolnexus/memory/) · [Suspension](https://muthuishere.github.io/toolnexus/suspension/) · [Resilience](https://muthuishere.github.io/toolnexus/resilience/) · [Observability](https://muthuishere.github.io/toolnexus/observability/) |
-| **Agents** | [Sub-agents & teams](https://muthuishere.github.io/toolnexus/subagents/) · [Personas](https://muthuishere.github.io/toolnexus/persona-agents/) · [Typed decisions](https://muthuishere.github.io/toolnexus/judge/) |
+| **Agents** | [Sub-agents & teams](https://muthuishere.github.io/toolnexus/subagents/) · [Personas](https://muthuishere.github.io/toolnexus/persona-agents/) · [Dreaming](https://muthuishere.github.io/toolnexus/dreaming/) · [Typed decisions](https://muthuishere.github.io/toolnexus/judge/) |
 | **API reference** | **[Elixir](https://muthuishere.github.io/toolnexus/api/elixir/)** |
 | **Cookbook** | [Zero to agent](https://muthuishere.github.io/toolnexus/cookbook/zero-to-agent/) · [MCP servers](https://muthuishere.github.io/toolnexus/cookbook/mcp-servers/) · [Agent skills](https://muthuishere.github.io/toolnexus/cookbook/agent-skills/) · [Judge](https://muthuishere.github.io/toolnexus/cookbook/judge/) |
 
 Contract across all eight ports: [`SPEC.md`](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
+
+## Agents via ACP (SPEC §8C)
+
+toolnexus ships no per-agent client. Three vendor-neutral pieces compose instead:
+`Toolnexus.Toolkit.as_mcp_server/2` serves the toolkit to a local agent
+(`%{url, token, close}`, loopback + bearer), `Toolnexus.Acp.connect/2` drives any
+ACP agent (`:mcp_servers` sent verbatim, `:session_meta`, `:client_caps_meta`,
+`:model`), and `Toolnexus.Acp.generate_stream/1` plugs into
+`Toolnexus.Client.create_in_process(generate_stream: …)` for incremental streaming.
+
+```elixir
+srv = Toolnexus.Toolkit.as_mcp_server(tk)
+entry = %{"type" => "http", "name" => "toolnexus", "url" => srv.url,
+          "headers" => [%{"name" => "Authorization", "value" => "Bearer " <> srv.token}]}
+{:ok, acp} = Toolnexus.Acp.connect(["my-agent", "acp"], mcp_servers: [entry])
+client = Toolnexus.Client.create_in_process(model: "acp", generate_stream: Toolnexus.Acp.generate_stream(acp))
+```

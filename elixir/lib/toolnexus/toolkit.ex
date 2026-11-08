@@ -58,7 +58,10 @@ defmodule Toolnexus.Toolkit do
       top-level `builtins` key on a parsed config map is consulted
     * `:agents` — remote A2A agents (§7A); a top-level `agents` config block
       is merged in as well
-    * `:wait_for` — §10 host resolver; bridges MCP elicitation
+    * `:wait_for` — §10 host resolver; bridges MCP elicitation, MCP 2026 MRTR
+      input requests and OAuth `pause` authorizations
+    * `:token_store` — MCP OAuth token store (`Toolnexus.Mcp.TokenStore`), default in-memory
+    * `:open_url` — `(url -> :ok | {:error, reason})` for MCP OAuth `auto` mode
     * `:deadline` (ms) — bounds the MCP load (§2 Gap 3)
   """
   @spec build(keyword() | map()) :: t()
@@ -76,7 +79,21 @@ defmodule Toolnexus.Toolkit do
 
     mcp =
       if opts[:mcp_config] != nil,
-        do: Mcp.load(opts[:mcp_config], wait_for: opts[:wait_for], deadline: opts[:deadline])
+        do:
+          Mcp.load(opts[:mcp_config],
+            wait_for: opts[:wait_for],
+            deadline: opts[:deadline],
+            token_store: opts[:token_store],
+            open_url: opts[:open_url],
+            disable_tools: opts[:disable_tools]
+          )
+
+    # Remote skills (MCP skills extension, §2.7) join the same `skill` inventory.
+    opts =
+      case mcp do
+        %{skills: [_ | _] = remote} -> Map.put(opts, :skills, (opts[:skills] || []) ++ remote)
+        _ -> opts
+      end
 
     skill = load_skill_source(opts)
 
@@ -275,6 +292,27 @@ defmodule Toolnexus.Toolkit do
       mcp_tools: if(mcp, do: tk.tools),
       on_call: opts[:on_call]
     )
+  end
+
+  @doc """
+  Serve this toolkit for a local agent to call (SPEC §8C `asMcpServer`): the
+  §7C stateless MCP endpoint on `127.0.0.1:<ephemeral>/mcp`, guarded by a
+  fresh bearer token (32 random bytes, lowercase hex). Tool names are served
+  verbatim (`skill` stays `skill`); `config` is the §7C `MCPServeConfig`
+  (`name`, `version`, `tools` filter).
+
+  Returns `%{url: url, token: token, close: (-> :ok)}`; `close` is idempotent.
+  The caller builds whatever `mcpServers` entry its agent accepts, e.g.
+  `%{"type" => "http", "name" => "toolnexus", "url" => url,
+  "headers" => [%{"name" => "Authorization", "value" => "Bearer " <> token}]}`.
+  """
+  @spec as_mcp_server(t(), map() | nil) :: %{
+          url: String.t(),
+          token: String.t(),
+          close: (-> :ok)
+        }
+  def as_mcp_server(%__MODULE__{} = tk, config \\ nil) do
+    Toolnexus.McpServe.serve_loopback(tk.tools, config || %{})
   end
 
   @doc "Disconnect every MCP client."

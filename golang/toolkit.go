@@ -52,6 +52,11 @@ type Options struct {
 	// onto this WaitFor (form→kind:"input", URL→kind:"authorization"). Typically the
 	// same function passed to the client. Omit ⇒ MCP elicitation is not advertised.
 	WaitFor func(Request) (Answer, error)
+	// TokenStore persists MCP OAuth tokens per resource (§2A.1a). nil ⇒ in-memory per load.
+	TokenStore TokenStore
+	// OpenURL opens the MCP OAuth authorization URL in `auto` mode (§2A.1a).
+	// nil ⇒ the OS opener; tests inject an HTTP GET.
+	OpenURL func(string) error
 	// Media registers the media router's tools (§7G, source "media") — one per
 	// verb its clients support. Equivalent to tk.Register(media.Tools()...).
 	Media *Media
@@ -85,7 +90,9 @@ func CreateToolkit(ctx context.Context, opts Options) (*Toolkit, error) {
 
 	if opts.McpConfig != nil {
 		// §2 Gap 3: the caller's ctx propagates through the MCP connect/init/list.
-		m, err := LoadMcpWithContext(ctx, opts.McpConfig, opts.WaitFor)
+		m, err := LoadMcpWithOptions(ctx, opts.McpConfig, McpLoadOptions{
+			WaitFor: opts.WaitFor, TokenStore: opts.TokenStore, OpenURL: opts.OpenURL, DisableTools: opts.DisableTools,
+		})
 		if err != nil {
 			return nil, err
 		}
@@ -94,7 +101,12 @@ func CreateToolkit(ctx context.Context, opts Options) (*Toolkit, error) {
 	// Skills come from directories, in-memory data, and/or a lazy provider (§3,
 	// S1). The provider is resolved here and merged with the data list; a
 	// provider failure is isolated so other sources still load.
-	if len(opts.SkillsDir) > 0 || len(opts.Skills) > 0 || opts.SkillProvider != nil {
+	// Skills from MCP servers' skills extension (§2.7) join the same inventory.
+	skillDirs := opts.SkillsDir
+	if mcp != nil && len(mcp.SkillDirs) > 0 {
+		skillDirs = append(append([]string{}, opts.SkillsDir...), mcp.SkillDirs...)
+	}
+	if len(skillDirs) > 0 || len(opts.Skills) > 0 || opts.SkillProvider != nil {
 		dataDefs := append([]SkillDef{}, opts.Skills...)
 		if opts.SkillProvider != nil {
 			if provided, pErr := opts.SkillProvider(ctx); pErr != nil {
@@ -119,7 +131,7 @@ func CreateToolkit(ctx context.Context, opts Options) (*Toolkit, error) {
 			filter = merged
 		}
 		skill = LoadSkillsWith(LoadSkillsOptions{
-			Dirs:        opts.SkillsDir,
+			Dirs:        skillDirs,
 			Skills:      dataDefs,
 			Filter:      filter,
 			SampleLimit: opts.SkillSampleLimit,

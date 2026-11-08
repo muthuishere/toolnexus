@@ -1,9 +1,15 @@
 ---
-title: toolnexus
-description: Your LLM, with MCP tools and agent skills built in — in 3 lines, in 8 languages. Vendor-neutral, byte-identical across JavaScript, Python, Go, Java, C#, Elixir, Clojure and Rust.
+title: Toolnexus
+description: "One vendor-neutral agent library, byte-identical in JavaScript, Python, Go, Java, C#, Elixir, Clojure and Rust: MCP client and server, agent skills, A2A and ACP agents, a typed decision classifier, image/video/speech generation, streaming, memory and resilience. Benchmarked against 21 frameworks; fastest or level in most languages."
 template: splash
+# One-word tab title on the home page, not "Toolnexus | Toolnexus".
+head:
+  - tag: title
+    content: Toolnexus
 hero:
-  tagline: Give any LLM tool-calling, an MCP host, agent skills, and remote agents — in a few lines, in eight languages.
+  image:
+    html: '<svg class="tn-hero-mark" viewBox="0 0 32 32" role="img" aria-label="Toolnexus mark"><path class="tn-wire" pathLength="1" d="M4 6L14 16"/><path class="tn-wire" pathLength="1" d="M4 16H14"/><path class="tn-wire" pathLength="1" d="M4 26L14 16"/><circle cx="4" cy="6" r="2.8"/><circle cx="4" cy="16" r="2.8"/><circle cx="4" cy="26" r="2.8"/><path class="tn-head" d="M12 7.5L29 16L12 24.5L16 16Z"/></svg>'
+  tagline: "Simpler than all. Faster than most. The complete agentic backbone: MCP, skills and your own tools for any LLM, in eight languages."
   actions:
     - text: Quickstart
       link: /toolnexus/quickstart/
@@ -15,6 +21,18 @@ hero:
 ---
 
 import { Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+
+<svg class="tn-converge not-content" viewBox="0 0 800 48" preserveAspectRatio="none" aria-hidden="true"><path pathLength="1" d="M400 2L50 46"/><path pathLength="1" d="M400 2L150 46"/><path pathLength="1" d="M400 2L250 46"/><path pathLength="1" d="M400 2L350 46"/><path pathLength="1" d="M400 2L450 46"/><path pathLength="1" d="M400 2L550 46"/><path pathLength="1" d="M400 2L650 46"/><path pathLength="1" d="M400 2L750 46"/><circle cx="400" cy="2" r="2"/></svg>
+<ul class="tn-langs not-content" aria-label="Eight languages, one contract">
+	<li><a class="tn-langlink" href="/toolnexus/api/javascript/"><span class="tn-lang">JavaScript</span></a><a class="tn-reglink" href="https://www.npmjs.com/package/toolnexus" target="_blank" rel="noopener" title="Toolnexus on npm"><span class="tn-ico" style="--ico:url(/toolnexus/registry/npm.svg)" aria-hidden="true"></span><span class="tn-reg">npm</span></a></li>
+	<li><a class="tn-langlink" href="/toolnexus/api/python/"><span class="tn-lang">Python</span></a><a class="tn-reglink" href="https://pypi.org/project/toolnexus/" target="_blank" rel="noopener" title="Toolnexus on PyPI"><span class="tn-ico" style="--ico:url(/toolnexus/registry/pypi.svg)" aria-hidden="true"></span><span class="tn-reg">PyPI</span></a></li>
+	<li><a class="tn-langlink" href="/toolnexus/api/go/"><span class="tn-lang">Go</span></a><a class="tn-reglink" href="https://pkg.go.dev/github.com/muthuishere/toolnexus/golang" target="_blank" rel="noopener" title="Toolnexus on Go modules"><span class="tn-ico" style="--ico:url(/toolnexus/registry/go.svg)" aria-hidden="true"></span><span class="tn-reg">Go modules</span></a></li>
+	<li><a class="tn-langlink" href="/toolnexus/api/java/"><span class="tn-lang">Java</span></a><a class="tn-reglink" href="https://central.sonatype.com/artifact/io.github.muthuishere/toolnexus" target="_blank" rel="noopener" title="Toolnexus on Maven"><span class="tn-ico" style="--ico:url(/toolnexus/registry/apachemaven.svg)" aria-hidden="true"></span><span class="tn-reg">Maven</span></a></li>
+	<li><a class="tn-langlink" href="/toolnexus/api/csharp/"><span class="tn-lang">C#</span></a><a class="tn-reglink" href="https://www.nuget.org/packages/Toolnexus" target="_blank" rel="noopener" title="Toolnexus on NuGet"><span class="tn-ico" style="--ico:url(/toolnexus/registry/nuget.svg)" aria-hidden="true"></span><span class="tn-reg">NuGet</span></a></li>
+	<li><a class="tn-langlink" href="/toolnexus/api/elixir/"><span class="tn-lang">Elixir</span></a><a class="tn-reglink" href="https://hex.pm/packages/toolnexus" target="_blank" rel="noopener" title="Toolnexus on Hex"><span class="tn-ico" style="--ico:url(/toolnexus/registry/elixir.svg)" aria-hidden="true"></span><span class="tn-reg">Hex</span></a></li>
+	<li><a class="tn-langlink" href="/toolnexus/api/clojure/"><span class="tn-lang">Clojure</span></a><a class="tn-reglink" href="https://clojars.org/net.clojars.muthuishere/toolnexus" target="_blank" rel="noopener" title="Toolnexus on Clojars"><span class="tn-ico" style="--ico:url(/toolnexus/registry/clojure.svg)" aria-hidden="true"></span><span class="tn-reg">Clojars</span></a></li>
+	<li><a class="tn-langlink" href="/toolnexus/api/rust/"><span class="tn-lang">Rust</span></a><a class="tn-reglink" href="https://crates.io/crates/toolnexus" target="_blank" rel="noopener" title="Toolnexus on crates.io"><span class="tn-ico" style="--ico:url(/toolnexus/registry/rust.svg)" aria-hidden="true"></span><span class="tn-reg">crates.io</span></a></li>
+</ul>
 
 <video
 	class="tn-video"
@@ -28,7 +46,7 @@ import { Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
 
 ## Point it at your tools. Get a working agent.
 
-Point toolnexus at an `mcp.json` and a `skills/` folder and you get the tool-calling loop,
+Point Toolnexus at an `mcp.json` and a `skills/` folder and you get the tool-calling loop,
 skills injection, six unified tool sources, and conversation memory — all included.
 The same three lines, in every language:
 
@@ -227,7 +245,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 		The suspension layer: an agent can pause, ask *you* a question, and resume — plus an
 		MCP elicitation bridge. Nobody else ships this across eight ports.
 	</Card>
+	<Card title="Typed decisions" icon="list-format">
+		`createClassifier` and the judge adapters: a yes/no, a pick-one or a score with confidence,
+		from any System One backend. [Judge &amp; classifier →](/toolnexus/judge/)
+	</Card>
+	<Card title="Media generation" icon="seti:image">
+		Image, video, speech, transcription, voice cloning and talking-head video, as typed verbs
+		and agent tools, from a JSON provider style. [Media →](/toolnexus/media/)
+	</Card>
 </CardGrid>
+
+## Built on Toolnexus
+
+<CardGrid>
+	<Card title="wfnexus" icon="rocket">
+		Typed pipelines for coding agents: each step is a whole agent with scoped tools, a budget,
+		guardrails and a JSON-schema output. [muthuishere.github.io/wfnexus](https://muthuishere.github.io/wfnexus/)
+	</Card>
+</CardGrid>
+
+Built something on Toolnexus? [Open a pull request](https://github.com/muthuishere/toolnexus/edit/main/README.md)
+adding it to the **Built on Toolnexus** list in `README.md` and here.
 
 ## Byte-identical across eight languages
 
