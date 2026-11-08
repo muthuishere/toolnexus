@@ -329,6 +329,17 @@ public sealed partial class LlmClient
         public Func<ErrorInfo, Tier>? OnError { get; set; }
 
         /// <summary>
+        /// (SPEC §7F.1) Reactive compaction: a hook with the <c>BeforeLLM</c> signature — typically a
+        /// compactor with a TIGHTER budget than the proactive one — called when the provider rejects a
+        /// call as a context overflow (<see cref="IsContextOverflow"/>). If it returns strictly fewer
+        /// messages, they replace the working transcript and the SAME turn is re-sent (no BeforeLLM
+        /// re-run, no turn consumed); otherwise the run fails with <see cref="ContextOverflowException"/>.
+        /// A breaker fails after 3 compactions in a row that did not buy two successful calls each.
+        /// Null ⇒ byte-identical: the overflow surfaces as <see cref="ProviderException"/>.
+        /// </summary>
+        public Func<BeforeLLMEvent, LLMOverride?>? CompactOnOverflow { get; set; }
+
+        /// <summary>
         /// (§1B) Cap on a single content part, measured in <b>decoded</b> bytes (base64 is +33%).
         /// Enforced when the client assembles a part into a request; the edge constructors take
         /// the same limit as an argument. Null ⇒ no cap.
@@ -348,6 +359,7 @@ public sealed partial class LlmClient
         public Options WithOnUnsupportedPart(string v) { OnUnsupportedPart = v; return this; }
 
         public Options WithOnError(Func<ErrorInfo, Tier> v) { OnError = v; return this; }
+        public Options WithCompactOnOverflow(Func<BeforeLLMEvent, LLMOverride?> v) { CompactOnOverflow = v; return this; }
         public Options WithWaitFor(Func<Request, Task<Answer>> v) { WaitFor = v; return this; }
         public Options WithWaitForCtx(Func<Request, CancellationToken, Task<Answer>> v) { WaitForCtx = v; return this; }
         public Options WithApiKeyEnv(string v) { ApiKeyEnv = v; return this; }
@@ -427,6 +439,74 @@ public sealed partial class LlmClient
             Body = body ?? "";
             RetryAfter = retryAfter;
         }
+    }
+
+    /// <summary>
+    /// (SPEC §7F.1) The run failed because the prompt did not fit even after reactive compaction:
+    /// the breaker tripped (<see cref="Compactions"/> = 3) or the hook made no progress. A failure,
+    /// never a §10 Pending. Message pinned byte-identical across ports.
+    /// </summary>
+    public sealed class ContextOverflowException : InvalidOperationException
+    {
+        /// <summary>The compaction streak at failure.</summary>
+        public int Compactions { get; }
+        /// <summary>The HTTP status of the last provider error.</summary>
+        public int Status { get; }
+        /// <summary>The last provider error body, redacted like <see cref="ProviderException.Body"/>.</summary>
+        public string Body { get; }
+
+        public ContextOverflowException(int compactions, int status, string body)
+            : base($"context overflow: {compactions} reactive compaction(s) did not make the prompt fit")
+        {
+            Compactions = compactions;
+            Status = status;
+            Body = body ?? "";
+        }
+    }
+
+    private static readonly string[] OverflowMarkers =
+    {
+        "context_length_exceeded", "maximum context length", "prompt is too long",
+        "prompt_too_long", "request_too_large", "context window",
+    };
+
+    /// <summary>(SPEC §7F.1) True iff <paramref name="status"/> is 400 or 413 AND the lowercased body
+    /// carries a context-overflow marker. Nothing else counts.</summary>
+    public static bool IsContextOverflow(int status, string? body)
+    {
+        if (status != 400 && status != 413) return false;
+        var b = (body ?? "").ToLowerInvariant();
+        foreach (var m in OverflowMarkers) if (b.Contains(m, StringComparison.Ordinal)) return true;
+        return false;
+    }
+
+    /// <summary>Per-run reactive-compaction breaker state (SPEC §7F.1).</summary>
+    private sealed class OverflowState
+    {
+        public int OkSince;
+        public int Streak;
+    }
+
+    /// <summary>
+    /// (SPEC §7F.1) The one shared reaction, called from every loop's catch of a provider failure.
+    /// Returns true when the working transcript was compacted and the same turn must be re-sent;
+    /// false when the error is not an overflow (or the option is absent) and must be rethrown as-is;
+    /// throws <see cref="ContextOverflowException"/> when the breaker trips or the hook makes no progress.
+    /// </summary>
+    private bool ReactToOverflow(OverflowState st, ProviderException e, ref List<object?> messages,
+        List<Dictionary<string, object?>> tools, string model, int turn)
+    {
+        if (_opts.CompactOnOverflow == null || !IsContextOverflow(e.Status, e.Body)) return false;
+        var rapid = st.Streak > 0 && st.OkSince < 2;
+        if (!rapid) st.Streak = 0;
+        if (st.Streak == 3) throw new ContextOverflowException(3, e.Status, e.Body);
+        var ov = _opts.CompactOnOverflow(new BeforeLLMEvent(messages, tools, model, turn));
+        if (ov?.Messages == null || ov.Messages.Count >= messages.Count)
+            throw new ContextOverflowException(st.Streak, e.Status, e.Body);
+        messages = ov.Messages;
+        st.Streak++;
+        st.OkSince = 0;
+        return true;
     }
 
     /// <summary>
@@ -1326,6 +1406,7 @@ public sealed partial class LlmClient
         var runStart = NowMs();
         var lastModel = _opts.Model; // §8: the model of the last call this run made
         var finished = new ConcurrentDictionary<string, ToolResult>(); // finished tool results, for an interrupted save
+        var overflow = new OverflowState(); // §7F.1 reactive-compaction breaker
         var relocated = new Relocated(); // §8A adapter artifact — never enters `messages`
 
         try
@@ -1336,20 +1417,34 @@ public sealed partial class LlmClient
                 var turnModel = ApplyBeforeLLM(ref messages, ref tools, turn);
                 lastModel = turnModel;
 
-                var body = new Dictionary<string, object?>
+                Dictionary<string, object?> data;
+                while (true)
                 {
-                    ["model"] = turnModel,
-                    ["messages"] = relocated.Wire(messages),
-                };
-                // §8 Gap 5: omit tools/tool_choice when the effective tool list is empty.
-                if (tools.Count > 0)
-                {
-                    body["tools"] = tools;
-                    body["tool_choice"] = "auto";
+                    var body = new Dictionary<string, object?>
+                    {
+                        ["model"] = turnModel,
+                        ["messages"] = relocated.Wire(messages),
+                    };
+                    // §8 Gap 5: omit tools/tool_choice when the effective tool list is empty.
+                    if (tools.Count > 0)
+                    {
+                        body["tools"] = tools;
+                        body["tool_choice"] = "auto";
+                    }
+                    body = FinalizeBody(body);
+                    var url = StripTrailingSlash(_opts.BaseUrl) + "/chat/completions";
+                    try
+                    {
+                        data = await LlmCallJsonAsync(url, BaseHeaders(key, false), body, deadline, external, "openai").ConfigureAwait(false);
+                    }
+                    catch (ProviderException pe)
+                    {
+                        if (!ReactToOverflow(overflow, pe, ref messages, tools, turnModel, turn)) throw;
+                        continue; // §7F.1: same turn, compacted transcript
+                    }
+                    overflow.OkSince++;
+                    break;
                 }
-                body = FinalizeBody(body);
-                var url = StripTrailingSlash(_opts.BaseUrl) + "/chat/completions";
-                var data = await LlmCallJsonAsync(url, BaseHeaders(key, false), body, deadline, external, "openai").ConfigureAwait(false);
                 AddUsage(usage, data.Get("usage") as IDictionary<string, object?>, "openai");
                 _opts.Hooks?.AfterLLM?.Invoke(new AfterLLMEvent(data, turnModel, turn));
 
@@ -1442,6 +1537,7 @@ public sealed partial class LlmClient
         var runStart = NowMs();
         var lastModel = _opts.Model; // §8: the model of the last call this run made
         var finished = new ConcurrentDictionary<string, ToolResult>(); // finished tool results, for an interrupted save
+        var overflow = new OverflowState(); // §7F.1 reactive-compaction breaker
 
         try
         {
@@ -1451,18 +1547,32 @@ public sealed partial class LlmClient
                 var turnModel = ApplyBeforeLLM(ref messages, ref tools, turn);
                 lastModel = turnModel;
 
-                var body = new Dictionary<string, object?>
+                Dictionary<string, object?> data;
+                while (true)
                 {
-                    ["model"] = turnModel,
-                    ["max_tokens"] = 4096,
-                    ["messages"] = messages,
-                };
-                if (system.Length > 0) body["system"] = system;
-                // §8 Gap 5: omit tools when the effective tool list is empty.
-                if (tools.Count > 0) body["tools"] = tools;
-                body = FinalizeBody(body);
+                    var body = new Dictionary<string, object?>
+                    {
+                        ["model"] = turnModel,
+                        ["max_tokens"] = 4096,
+                        ["messages"] = messages,
+                    };
+                    if (system.Length > 0) body["system"] = system;
+                    // §8 Gap 5: omit tools when the effective tool list is empty.
+                    if (tools.Count > 0) body["tools"] = tools;
+                    body = FinalizeBody(body);
 
-                var data = await LlmCallJsonAsync(endpoint, BaseHeaders(key, true), body, deadline, external, "anthropic").ConfigureAwait(false);
+                    try
+                    {
+                        data = await LlmCallJsonAsync(endpoint, BaseHeaders(key, true), body, deadline, external, "anthropic").ConfigureAwait(false);
+                    }
+                    catch (ProviderException pe)
+                    {
+                        if (!ReactToOverflow(overflow, pe, ref messages, tools, turnModel, turn)) throw;
+                        continue; // §7F.1: same turn, compacted transcript
+                    }
+                    overflow.OkSince++;
+                    break;
+                }
                 AddUsage(usage, data.Get("usage") as IDictionary<string, object?>, "anthropic");
                 _opts.Hooks?.AfterLLM?.Invoke(new AfterLLMEvent(data, turnModel, turn));
 
@@ -1582,6 +1692,7 @@ public sealed partial class LlmClient
         var runStart = NowMs();
         var lastModel = _opts.Model; // §8: the model of the last call this run made
         var finished = new ConcurrentDictionary<string, ToolResult>(); // finished tool results, for an interrupted save
+        var overflow = new OverflowState(); // §7F.1 reactive-compaction breaker
         var relocated = new Relocated(); // §8A adapter artifact — never enters `messages`
 
         try
@@ -1591,20 +1702,24 @@ public sealed partial class LlmClient
                 turns++;
                 var turnModel = ApplyBeforeLLM(ref messages, ref tools, turn);
                 lastModel = turnModel;
-                var body = new Dictionary<string, object?>
+                Dictionary<string, object?> BuildBody()
                 {
-                    ["model"] = turnModel,
-                    ["messages"] = relocated.Wire(messages),
-                    ["stream"] = true,
-                    ["stream_options"] = new Dictionary<string, object?> { ["include_usage"] = true },
-                };
-                // §8 Gap 5: omit tools/tool_choice when the effective tool list is empty.
-                if (tools.Count > 0)
-                {
-                    body["tools"] = tools;
-                    body["tool_choice"] = "auto";
+                    var b0 = new Dictionary<string, object?>
+                    {
+                        ["model"] = turnModel,
+                        ["messages"] = relocated.Wire(messages),
+                        ["stream"] = true,
+                        ["stream_options"] = new Dictionary<string, object?> { ["include_usage"] = true },
+                    };
+                    // §8 Gap 5: omit tools/tool_choice when the effective tool list is empty.
+                    if (tools.Count > 0)
+                    {
+                        b0["tools"] = tools;
+                        b0["tool_choice"] = "auto";
+                    }
+                    return FinalizeBody(b0);
                 }
-                body = FinalizeBody(body);
+                var body = BuildBody();
                 var url = StripTrailingSlash(_opts.BaseUrl) + "/chat/completions";
 
                 var content = new StringBuilder();
@@ -1614,44 +1729,60 @@ public sealed partial class LlmClient
                 var t0 = NowMs();
                 var beforeP = usage.PromptTokens;
                 var beforeC = usage.CompletionTokens;
-                try
+                while (true)
                 {
-                    await foreach (var line in SseLinesAsync(url, BaseHeaders(key, false), body, deadline, external).ConfigureAwait(false))
+                    try
                     {
-                        if (!line.StartsWith("data:")) continue;
-                        var payload = line[5..].Trim();
-                        if (payload == "[DONE]") break;
-                        if (Json.ParseLoose(payload) is not IDictionary<string, object?> j) continue;
-                        AddUsage(usage, j.Get("usage") as IDictionary<string, object?>, "openai");
-                        if (j.Get("choices") is not List<object?> { Count: > 0 } choices) continue;
-                        if (((IDictionary<string, object?>)choices[0]!).Get("delta") is not IDictionary<string, object?> delta) continue;
-                        if (delta.Get("content") is string ds && ds.Length > 0)
+                        try
                         {
-                            content.Append(ds);
-                            onEvent(StreamEvent.Text(ds));
-                        }
-                        if (delta.Get("tool_calls") is List<object?> tcs)
-                        {
-                            foreach (var o in tcs)
+                            await foreach (var line in SseLinesAsync(url, BaseHeaders(key, false), body, deadline, external).ConfigureAwait(false))
                             {
-                                var tc = (IDictionary<string, object?>)o!;
-                                var index = (int)AsLong(tc.Get("index"));
-                                if (!acc.TryGetValue(index, out var slot)) { slot = new[] { "", "", "" }; acc[index] = slot; order.Add(index); }
-                                if (tc.Get("id") != null) slot[0] = tc["id"]!.ToString()!;
-                                if (tc.Get("function") is IDictionary<string, object?> fn)
+                                if (!line.StartsWith("data:")) continue;
+                                var payload = line[5..].Trim();
+                                if (payload == "[DONE]") break;
+                                if (Json.ParseLoose(payload) is not IDictionary<string, object?> j) continue;
+                                AddUsage(usage, j.Get("usage") as IDictionary<string, object?>, "openai");
+                                if (j.Get("choices") is not List<object?> { Count: > 0 } choices) continue;
+                                if (((IDictionary<string, object?>)choices[0]!).Get("delta") is not IDictionary<string, object?> delta) continue;
+                                if (delta.Get("content") is string ds && ds.Length > 0)
                                 {
-                                    if (fn.Get("name") != null) slot[1] += fn["name"];
-                                    if (fn.Get("arguments") != null) slot[2] += fn["arguments"];
+                                    content.Append(ds);
+                                    onEvent(StreamEvent.Text(ds));
+                                }
+                                if (delta.Get("tool_calls") is List<object?> tcs)
+                                {
+                                    foreach (var o in tcs)
+                                    {
+                                        var tc = (IDictionary<string, object?>)o!;
+                                        var index = (int)AsLong(tc.Get("index"));
+                                        if (!acc.TryGetValue(index, out var slot)) { slot = new[] { "", "", "" }; acc[index] = slot; order.Add(index); }
+                                        if (tc.Get("id") != null) slot[0] = tc["id"]!.ToString()!;
+                                        if (tc.Get("function") is IDictionary<string, object?> fn)
+                                        {
+                                            if (fn.Get("name") != null) slot[1] += fn["name"];
+                                            if (fn.Get("arguments") != null) slot[2] += fn["arguments"];
+                                        }
+                                    }
                                 }
                             }
                         }
+                        catch (Exception)
+                        {
+                            Emit(MetricEvent.Llm(turnModel, "error", NowMs() - t0, 0, 0));
+                            throw;
+                        }
+                        break;
+                    }
+                    catch (ProviderException pe)
+                    {
+                        // §7F.1: an overflow is an HTTP error before any event of this turn —
+                        // nothing was emitted; compact and re-send the same turn.
+                        if (!ReactToOverflow(overflow, pe, ref messages, tools, turnModel, turn)) throw;
+                        body = BuildBody();
+                        t0 = NowMs();
                     }
                 }
-                catch (Exception)
-                {
-                    Emit(MetricEvent.Llm(turnModel, "error", NowMs() - t0, 0, 0));
-                    throw;
-                }
+                overflow.OkSince++;
                 Emit(MetricEvent.Llm(turnModel, "ok", NowMs() - t0, usage.PromptTokens - beforeP, usage.CompletionTokens - beforeC));
                 _opts.Hooks?.AfterLLM?.Invoke(new AfterLLMEvent(new Dictionary<string, object?> { ["streamed"] = true }, turnModel, turn));
 
@@ -1761,6 +1892,7 @@ public sealed partial class LlmClient
         var runStart = NowMs();
         var lastModel = _opts.Model; // §8: the model of the last call this run made
         var finished = new ConcurrentDictionary<string, ToolResult>(); // finished tool results, for an interrupted save
+        var overflow = new OverflowState(); // §7F.1 reactive-compaction breaker
 
         try
         {
@@ -1769,17 +1901,21 @@ public sealed partial class LlmClient
                 turns++;
                 var turnModel = ApplyBeforeLLM(ref messages, ref tools, turn);
                 lastModel = turnModel;
-                var body = new Dictionary<string, object?>
+                Dictionary<string, object?> BuildBody()
                 {
-                    ["model"] = turnModel,
-                    ["max_tokens"] = 4096,
-                    ["messages"] = messages,
-                    ["stream"] = true,
-                };
-                if (system.Length > 0) body["system"] = system;
-                // §8 Gap 5: omit tools when the effective tool list is empty.
-                if (tools.Count > 0) body["tools"] = tools;
-                body = FinalizeBody(body);
+                    var b0 = new Dictionary<string, object?>
+                    {
+                        ["model"] = turnModel,
+                        ["max_tokens"] = 4096,
+                        ["messages"] = messages,
+                        ["stream"] = true,
+                    };
+                    if (system.Length > 0) b0["system"] = system;
+                    // §8 Gap 5: omit tools when the effective tool list is empty.
+                    if (tools.Count > 0) b0["tools"] = tools;
+                    return FinalizeBody(b0);
+                }
+                var body = BuildBody();
 
                 var blocks = new Dictionary<int, Dictionary<string, object?>>();
                 var order = new List<int>();
@@ -1788,62 +1924,78 @@ public sealed partial class LlmClient
                 var t0 = NowMs();
                 var beforeP = usage.PromptTokens;
                 var beforeC = usage.CompletionTokens;
-                try
+                while (true)
                 {
-                    await foreach (var line in SseLinesAsync(endpoint, BaseHeaders(key, true), body, deadline, external).ConfigureAwait(false))
+                    try
                     {
-                        if (!line.StartsWith("data:")) continue;
-                        if (Json.ParseLoose(line[5..].Trim()) is not IDictionary<string, object?> j) continue;
-                        var type = j.Get("type") as string;
-                        if (type == "message_start")
+                        try
                         {
-                            if (j.Get("message") is IDictionary<string, object?> m)
-                                AddUsage(usage, m.Get("usage") as IDictionary<string, object?>, "anthropic");
-                        }
-                        else if (type == "content_block_start")
-                        {
-                            var index = (int)AsLong(j.Get("index"));
-                            var cb = (IDictionary<string, object?>)j["content_block"]!;
-                            blocks[index] = new Dictionary<string, object?>
+                            await foreach (var line in SseLinesAsync(endpoint, BaseHeaders(key, true), body, deadline, external).ConfigureAwait(false))
                             {
-                                ["type"] = cb.Get("type"),
-                                ["id"] = cb.Get("id"),
-                                ["name"] = cb.Get("name"),
-                                ["text"] = new StringBuilder(),
-                                ["json"] = new StringBuilder(),
-                            };
-                            order.Add(index);
-                        }
-                        else if (type == "content_block_delta")
-                        {
-                            var index = (int)AsLong(j.Get("index"));
-                            if (!blocks.TryGetValue(index, out var b)) continue;
-                            var delta = (IDictionary<string, object?>)j["delta"]!;
-                            var dtype = delta.Get("type") as string;
-                            if (dtype == "text_delta")
-                            {
-                                var t = delta.Get("text")?.ToString() ?? "";
-                                ((StringBuilder)b["text"]!).Append(t);
-                                onEvent(StreamEvent.Text(t));
+                                if (!line.StartsWith("data:")) continue;
+                                if (Json.ParseLoose(line[5..].Trim()) is not IDictionary<string, object?> j) continue;
+                                var type = j.Get("type") as string;
+                                if (type == "message_start")
+                                {
+                                    if (j.Get("message") is IDictionary<string, object?> m)
+                                        AddUsage(usage, m.Get("usage") as IDictionary<string, object?>, "anthropic");
+                                }
+                                else if (type == "content_block_start")
+                                {
+                                    var index = (int)AsLong(j.Get("index"));
+                                    var cb = (IDictionary<string, object?>)j["content_block"]!;
+                                    blocks[index] = new Dictionary<string, object?>
+                                    {
+                                        ["type"] = cb.Get("type"),
+                                        ["id"] = cb.Get("id"),
+                                        ["name"] = cb.Get("name"),
+                                        ["text"] = new StringBuilder(),
+                                        ["json"] = new StringBuilder(),
+                                    };
+                                    order.Add(index);
+                                }
+                                else if (type == "content_block_delta")
+                                {
+                                    var index = (int)AsLong(j.Get("index"));
+                                    if (!blocks.TryGetValue(index, out var b)) continue;
+                                    var delta = (IDictionary<string, object?>)j["delta"]!;
+                                    var dtype = delta.Get("type") as string;
+                                    if (dtype == "text_delta")
+                                    {
+                                        var t = delta.Get("text")?.ToString() ?? "";
+                                        ((StringBuilder)b["text"]!).Append(t);
+                                        onEvent(StreamEvent.Text(t));
+                                    }
+                                    else if (dtype == "input_json_delta")
+                                    {
+                                        ((StringBuilder)b["json"]!).Append(delta.Get("partial_json"));
+                                    }
+                                }
+                                else if (type == "message_delta")
+                                {
+                                    if (j.Get("delta") is IDictionary<string, object?> delta && delta.Get("stop_reason") != null)
+                                        stopReason = delta["stop_reason"]!.ToString()!;
+                                    AddUsage(usage, j.Get("usage") as IDictionary<string, object?>, "anthropic");
+                                }
                             }
-                            else if (dtype == "input_json_delta")
-                            {
-                                ((StringBuilder)b["json"]!).Append(delta.Get("partial_json"));
-                            }
                         }
-                        else if (type == "message_delta")
+                        catch (Exception)
                         {
-                            if (j.Get("delta") is IDictionary<string, object?> delta && delta.Get("stop_reason") != null)
-                                stopReason = delta["stop_reason"]!.ToString()!;
-                            AddUsage(usage, j.Get("usage") as IDictionary<string, object?>, "anthropic");
+                            Emit(MetricEvent.Llm(turnModel, "error", NowMs() - t0, 0, 0));
+                            throw;
                         }
+                        break;
+                    }
+                    catch (ProviderException pe)
+                    {
+                        // §7F.1: an overflow is an HTTP error before any event of this turn —
+                        // nothing was emitted; compact and re-send the same turn.
+                        if (!ReactToOverflow(overflow, pe, ref messages, tools, turnModel, turn)) throw;
+                        body = BuildBody();
+                        t0 = NowMs();
                     }
                 }
-                catch (Exception)
-                {
-                    Emit(MetricEvent.Llm(turnModel, "error", NowMs() - t0, 0, 0));
-                    throw;
-                }
+                overflow.OkSince++;
                 Emit(MetricEvent.Llm(turnModel, "ok", NowMs() - t0, usage.PromptTokens - beforeP, usage.CompletionTokens - beforeC));
                 _opts.Hooks?.AfterLLM?.Invoke(new AfterLLMEvent(new Dictionary<string, object?> { ["streamed"] = true }, turnModel, turn));
 
