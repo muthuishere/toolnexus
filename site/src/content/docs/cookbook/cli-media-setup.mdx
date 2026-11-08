@@ -1,14 +1,17 @@
 ---
 title: Grok CLI, Codex CLI and Antigravity media setup
-description: Make images (and Grok video) through the CLI you already pay for — Grok, Codex or Google Antigravity — with no API key. Install, log in, enable Grok video, limits, the watermark, models, timeouts, file names, mocks and the shell command.
+description: Make images (and Grok video) by driving a vendor's official CLI — Grok, Codex or Google Antigravity — in its documented headless mode. Install, log in, enable Grok video, limits, the watermark, models, timeouts, file names, mocks and the shell command.
 ---
 
 import { Tabs, TabItem, Aside } from '@astrojs/starlight/components';
 
 <Aside type="tip" title="Why you need this">
-If you already have a SuperGrok, ChatGPT or Google Antigravity login, you already pay for image
-generation. Toolnexus drives that CLI headless on your machine, picks up the file it saved and
-hands it back to your code or your agent. No API key, no second bill.
+If you already use the Grok, Codex or Google Antigravity CLI, toolnexus can drive that official CLI
+in its documented headless mode (`grok -p`, `codex exec`, `agy -p`), signed in by you, on your
+machine. It picks up the file the CLI saved and hands it back to your code or your agent, with the
+same `generateMedia` / `createMedia` API as every other media style.
+
+Your provider's terms of service apply to how you use its CLI.
 </Aside>
 
 Contract: SPEC §7G.10, §7G.10a, §7G.10b · ADR 0042 · `conformance/media/cli.json`.
@@ -225,7 +228,7 @@ Each CLI uses your plan's allowance. When it runs out the error status is `unava
 
 - Grok: `grok: You have reached your usage limit for today` (check with `grok usage`).
 - Codex: `codex: You've hit your usage limit. Try again later.`
-- Antigravity: anything mentioning `quota` (the free tier is the "Antigravity Starter Quota").
+- Antigravity: anything mentioning `quota` (Antigravity names its allowance the "Antigravity Starter Quota").
   This failure line has not been captured live yet.
 
 ## The Grok watermark
@@ -264,7 +267,8 @@ because writing into its own workspace is enough to save the image.
 `XaiGrokCliMock`, `OpenAICodexCliMock`, `GoogleAgyCliMock` (strings `xai-grok-cli-mock`, …) are the
 same presets with the CLI replaced: same verbs, tools, errors and prompt folding, no process, no
 account, no network. Each writes `<gather.dir>/<grok|codex|agy>-mock-<verb>.png|mp4` holding the
-bytes `toolnexus mock <verb>`, and the result's `text` is the exact prompt the CLI would have got.
+bytes `toolnexus mock <verb>`, then gathers it like a real CLI file (so `result.files[0].path` is the
+gathered copy, e.g. `grok-image-<ts>-1.png`), and the result's `text` is the exact prompt the CLI would have got.
 
 ```ts
 // app.ts

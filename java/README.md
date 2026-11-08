@@ -164,23 +164,36 @@ List<Classifier.BatchResult> rs = c.states("a", "b").evaluate(noul("q", "…"));
 
 ## Media generation
 
-Images, video, speech, music, transcription, voice cloning and talking-head video through **named
-media clients** — `OpenAIMediaClient`, `OpenRouterMediaClient`, `ElevenLabsMediaClient`,
-`FalMediaClient`, `A2EMediaClient` (HTTP APIs, key from the env var at call time) and
-`GrokMediaClient`, `CodexMediaClient` (local CLIs). `Media.createMedia(...)` sends each verb to the
-first client that supports it and falls through to the next **only** when a client is
-`unavailable` (no key, no credit, CLI not installed). Async jobs are polled for you. SPEC §7G;
-guide: <https://muthuishere.github.io/toolnexus/media/>.
+Images, video, speech, music, transcription, voice cloning and talking-head video, with **one
+client per media object**. The quickest start is a **CLI preset**: `MediaStyle.XAI_GROK_CLI`, `MediaStyle.OPENAI_CODEX_CLI` and `MediaStyle.GOOGLE_AGY_CLI` drive the vendor's
+official CLI (`grok`, `codex`, `agy`) in its documented headless mode (`grok -p`, `codex exec`,
+`agy -p`), signed in by you. Grok does image and video; Codex and Antigravity do image. Each preset
+has a mock twin (`MediaStyle.XAI_GROK_CLI_MOCK`, …) for tests. Your provider's terms of service apply to how you use its CLI.
+Every Grok image carries a small visible **"Grok" mark in the bottom-right corner**; toolnexus does
+not remove it. Install, sign-in, Grok video, limits and models:
+<https://muthuishere.github.io/toolnexus/cookbook/cli-media-setup/>. SPEC §7G; guide: <https://muthuishere.github.io/toolnexus/media/>.
+
+```java
+// one line
+var r = Media.generateMedia(MediaStyle.XAI_GROK_CLI, "image", Map.of("prompt", "a red apple", "aspectRatio", "16:9"));
+System.out.println(r.files().get(0).path());
+
+// or keep a media object, and give it to your agent
+Media media = Media.create(Media.loadMediaStyle(MediaStyle.XAI_GROK_CLI));
+var clip = media.video(new Media.VideoInput("the apple rolls off the table"));
+Toolkit tk = Toolkit.create(new Toolkit.Options().media(media));   // generate_image, generate_video
+```
+
+For an HTTP API, give `Media.createMedia(client)` one named client — `OpenAIMediaClient`, `OpenRouterMediaClient`, `FalMediaClient`, `ElevenLabsMediaClient` or `A2EMediaClient`. Each reads its key from its env
+var (`OPENAI_API_KEY`, `FAL_API_KEY`, `ELEVENLABS_API_KEY`, …) at call time and never logs it.
 
 ```java
 var cfg = new Media.Config().gather(new Media.Gather().mode("download").dir("out")); // url | download | inline
-Media media = Media.createMedia(new FalMediaClient(cfg), new ElevenLabsMediaClient(cfg), new A2EMediaClient(cfg));
+Media voice = Media.createMedia(new ElevenLabsMediaClient(cfg));
 try {
-    var img = media.image(new Media.ImageInput("a red fox in fresh snow"));            // fal, else a2e
-    var vid = media.video(new Media.VideoInput("the fox blinks", img.files().get(0).url(), 5, null, null));
-    var mp3 = media.speech(new Media.SpeechInput("Hello from toolnexus."));            // elevenlabs
-    System.out.println(vid.files().get(0).path() + " " + mp3.files().get(0).path());
-} catch (Media.MediaUnavailableException e) {   // every candidate was unavailable
+    var mp3 = voice.speech(new Media.SpeechInput("Hello from toolnexus."));
+    System.out.println(mp3.files().get(0).path());
+} catch (Media.MediaUnavailableException e) {   // no key, no credit
     System.err.println(e.getMessage());
 }
 ```

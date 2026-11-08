@@ -176,32 +176,36 @@ rs = await c.states("a", "b").evaluate(noul("q", "…"))      # [BatchResult(dec
 
 ## Media generation
 
-Images, video, speech, music, transcription, voice cloning and talking-head video through
-**named media clients**: API clients `A2EMediaClient`, `ElevenLabsMediaClient`, `OpenAIMediaClient`,
-`OpenRouterMediaClient`, `FalMediaClient`, and CLI clients `GrokMediaClient`, `CodexMediaClient`
-(they drive a locally installed, logged-in `grok` / `codex`). `create_media(client | [clients])`
-routes each verb to the first client that `supports` it and falls through to the next **only** when
-a client raises `MediaUnavailableError` (no key, no credits, quota, CLI missing). Keys are read from
-each client's env var (`A2E_API_KEY`, `FAL_API_KEY`, …) at call time and never logged.
-SPEC §7G; guide: <https://muthuishere.github.io/toolnexus/media/>.
+Images, video, speech, music, transcription, voice cloning and talking-head video, with **one
+client per media object**. The quickest start is a **CLI preset**: `MediaStyle.XAI_GROK_CLI`, `MediaStyle.OPENAI_CODEX_CLI` and `MediaStyle.GOOGLE_AGY_CLI` drive the vendor's
+official CLI (`grok`, `codex`, `agy`) in its documented headless mode (`grok -p`, `codex exec`,
+`agy -p`), signed in by you. Grok does image and video; Codex and Antigravity do image. Each preset
+has a mock twin (`MediaStyle.XAI_GROK_CLI_MOCK`, …) for tests. Your provider's terms of service apply to how you use its CLI.
+Every Grok image carries a small visible **"Grok" mark in the bottom-right corner**; toolnexus does
+not remove it. Install, sign-in, Grok video, limits and models:
+<https://muthuishere.github.io/toolnexus/cookbook/cli-media-setup/>. SPEC §7G; guide: <https://muthuishere.github.io/toolnexus/media/>.
 
 ```python
-from toolnexus import (create_media, create_toolkit, GrokMediaClient, FalMediaClient,
-                       ElevenLabsMediaClient, MediaUnavailableError)
+from toolnexus import MediaStyle, create_media, create_toolkit, generate_media, load_media_style
 
-media = create_media([
-    FalMediaClient(loop={"on_progress": lambda p: print(p["client"], p["verb"], p["status"])}),
-    GrokMediaClient(),                                            # fallback: the local grok CLI
-    ElevenLabsMediaClient(gather={"mode": "url"}),                # speech, music, transcribe, clone_voice
-])
-try:
-    img = await media.image("a red fox in fresh snow", width=1024, height=768)
-    vid = await media.video("the fox blinks", image=img.files[0].path, seconds=5)
-    say = await media.speech("Hello from the fox.")
-except MediaUnavailableError as e:
-    print("no client could serve it:", e)
+# one line
+r = await generate_media(MediaStyle.XAI_GROK_CLI, "image", {"prompt": "a red apple", "aspectRatio": "16:9"})
+print(r.files[0].path)
 
-tk = await create_toolkit(media=media)   # opt-in: generate_image, generate_video, … (source "media")
+# or keep a media object, and give it to your agent
+media = create_media(load_media_style(MediaStyle.XAI_GROK_CLI))
+clip = await media.video("the apple rolls off the table")
+tk = await create_toolkit(media=media)   # generate_image, generate_video (source "media")
+```
+
+For an HTTP API, give `create_media(client)` one named client — `OpenAIMediaClient`, `OpenRouterMediaClient`, `FalMediaClient`, `ElevenLabsMediaClient` or `A2EMediaClient`. Each reads its key from its env
+var (`OPENAI_API_KEY`, `FAL_API_KEY`, `ELEVENLABS_API_KEY`, …) at call time and never logs it.
+
+```python
+from toolnexus import create_media, ElevenLabsMediaClient
+
+voice = create_media(ElevenLabsMediaClient(gather={"mode": "url"}))   # speech, music, transcribe, clone_voice
+say = await voice.speech("Hello from the fox.")
 ```
 
 - **Typed verbs** (all `async`) — `image`, `video`, `speech`, `music`, `transcribe`, `clone_voice`, `talk`;
@@ -210,8 +214,8 @@ tk = await create_toolkit(media=media)   # opt-in: generate_image, generate_vide
   `MediaResult(files, text, job_id, status, usage)` — `usage` only as the provider reports it
   (OpenAI image tokens, OpenRouter tokens + `costUsd`, Grok `raw.costUsdTicks` unconverted).
   Args are checked per candidate: a client that does not accept an arg (e.g. `seconds` on
-  `GrokMediaClient`, which takes `prompt` only) or lacks a required one is **skipped** like an
-  unavailable one; if none can serve it the `MediaUnavailableError` lists every reason. A key that
+  the Grok CLI preset) or lacks a required one cannot serve the call, and the
+  `MediaUnavailableError` says why. A key that
   is not a canonical arg of the verb fails at once. `RunResult.files` entries carry the saved
   file's `path`; every media request sends `User-Agent: toolnexus/<version> (python)`.
 - **Config** (every built-in client, one shape — keywords, a dict or `MediaConfig`): `model`,
@@ -224,7 +228,7 @@ tk = await create_toolkit(media=media)   # opt-in: generate_image, generate_vide
   sent back to the model; audio/video stay on `RunResult.files`.
 - **Your own provider** — subclass `BaseMediaClient` (set `name`, implement `supports` and
   `async generate(verb, args, ctx)`), or satisfy the `MediaClient` protocol with per-verb methods;
-  raise `MediaUnavailableError` to let the next client try. Advanced:
+  raise `MediaUnavailableError` when it cannot serve a call (no key, no credits). Advanced:
   `style_media_client(load_media_style("my-style.json"))` turns a JSON style into a client.
 - **Errors** — a typed verb raises `MediaError` (`.status`: `failed` | `timeout` | `cancelled` |
   `unavailable`); a media tool never raises (`is_error=True`). `asyncio.CancelledError` always propagates.

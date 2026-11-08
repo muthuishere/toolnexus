@@ -147,34 +147,48 @@ Each has a runnable page in the [Go API reference](https://muthuishere.github.io
 
 ## Media generation
 
-Generate images, video, speech and music (plus transcription, voice cloning and talking-head
-video) through **named media clients**: API clients `NewA2EMediaClient`, `NewElevenLabsMediaClient`,
-`NewOpenAIMediaClient`, `NewOpenRouterMediaClient`, `NewFalMediaClient`, and CLI clients
-`NewGrokMediaClient`, `NewCodexMediaClient`. `CreateMedia` takes them in priority order: each verb
-goes to the first client that supports it, and moves on to the next **only** when that client is
-unavailable (no key, no credits, CLI missing). Keys are read from the client's env var
-(`FAL_API_KEY`, `OPENAI_API_KEY`, …) at call time and never logged. SPEC §7G; guide:
-<https://muthuishere.github.io/toolnexus/media/>.
+Images, video, speech, music, transcription, voice cloning and talking-head video, with **one
+client per media object**. The quickest start is a **CLI preset**: `toolnexus.MediaStyleXaiGrokCli`, `MediaStyleOpenAICodexCli` and `MediaStyleGoogleAgyCli` drive the vendor's
+official CLI (`grok`, `codex`, `agy`) in its documented headless mode (`grok -p`, `codex exec`,
+`agy -p`), signed in by you. Grok does image and video; Codex and Antigravity do image. Each preset
+has a mock twin (`MediaStyleXaiGrokCliMock`, …) for tests. Your provider's terms of service apply to how you use its CLI.
+Every Grok image carries a small visible **"Grok" mark in the bottom-right corner**; toolnexus does
+not remove it. Install, sign-in, Grok video, limits and models:
+<https://muthuishere.github.io/toolnexus/cookbook/cli-media-setup/>. SPEC §7G; guide: <https://muthuishere.github.io/toolnexus/media/>.
 
 ```go
-cfg := toolnexus.MediaConfig{Gather: toolnexus.MediaGather{Mode: "download", Dir: "out"}}
-media, err := toolnexus.CreateMedia(
-	toolnexus.NewFalMediaClient(cfg),        // image, video (FAL_API_KEY)
-	toolnexus.NewGrokMediaClient(cfg),       // fallback when fal is unavailable (grok CLI; prompt only)
-	toolnexus.NewElevenLabsMediaClient(cfg), // speech, music, transcribe, cloneVoice
-	toolnexus.NewA2EMediaClient(cfg),        // talk
-)
+ctx := context.Background()
+
+// one line
+r, err := toolnexus.GenerateMedia(ctx, toolnexus.MediaStyleXaiGrokCli, "image",
+	map[string]any{"prompt": "a red apple", "aspectRatio": "16:9"})
 if err != nil {
 	log.Fatal(err)
 }
-img, err := media.Image(ctx, toolnexus.ImageInput{Prompt: "a red fox in fresh snow"})
-if errors.Is(err, toolnexus.ErrMediaUnavailable) {
-	log.Fatal("every image client is unavailable: ", err)
+fmt.Println(r.Files[0].Path)
+
+// or keep a media object, and give it to your agent
+style, err := toolnexus.LoadMediaStyle(toolnexus.MediaStyleXaiGrokCli)
+if err != nil {
+	log.Fatal(err)
 }
-vid, _ := media.Video(ctx, toolnexus.VideoInput{Prompt: "the fox blinks", Image: img.Files[0].Path, Seconds: 5})
-voice, _ := media.Speech(ctx, toolnexus.SpeechInput{Text: "Hello from the fox."})
-talk, _ := media.Talk(ctx, toolnexus.TalkInput{Image: img.Files[0].Path, Audio: voice.Files[0].Path})
-fmt.Println(vid.Files[0].Path, talk.Files[0].Path)
+media := toolnexus.MustCreateMedia(style)
+clip, err := media.Video(ctx, toolnexus.VideoInput{Prompt: "the apple rolls off the table"})
+tk, err := toolnexus.CreateToolkit(ctx, toolnexus.Options{Media: media}) // generate_image, generate_video
+```
+
+For an HTTP API, give `CreateMedia(client)` one named client — `NewOpenAIMediaClient`, `NewOpenRouterMediaClient`, `NewFalMediaClient`, `NewElevenLabsMediaClient` or `NewA2EMediaClient`. Each reads its key from its env
+var (`OPENAI_API_KEY`, `FAL_API_KEY`, `ELEVENLABS_API_KEY`, …) at call time and never logs it.
+
+```go
+cfg := toolnexus.MediaConfig{Gather: toolnexus.MediaGather{Mode: "download", Dir: "out"}}
+fal := toolnexus.MustCreateMedia(toolnexus.NewFalMediaClient(cfg)) // image, video (FAL_API_KEY)
+img, err := fal.Image(ctx, toolnexus.ImageInput{Prompt: "a red fox in fresh snow"})
+if errors.Is(err, toolnexus.ErrMediaUnavailable) {
+	log.Fatal("fal is unavailable: ", err) // no key, no credits
+}
+vid, _ := fal.Video(ctx, toolnexus.VideoInput{Prompt: "the fox blinks", Image: img.Files[0].Path, Seconds: 5})
+fmt.Println(vid.Files[0].Path)
 ```
 
 The typed verbs are `Image`, `Video`, `Speech`, `Music`, `Transcribe` (→ `MediaResult.Text`),
@@ -186,7 +200,7 @@ Gather, HTTPClient}`. `Gather.Mode` is `"url"` (keep provider URLs), `"download"
 `Dir`, default `<os temp>/toolnexus-media`, capped by `MaxBytes`) or `"inline"` (base64 `Data`).
 `Loop{IntervalMs, TimeoutMs, OnProgress}` bounds async jobs.
 
-**As agent tools** — pass the router to the toolkit and each supported verb becomes a tool
+**As agent tools** — pass the media object to the toolkit and each supported verb becomes a tool
 (`generate_image`, `generate_video`, `generate_speech`, …). Whatever they produce lands in
 `RunResult.Files`; only image parts are shown to the model.
 
@@ -197,7 +211,7 @@ for _, f := range res.Files { fmt.Println(f.From, f.Type, f.MimeType, f.URL) }
 ```
 
 **Your own provider** — embed `toolnexus.UnsupportedMedia`, implement `Name`, `Supports` and the
-verbs you serve; return `toolnexus.MediaUnavailable("…")` to let the router fall through.
+verbs you serve; return `toolnexus.MediaUnavailable("…")` when it cannot serve a call.
 
 ```go
 type stock struct{ toolnexus.UnsupportedMedia }
@@ -216,8 +230,7 @@ and `codex` CLIs, `ELEVENLABS_API_KEY`, then `OPENAI_API_KEY` / `FAL_API_KEY` / 
 an image, ElevenLabs speech (`MEDIA_VOICE` or the default voice), and the `generate_image` tool;
 Grok video only with `MEDIA_VIDEO=1`, paid video/talk only with `MEDIA_PAID=1`. It prints client,
 verb, file, mime, size and provider-reported `usage`, exits 1 if a step fails, and exits 0 with a
-hint when no client is available. A client that cannot take a call's args is skipped like an
-unavailable one; saved files carry their `Path` into `RunResult.Files`.
+hint when no client is available. A client that cannot take a call's args reports `unavailable`; saved files carry their `Path` into `RunResult.Files`.
 
 ## MCP 2026-07-28 + OAuth
 

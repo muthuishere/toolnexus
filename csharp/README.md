@@ -165,25 +165,39 @@ never change mid-session. Runnable: `dotnet run --project examples/Toolnexus.Exa
 
 ## Media generation
 
-Images, video, speech, music, transcription, voice cloning and talking-head video through **named
-media clients** — `OpenAIMediaClient`, `OpenRouterMediaClient`, `ElevenLabsMediaClient`,
-`FalMediaClient`, `A2EMediaClient` (HTTP APIs, key from the env var at call time) and
-`GrokMediaClient`, `CodexMediaClient` (local CLIs). `Media.Create(...)` sends each verb to the first
-client that supports it and falls through to the next **only** when a client is `unavailable` (no
-key, no credit, CLI not installed). Async jobs are polled for you. SPEC §7G;
-guide: <https://muthuishere.github.io/toolnexus/media/>.
+Images, video, speech, music, transcription, voice cloning and talking-head video, with **one
+client per media object**. The quickest start is a **CLI preset**: `MediaStyle.XaiGrokCli`, `MediaStyle.OpenAICodexCli` and `MediaStyle.GoogleAgyCli` drive the vendor's
+official CLI (`grok`, `codex`, `agy`) in its documented headless mode (`grok -p`, `codex exec`,
+`agy -p`), signed in by you. Grok does image and video; Codex and Antigravity do image. Each preset
+has a mock twin (`MediaStyle.XaiGrokCliMock`, …) for tests. Your provider's terms of service apply to how you use its CLI.
+Every Grok image carries a small visible **"Grok" mark in the bottom-right corner**; toolnexus does
+not remove it. Install, sign-in, Grok video, limits and models:
+<https://muthuishere.github.io/toolnexus/cookbook/cli-media-setup/>. SPEC §7G; guide: <https://muthuishere.github.io/toolnexus/media/>.
+
+```csharp
+// one line
+var r = await Media.GenerateMediaAsync(MediaStyle.XaiGrokCli, "image",
+    new Dictionary<string, object?> { ["prompt"] = "a red apple", ["aspectRatio"] = "16:9" });
+Console.WriteLine(r.Files[0].Path);
+
+// or keep a media object, and give it to your agent
+var media = Media.Create(MediaStyle.Load(MediaStyle.XaiGrokCli));
+var clip = await media.VideoAsync(new VideoInput("the apple rolls off the table"));
+await using var tk = await Toolkit.CreateAsync(new Toolkit.Options().WithMedia(media)); // generate_image, generate_video
+```
+
+For an HTTP API, give `Media.Create(client)` one named client — `OpenAIMediaClient`, `OpenRouterMediaClient`, `FalMediaClient`, `ElevenLabsMediaClient` or `A2EMediaClient`. Each reads its key from its env
+var (`OPENAI_API_KEY`, `FAL_API_KEY`, `ELEVENLABS_API_KEY`, …) at call time and never logs it.
 
 ```csharp
 var cfg = new MediaClientConfig { Gather = new MediaGather { Mode = "download", Dir = "out" } }; // url | download | inline
-var media = Media.Create(new FalMediaClient(cfg), new ElevenLabsMediaClient(cfg), new A2EMediaClient(cfg));
+var voice = Media.Create(new ElevenLabsMediaClient(cfg));
 try
 {
-    var img = await media.ImageAsync(new ImageInput("a red fox in fresh snow"));          // fal, else a2e
-    var vid = await media.VideoAsync(new VideoInput("the fox blinks") { Image = img.Files[0].Url, Seconds = 5 });
-    var mp3 = await media.SpeechAsync(new SpeechInput("Hello from toolnexus."));          // elevenlabs
-    Console.WriteLine($"{vid.Files[0].Path} {mp3.Files[0].Path}");
+    var mp3 = await voice.SpeechAsync(new SpeechInput("Hello from toolnexus."));
+    Console.WriteLine(mp3.Files[0].Path);
 }
-catch (MediaUnavailableException e) { Console.Error.WriteLine(e.Message); } // every candidate unavailable
+catch (MediaUnavailableException e) { Console.Error.WriteLine(e.Message); } // no key, no credit
 ```
 
 `MediaClientConfig` is one shape for every client: `Model`, `Models` (per verb), `Key`, `Url`,
@@ -219,7 +233,7 @@ Advanced: a provider described in JSON instead of code —
 
 Run the example. It uses the Grok and Codex CLIs when they are installed and logged in, ElevenLabs
 for speech when `ELEVENLABS_API_KEY` is set, and OpenAI / fal / A2E (smallest, lowest-quality
-images) only as fallbacks when their keys are set. It makes an image, speech (voice from
+images) only when their keys are set. It makes an image, speech (voice from
 `MEDIA_VOICE`) and a `generate_image` tool call; `MEDIA_VIDEO=1` adds a Grok video and
 `MEDIA_PAID=1` adds paid video / talk. It prints client, verb, path or URL, mime type, size and
 usage; it exits non-zero if any step fails, and exits 0 with a hint when no client is available:

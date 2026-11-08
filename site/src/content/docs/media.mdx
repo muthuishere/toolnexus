@@ -1,6 +1,6 @@
 ---
 title: Media generation
-description: Images, video, speech, music, transcription, voice cloning and talking-head video from named media clients (A2E, ElevenLabs, OpenAI, OpenRouter, fal, Grok CLI, Codex CLI) or your own. Typed verbs for your code, opt-in tools for your agent, fall-through when a provider is unavailable.
+description: Images, video, speech, music, transcription, voice cloning and talking-head video from named media clients (A2E, ElevenLabs, OpenAI, OpenRouter, fal), CLI presets for the Grok, Codex and Antigravity CLIs, or your own. Typed verbs for your code, opt-in tools for your agent.
 ---
 
 import { Tabs, TabItem, Aside } from '@astrojs/starlight/components';
@@ -9,8 +9,8 @@ import { Tabs, TabItem, Aside } from '@astrojs/starlight/components';
 Every media provider makes you write the same code: start a job, poll it, dig the file out of
 the response, download it before the URL expires, and handle "out of credits" differently from
 "bad prompt". Toolnexus gives you **named media clients** with one small config, one interface
-for all of them, and a router that moves on to the next client when one is out of credits,
-has no key, or is blocked by its account. Your code calls `image(...)`; your agent, if you opt
+for all of them, and one typed `unavailable` error when a provider is out of credits, has no
+key, or is blocked by its account. Your code calls `image(...)`; your agent, if you opt
 in, calls `generate_image`.
 </Aside>
 
@@ -56,9 +56,20 @@ and a Clojure map of functions.
 path. A client that has to upload bytes reads the file or fetches the URL (with no API key sent
 to that URL) itself.
 
+## CLI presets
+
+To drive the Grok, Codex or Google Antigravity CLI, load a **preset** instead of constructing a
+client: `createMedia(loadMediaStyle(MediaStyle.XaiGrokCli))` (or `OpenAICodexCli`,
+`GoogleAgyCli`), or one line with `generateMedia(MediaStyle.XaiGrokCli, "image", { prompt })`. Each
+preset runs the vendor's official CLI in its documented headless mode (`grok -p`, `codex exec`,
+`agy -p`), signed in by you; your provider's terms of service apply to how you use its CLI. Grok
+images carry a small visible "Grok" mark in the bottom-right corner, which toolnexus does not
+remove. Install, sign-in, Grok video, limits, models, mocks and the per-language API:
+[Grok CLI, Codex CLI and Antigravity media setup](/toolnexus/cookbook/cli-media-setup/).
+
 ## Named clients
 
-Five clients talk to HTTP APIs and two drive a local subscription CLI. Each was built after a
+Five clients talk to HTTP APIs and two drive a local CLI (the CLI presets above load these). Each was built after a
 live spike, but not every verb has had a real call yet: verbs marked *unverified* follow the
 provider's docs and are listed as such in the CHANGELOG.
 
@@ -69,8 +80,8 @@ provider's docs and are listed as such in the CHANGELOG.
 | `OpenAIMediaClient` | `openai` | image, speech *(unverified)*, transcribe *(unverified)*, video *(unverified)* | `OPENAI_API_KEY` | `gpt-image-1-mini` |
 | `OpenRouterMediaClient` | `openrouter` | image | `OPENROUTER_API_KEY` | `google/gemini-2.5-flash-image` |
 | `FalMediaClient` | `fal` | image, video *(unverified)* | `FAL_API_KEY` | `fal-ai/flux/schnell` |
-| `GrokMediaClient` | `grok` | image, video ([after opting in](#grok-video-zdr)) | – (your Grok login) | the CLI's |
-| `CodexMediaClient` | `codex` | image | – (your ChatGPT plan) | the CLI's |
+| `GrokMediaClient` | `grok` | image, video ([after opting in](#grok-video-zdr)) | – (your `grok` sign-in) | the CLI's |
+| `CodexMediaClient` | `codex` | image | – (your `codex` sign-in) | the CLI's |
 
 Which arguments each client accepts:
 
@@ -96,20 +107,15 @@ never offered a knob the provider would ignore.
   run that ends normally but produced the wrong kind of file (a still image when you asked for
   video) is a failure, not a success.
 
-## `createMedia`: routing and fall-through
+## `createMedia`
 
-`createMedia(client | [client])` returns `media` with the seven typed verbs, a generic
-`generate(verb, args)`, `supports(verb)` and `tools()`. For each call:
+`createMedia(client)` returns `media` with the seven typed verbs, a generic
+`generate(verb, args)`, `supports(verb)`, `verbs()` and `tools()`. For each call:
 
-1. The candidates are the clients that support the verb, in list order. None ⇒
-   `media: no client supports "<verb>"`.
-2. The args are checked against the first candidate: an unknown arg ⇒
-   `<verb>: argument "<key>" not supported by <client>`; a missing required one ⇒
-   `<verb>: argument "<key>" is required`. No request is made.
-3. The first candidate's result is returned **as is**: success, or any error that is not
-   `unavailable` (a bad prompt, HTTP 500, a timeout and cancellation do not fall through).
-4. An **`unavailable`** error moves on to the next candidate, dropping any arg it does not accept.
-5. All candidates `unavailable` ⇒ `media: no client available for "<verb>": <each message, "; "-joined>`.
+1. A verb the client does not support ⇒ `media: no client supports "<verb>"`.
+2. The args are checked first: an unknown arg ⇒ `<verb>: argument "<key>" not supported by <client>`;
+   a missing required one ⇒ `<verb>: argument "<key>" is required`. No request is made.
+3. The client's result is returned **as is**: success, or its error.
 
 `unavailable` means "valid call, but this client cannot serve it right now". It covers exactly:
 no API key (no request is made), HTTP 402, HTTP 429 mentioning quota/credit/billing/balance, a
@@ -119,40 +125,25 @@ Python, Java, C#), `errors.Is(err, ErrMediaUnavailable)` (Go), `MediaError::Unav
 (Rust), `%Toolnexus.Media.Error{status: :unavailable}` (Elixir), `ex-info` with
 `{:status :unavailable}` (Clojure).
 
-<Aside type="caution" title="Arguments are checked against the first client">
-Step 2 checks the args only against the **first** supporting client, and an arg it does not
-accept is a hard failure, not a fall-through. `GrokMediaClient` accepts only `prompt`, so
-`createMedia([grok, fal]).video({prompt, image})` fails with
-`video: argument "image" not supported by grok` and never reaches fal. Put the client with the
-widest argument list first, or send only `prompt` when a CLI client leads.
-</Aside>
-
-So a list is a preference order: put the free or subscription client first and the paid one
-after it.
-
 <Tabs syncKey="lang">
 <TabItem label="JavaScript">
 ```ts
-import { createMedia, GrokMediaClient, FalMediaClient, OpenAIMediaClient, MediaUnavailableError } from "toolnexus"
+import { createMedia, FalMediaClient, MediaUnavailableError } from "toolnexus"
 
-const media = createMedia([
-  new GrokMediaClient(),                       // video on your Grok subscription first…
-  new FalMediaClient({ models: { video: "fal-ai/kling-video/v2.1/standard/text-to-video" } }), // …then fal
-  new OpenAIMediaClient(),                     // images, unless Grok serves them
-])
+const media = createMedia(new FalMediaClient({ models: { video: "fal-ai/kling-video/v2.1/standard/text-to-video" } }))
 
 try {
   const vid = await media.video({ prompt: "a paper boat drifting down a rain gutter" })
   console.log(vid.status, vid.files[0].path)
 } catch (e) {
-  if (e instanceof MediaUnavailableError) console.log("no video client available:", e.message)
+  if (e instanceof MediaUnavailableError) console.log("fal is unavailable:", e.message)
   else throw e
 }
 ```
 </TabItem>
 <TabItem label="Other languages">
 The same example in all eight languages is in the cookbook:
-[named clients and fallback](/toolnexus/cookbook/media/#1-named-clients-and-fallback).
+[named clients](/toolnexus/cookbook/media/#1-named-clients).
 </TabItem>
 </Tabs>
 
@@ -196,9 +187,8 @@ API key, follow redirects only within the rules of §7G.8, and honour the job de
 ## The tool face (opt-in)
 
 Tools are **not** registered unless you ask. `media.tools()` returns one tool (source `"media"`)
-for each verb **some** client supports; pass `media` to `createToolkit` to register them (enable
-and disable lists still apply). Each tool's schema comes from the first client that supports
-the verb, so it lists only arguments that client accepts.
+for each verb the client supports; pass `media` to `createToolkit` to register them (enable
+and disable lists still apply). Each tool's schema lists only the arguments that client accepts.
 
 - A media tool never throws. Success is `"<image|video|audio> ready: <path or url>"` with the files
   as `parts` and `metadata {source:"media", verb, client, jobId?, status}`, where `client` names
@@ -222,7 +212,7 @@ a base64 video is huge and most models cannot read it. The model sees only the `
 
 For a provider that is not built in, implement the interface: a name, `supports`, and the verbs you
 handle. Return a `MediaResult`; throw the port's `MediaUnavailableError` (or equivalent) when your
-provider is out of credits, so the router falls through.
+provider is out of credits, so callers get the typed `unavailable` error.
 
 ```ts
 import { createMedia, type MediaClient, type MediaResult } from "toolnexus"
@@ -235,7 +225,7 @@ const myImages: MediaClient = {
     return { status: "completed", files: [{ type: "image", mimeType: "image/png", url }] }
   },
 }
-const media = createMedia([myImages])
+const media = createMedia(myImages)
 ```
 
 Every language: [a custom MediaClient](/toolnexus/cookbook/media/#4-a-custom-mediaclient).
@@ -264,12 +254,11 @@ custom client for real once before you ship it.
 Grok's video tools obey your account's **coding-data setting**, not the API console:
 
 - `console.x.ai` is the pay-per-call **API** console (keys, credits). It does **not** control the
-  Grok CLI. The CLI uses your SuperGrok subscription login; a personal account is a "team of one".
+  Grok CLI. The CLI uses your own `grok` sign-in; a personal account is a "team of one".
 - Under **Zero Data Retention** the video tool fails ("Video generation tools are unavailable
   under zero data retention (ZDR)"), and Grok often ends the turn normally with only a still
-  image. `GrokMediaClient` turns that into `unavailable` with
-  `grok: video blocked by Zero Data Retention — run /privacy and opt in, or configure ZDR video storage (docs/media#grok-video-zdr)`,
-  and `createMedia` falls through to your next video client.
+  image. The `xai-grok-cli` preset turns that into `unavailable` with
+  `grok: video blocked by Zero Data Retention — run /privacy and opt in, or configure ZDR video storage (docs/media#grok-video-zdr)`.
 
 To make Grok video work:
 
@@ -279,8 +268,8 @@ To make Grok video work:
    CLI coding data. Decide whether that is acceptable for your account.
 4. **Restart `grok`.**
 
-After opting in we generated a video through `GrokMediaClient` in 53 s (a still image, then
-image-to-video); the `.mp4` path arrives in the completed tool result and the client copies it out
+After opting in we generated a video through the Grok CLI in 53 s (a still image, then
+image-to-video); the `.mp4` path arrives in the completed tool result and toolnexus copies it out
 of `~/.grok/sessions/...`.
 
 <Aside type="caution" title="The ZDR video bucket did not work for us">
@@ -293,7 +282,7 @@ Others report the same on one-person teams. A bucket only on your machine (a loc
 work, because xAI uploads to it.
 </Aside>
 
-`GrokMediaClient` never edits your Grok settings.
+Toolnexus never edits your Grok settings.
 
 ## Error strings
 
@@ -302,9 +291,9 @@ Every port produces these, byte for byte (full list: SPEC §7G.2, §7G.3, §7G.5
 | when | message |
 |---|---|
 | no client supports the verb | `media: no client supports "<verb>"` |
-| an arg the first client doesn't accept | `<verb>: argument "<key>" not supported by <client>` (style clients: `… by this style`) |
+| an arg the client doesn't accept | `<verb>: argument "<key>" not supported by <client>` (style clients: `… by this style`) |
 | a required arg missing | `<verb>: argument "<key>" is required` |
-| every client unavailable | `media: no client available for "<verb>": <messages>` |
+| the client is unavailable | `media: no client available for "<verb>": <client message>` |
 | no key | `<client>: no API key (set <ENV>)` |
 | non-2xx | `<client>: HTTP <status>: <body>` |
 | CLI not found | `<client>: cannot start "<command>"` |

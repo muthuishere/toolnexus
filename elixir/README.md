@@ -195,37 +195,45 @@ ride `Task.async_stream`. Same contract as the other six ports, native OTP under
 
 ## Media generation
 
-Image, video, speech, music, transcription, voice cloning and talking-head video behind one
-interface. Pick **named media clients** — API: `Media.a2e/1`, `elevenlabs/1`, `openai/1`,
-`openrouter/1`, `fal/1`; local CLI on your own subscription: `grok/1`, `codex/1` — and
-`Media.create/1` sends each verb to the first client that supports it, falling through to the next
-**only** when a client is `:unavailable` (no key, no credits, quota, CLI missing). Each API client
-reads its key (`OPENAI_API_KEY`, `FAL_API_KEY`, …) at call time and never logs it. SPEC §7G;
-guide: <https://muthuishere.github.io/toolnexus/media/>.
+Images, video, speech, music, transcription, voice cloning and talking-head video, with **one
+client per media object**. The quickest start is a **CLI preset**: `Media.xai_grok_cli()`, `Media.openai_codex_cli()` and `Media.google_agy_cli()` drive the vendor's
+official CLI (`grok`, `codex`, `agy`) in its documented headless mode (`grok -p`, `codex exec`,
+`agy -p`), signed in by you. Grok does image and video; Codex and Antigravity do image. Each preset
+has a mock twin (`Media.xai_grok_cli_mock()`, …) for tests. Your provider's terms of service apply to how you use its CLI.
+Every Grok image carries a small visible **"Grok" mark in the bottom-right corner**; toolnexus does
+not remove it. Install, sign-in, Grok video, limits and models:
+<https://muthuishere.github.io/toolnexus/cookbook/cli-media-setup/>. SPEC §7G; guide: <https://muthuishere.github.io/toolnexus/media/>.
 
 ```elixir
 alias Toolnexus.Media
 
-media = Media.create!([Media.fal(), Media.grok(), Media.elevenlabs(), Media.a2e()])
+# one line
+{:ok, r} = Media.generate_media(Media.xai_grok_cli(), "image", %{"prompt" => "a red apple", "aspectRatio" => "16:9"})
+IO.puts(hd(r.files).path)
 
-with {:ok, %{files: [img | _]}} <- Media.image(media, prompt: "a red fox in fresh snow"),
-     {:ok, _vid} <- Media.video(media, prompt: "the fox blinks", image: img.path || img.url),
-     {:ok, %{files: [voice | _]}} <- Media.speech(media, text: "Hello from the fox."),
-     {:ok, talk} <- Media.talk(media, image: img.path || img.url, audio: voice.path || voice.url) do
-  IO.inspect(talk.files)
-else
-  {:error, %Media.Error{status: :unavailable, message: m}} -> IO.puts("no client could serve it: " <> m)
+# or keep a media object, and give it to your agent
+{:ok, style} = Media.load_style(Media.xai_grok_cli())
+media = Media.create!(style)
+{:ok, clip} = Media.video(media, %{"prompt" => "the apple rolls off the table"})
+{:ok, tk} = Toolnexus.create_toolkit(media: media)    # generate_image, generate_video
+```
+
+For an HTTP API, give `Media.create!(client)` one named client — `Media.openai/1`, `Media.openrouter/1`, `Media.fal/1`, `Media.elevenlabs/1` or `Media.a2e/1`. Each reads its key from its env
+var (`OPENAI_API_KEY`, `FAL_API_KEY`, `ELEVENLABS_API_KEY`, …) at call time and never logs it.
+
+```elixir
+voice = Media.create!(Media.elevenlabs())
+
+case Media.speech(voice, text: "Hello from the fox.") do
+  {:ok, %{files: [f | _]}} -> IO.puts(f.path || f.url)
+  {:error, %Media.Error{status: :unavailable, message: m}} -> IO.puts("unavailable: " <> m)
   {:error, %Media.Error{status: status, message: m}} -> IO.puts("#{status}: #{m}")
 end
-
-{:ok, tk} = Toolnexus.create_toolkit(media: media)    # generate_image, generate_video, …
-res = Toolnexus.Client.run(client, "Draw a fox, then animate it.", tk)
-for f <- res.files, do: IO.puts("#{f.from} #{f.mime_type} #{f[:url]}")
 ```
 
 - **Verbs** — `image`, `video`, `speech`, `music`, `transcribe`, `clone_voice`, `talk`, each
   `(media, args, opts \\ [])` → `{:ok, %Media.Result{files, text, job_id, status, usage}}`; or
-  `Media.generate(media, verb, args)`. CLI clients take `prompt` only.
+  `Media.generate(media, verb, args)`. CLI presets take `prompt` plus size hints, folded into the prompt.
 - **Tools** — `create_toolkit(media: media)` (or `Media.tools(media)`) registers one tool per verb
   some client supports. Every file a tool makes lands in `RunResult.files`; only **image** parts are
   sent back to the model.
@@ -234,14 +242,14 @@ for f <- res.files, do: IO.puts("#{f.from} #{f.mime_type} #{f[:url]}")
   `gather: [mode: "url" | "download" | "inline", dir:, max_bytes:, keep:]` (built-ins default to
   `"download"` into the temp dir), `http_client`.
 - **Your own client** — a module implementing `Toolnexus.Media.Client`: `name/1`, `supports?/2`,
-  plus only the verb callbacks you serve; return `{:error, %Media.Error{status: :unavailable, message: msg}}` to fall
-  through.
+  plus only the verb callbacks you serve; return `{:error, %Media.Error{status: :unavailable, message: msg}}` when it
+  cannot serve a call.
 - **Errors** — `{:error, %Toolnexus.Media.Error{status: :failed | :timeout | :cancelled |
   :unavailable}}`; a media tool never raises (`is_error: true`).
-- **Advanced** — a style as a client: `{:ok, style} = Media.load_style(path_or_preset)` (preset: `Media.xai_grok_cli()`, `Media.openai_codex_cli()`, `Media.google_agy_cli()`, or a `_mock` twin) then `Media.create!(style)`; one-shot `Media.generate_media(Media.xai_grok_cli(), "image", %{"prompt" => "..."})`.
+- **Advanced** — a provider described in JSON: `{:ok, style} = Media.load_style("my-style.json")` then `Media.create!(style)`.
 
 Run it: `mix run examples/media.exs` — uses the `grok` / `codex` CLIs when on `PATH`, ElevenLabs with
-`ELEVENLABS_API_KEY` (voice from `MEDIA_VOICE`), and paid OpenAI / fal / A2E only as fallbacks when their
+`ELEVENLABS_API_KEY` (voice from `MEDIA_VOICE`), and paid OpenAI / fal / A2E only when their
 keys are set; `MEDIA_VIDEO=1` adds Grok video, `MEDIA_PAID=1` paid video/talk. It prints client, verb,
 path or URL, mime, size and usage per file, exits 1 if a step fails, and exits 0 with a hint when no
 client is available.

@@ -200,35 +200,46 @@ server the suite uses is test tooling (`tests/common_dev_auth`), not part of the
 
 ## Media generation
 
-Generate images, video, speech and music (plus transcription, voice cloning and talking-head
-video) through **named media clients**: API clients `A2EMediaClient`, `ElevenLabsMediaClient`,
-`OpenAIMediaClient`, `OpenRouterMediaClient`, `FalMediaClient`, and CLI clients `GrokMediaClient`,
-`CodexMediaClient`. `create_media` takes them in priority order: each verb goes to the first client
-that supports it, and moves on to the next **only** on `MediaError::Unavailable` (no key, no credits,
-CLI missing). Keys are read from the client's env var (`FAL_API_KEY`, `OPENAI_API_KEY`, …) at call
-time and never logged. SPEC §7G; guide: <https://muthuishere.github.io/toolnexus/media/>.
+Images, video, speech, music, transcription, voice cloning and talking-head video, with **one
+client per media object**. The quickest start is a **CLI preset**: `MediaStyle::XAI_GROK_CLI`, `MediaStyle::OPENAI_CODEX_CLI` and `MediaStyle::GOOGLE_AGY_CLI` drive the vendor's
+official CLI (`grok`, `codex`, `agy`) in its documented headless mode (`grok -p`, `codex exec`,
+`agy -p`), signed in by you. Grok does image and video; Codex and Antigravity do image. Each preset
+has a mock twin (`MediaStyle::XAI_GROK_CLI_MOCK`, …) for tests. Your provider's terms of service apply to how you use its CLI.
+Every Grok image carries a small visible **"Grok" mark in the bottom-right corner**; toolnexus does
+not remove it. Install, sign-in, Grok video, limits and models:
+<https://muthuishere.github.io/toolnexus/cookbook/cli-media-setup/>. SPEC §7G; guide: <https://muthuishere.github.io/toolnexus/media/>.
 
 ```rust
-use toolnexus::{A2EMediaClient, ElevenLabsMediaClient, FalMediaClient, GrokMediaClient, ImageInput,
-    IntoMediaClient, MediaClientConfig, SpeechInput, TalkInput, VideoInput, create_media};
+use toolnexus::{create_media, create_toolkit, generate_media, load_media_style, MediaStyle,
+    ToolkitOptions, VideoInput};
 
-let cfg = MediaClientConfig::default(); // gather: download to <os temp>/toolnexus-media
-let media = create_media([
-    FalMediaClient::new(cfg.clone()).into_media_client(),        // image, video (FAL_API_KEY)
-    GrokMediaClient::new(cfg.clone()).into_media_client(),       // fallback when fal is unavailable (prompt only)
-    ElevenLabsMediaClient::new(cfg.clone()).into_media_client(), // speech, music, transcribe, cloneVoice
-    A2EMediaClient::new(cfg).into_media_client(),                // talk
-])?;
-let img = match media.image(ImageInput { prompt: "a red fox in fresh snow".into(), ..Default::default() }).await {
-    Err(e) if e.is_unavailable() => return Err(format!("every image client is unavailable: {e}").into()),
+// one line
+let mut args = serde_json::Map::new();
+args.insert("prompt".into(), "a red apple".into());
+args.insert("aspectRatio".into(), "16:9".into());
+let r = generate_media(MediaStyle::XAI_GROK_CLI, "image", args, Default::default()).await?;
+println!("{}", r.files[0].path);
+
+// or keep a media object, and give it to your agent
+let media = create_media([load_media_style(MediaStyle::XAI_GROK_CLI)?])?;
+let clip = media.video(VideoInput { prompt: "the apple rolls off the table".into(), ..Default::default() }).await?;
+let tk = create_toolkit(ToolkitOptions { media: Some(media), ..Default::default() }).await?; // generate_image, generate_video
+```
+
+For an HTTP API, give `create_media([client])` one named client — `OpenAIMediaClient`, `OpenRouterMediaClient`, `FalMediaClient`, `ElevenLabsMediaClient` or `A2EMediaClient`. Each reads its key from its env
+var (`OPENAI_API_KEY`, `FAL_API_KEY`, `ELEVENLABS_API_KEY`, …) at call time and never logs it.
+
+```rust
+use toolnexus::{create_media, FalMediaClient, ImageInput, IntoMediaClient, MediaClientConfig, VideoInput};
+
+let fal = create_media([FalMediaClient::new(MediaClientConfig::default()).into_media_client()])?; // FAL_API_KEY
+let img = match fal.image(ImageInput { prompt: "a red fox in fresh snow".into(), ..Default::default() }).await {
+    Err(e) if e.is_unavailable() => return Err(format!("fal is unavailable: {e}").into()), // no key, no credits
     r => r?,
 };
-let face = img.files[0].path.clone();
-let vid = media.video(VideoInput { prompt: "the fox blinks".into(), image: Some(face.clone()),
+let vid = fal.video(VideoInput { prompt: "the fox blinks".into(), image: Some(img.files[0].path.clone()),
     seconds: Some(5), ..Default::default() }).await?;
-let voice = media.speech(SpeechInput { text: "Hello from the fox.".into(), ..Default::default() }).await?;
-let talk = media.talk(TalkInput { image: face, audio: Some(voice.files[0].path.clone()), ..Default::default() }).await?;
-println!("{} {}", vid.files[0].path, talk.files[0].path);
+println!("{}", vid.files[0].path);
 ```
 
 The typed verbs are `image`, `video`, `speech`, `music`, `transcribe` (→ `MediaResult.text`),
@@ -240,7 +251,7 @@ r#loop, gather, http_client }`. `gather.mode` is `GatherMode::Url` (keep provide
 `Download` (default; save under `dir`, capped by `max_bytes`) or `Inline` (base64 `data`).
 `MediaLoop { interval_ms, timeout_ms, on_progress }` bounds async jobs.
 
-**As agent tools** — put the router on the toolkit and each supported verb becomes a tool
+**As agent tools** — put the media object on the toolkit and each supported verb becomes a tool
 (`generate_image`, `generate_video`, `generate_speech`, …). Whatever they produce lands in
 `RunResult.files`; only image parts are shown to the model.
 
@@ -251,7 +262,7 @@ for f in &res.files { println!("{} {} {} {}", f.from, f.kind, f.mime_type, f.url
 ```
 
 **Your own provider** — implement `MediaClient` (`name`, `supports`, and only the verbs you serve; the
-rest default to failing). Return `MediaError::unavailable("…")` to let the router fall through.
+rest default to failing). Return `MediaError::unavailable("…")` when it cannot serve a call.
 
 ```rust
 struct Stock;
