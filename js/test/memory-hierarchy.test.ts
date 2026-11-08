@@ -307,6 +307,28 @@ test("D0: DREAM_PROMPT is the fixture's exact text", () => {
   assert.equal(DREAM_PROMPT, DR.dreamPrompt)
 })
 
+test("D7: the dreamer's memory tool keeps USER.md untouched and memory/log.md append-only", async () => {
+  const e = DR.expect.D7_dreamGuard
+  const home = mkHome(e.files)
+  const mem = dreamer(home, { store: store() }).spec.uses!.tools![0]
+  for (const c of e.cases) {
+    const r = await mem.execute(c.args)
+    assert.deepEqual({ output: r.output, isError: r.isError }, { output: c.output, isError: c.isError }, c.name)
+  }
+  const snap = snapshot(home)
+  assert.deepEqual(Object.keys(snap).sort(), Object.keys(e.files).sort())
+  for (const [f, body] of Object.entries(e.filesAfter)) assert.equal(snap[f], body, f)
+  const p = e.plainToolStillWrites
+  const r = await memoryTool(home, { notes: true }).execute(p.args)
+  assert.deepEqual({ output: r.output, isError: r.isError }, { output: p.output, isError: p.isError })
+})
+
+test("D8: DREAM_PROMPT removes only what the transcripts contradict", () => {
+  const e = DR.expect.D8_promptKeepsUnmentionedClaims
+  assert.ok(DREAM_PROMPT.includes(e.dreamPromptContains))
+  assert.ok(!DREAM_PROMPT.includes(e.dreamPromptNotContains))
+})
+
 test("D1 BUILD GATE (Mt. Moon): one dream pass fixes the wrong note, logs it, next session answers differently", async () => {
   const g = DR.expect.D1_mtMoonBuildGate
   const home = mkHome(DR.home)
