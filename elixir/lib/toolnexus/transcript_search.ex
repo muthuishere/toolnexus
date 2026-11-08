@@ -73,7 +73,7 @@ defmodule Toolnexus.TranscriptSearch do
     query = if is_binary(args["query"]), do: normalize(args["query"]), else: ""
 
     with {:query, false} <- {:query, query == ""},
-         {:ok, limit} <- limit(args["limit"], max_results) do
+         {:ok, limit} <- limit(Map.fetch(args, "limit"), max_results) do
       ids =
         case args["conversationId"] do
           id when is_binary(id) -> [id]
@@ -120,10 +120,11 @@ defmodule Toolnexus.TranscriptSearch do
     end
   end
 
-  defp limit(nil, max), do: {:ok, max}
-  defp limit(n, max) when is_integer(n) and n >= 1, do: {:ok, min(n, max)}
+  # absent ⇒ the default; a present JSON null is an error (§7E).
+  defp limit(:error, max), do: {:ok, max}
+  defp limit({:ok, n}, max) when is_integer(n) and n >= 1, do: {:ok, min(n, max)}
 
-  defp limit(n, max) when is_float(n) and n >= 1 and n == trunc(n) / 1,
+  defp limit({:ok, n}, max) when is_float(n) and n >= 1 and n == trunc(n) / 1,
     do: {:ok, min(trunc(n), max)}
 
   defp limit(_, _), do: :bad_limit

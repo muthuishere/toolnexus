@@ -213,6 +213,30 @@ defmodule Toolnexus.Agents.MemoryHierarchyTest do
              "ok (add → USER.md); loads next session"
   end
 
+  test "G2: list skips symlinks, dangling symlinks and directories (lstat)" do
+    l = @mh["memoryTool"]["listSkipsNonRegular"]
+    dir = mkhome(l["regular"])
+    for d <- l["dirs"], do: File.mkdir_p!(Path.join(dir, d))
+
+    for {link, target} <- l["symlinks"],
+        do: :ok = File.ln_s(target, Path.join(dir, link))
+
+    assert exec(Home.memory_tool(dir, notes: true), %{"action" => "list"}) ==
+             %{"output" => l["expectList"], "isError" => false}
+  end
+
+  test "G4: the lock key is the real path, even for files and dirs not yet created" do
+    dir = mkhome(%{})
+    link = dir <> "-link"
+    :ok = File.ln_s(dir, link)
+    on_exit(fn -> File.rm(link) end)
+    real = Home.real_path(Path.join(dir, "MEMORY.md"))
+    assert Home.real_path(Path.join(link, "MEMORY.md")) == real
+
+    assert Home.real_path(Path.join(link, "memory/x/y.md")) ==
+             Path.join(Path.dirname(real), "memory/x/y.md")
+  end
+
   # ---------------- G3 — transcript search ----------------
 
   test "G3: transcript search schema/description/defaults pinned" do
@@ -234,7 +258,8 @@ defmodule Toolnexus.Agents.MemoryHierarchyTest do
         [max_results: o["maxResults"], snippet_chars: o["snippetChars"]]
         |> Enum.reject(fn {_, v} -> v == nil end)
 
-      assert exec(TranscriptSearch.tool(mh_store(), opts), c["args"]) == c["expect"]
+      store = if c["emptyStore"], do: Stub.new([]), else: mh_store()
+      assert exec(TranscriptSearch.tool(store, opts), c["args"]) == c["expect"]
     end
   end
 
@@ -301,6 +326,28 @@ defmodule Toolnexus.Agents.MemoryHierarchyTest do
 
     assert length(lines) == w["expectEntries"]
     assert length(Enum.uniq(lines)) == w["expectEntries"]
+  end
+
+  test "G4: concurrent adds via a symlink and the real path keep every entry" do
+    w = @mh["writeSafety"]["concurrentAddsViaSymlink"]
+    dir = mkhome(%{})
+    link = dir <> "-link"
+    :ok = File.ln_s(dir, link)
+    on_exit(fn -> File.rm(link) end)
+    tools = [Home.memory_tool(link), Home.memory_tool(dir)]
+
+    jobs =
+      for {t, wi} <- Enum.with_index(tools), n <- 0..19 do
+        Task.async(fn -> t.execute.(%{"action" => "add", "text" => "w#{wi}-#{n}"}, nil) end)
+      end
+
+    Enum.each(Task.await_many(jobs, 30_000), &refute(&1.is_error))
+
+    lines =
+      Path.join(dir, "MEMORY.md") |> File.read!() |> String.trim_trailing() |> String.split("\n")
+
+    assert length(Enum.uniq(lines)) == 40
+    if w["expectEntries"], do: assert(length(lines) == w["expectEntries"])
   end
 
   test "G4: a 3 MB MEMORY.md + add grows on disk, nothing truncated, no temp file" do
@@ -512,5 +559,21 @@ defmodule Toolnexus.Agents.MemoryHierarchyTest do
     refute Enum.any?(Runtime.trace(started.runtime), &(inspect(&1) =~ "dreamer"))
     Home.stop(started)
     assert snapshot(home) == frozen
+  end
+
+  test "D6: a dreamer name collision raises before anything starts" do
+    e = @dr["expect"]["D6_dreamerNameCollision"]
+    home = mkhome(@dr["home"])
+
+    persona =
+      Home.from_dir(home, name: e["personaName"], dream: %{every_ms: 50, store: dr_store()})
+
+    clash = Agents.agent("#{e["personaName"]}-dreamer", %{does: "x", soul: "x"})
+    persona = %{persona | spec: Map.put(persona.spec, :team, [clash])}
+
+    err =
+      assert_raise ArgumentError, fn -> Home.start_agent(persona, dr_opts(), every_ms: 50) end
+
+    assert err.message == e["error"]
   end
 end

@@ -47,7 +47,7 @@ defmodule Toolnexus.Agents.Home do
   @truncation_notice "\n[truncated: exceeds 2 MB bootstrap cap]"
   @heartbeat_ok "HEARTBEAT_OK"
   @index_cap_preset %{max_lines: 200, max_bytes: 25600}
-  @note_slug ~r/^[a-z0-9][a-z0-9._-]{0,63}$/
+  @note_slug ~r/\A[a-z0-9][a-z0-9._-]{0,63}\z/
   @memory_description "Persist durable memory. action=add appends an entry; replace swaps an " <>
                         "existing substring (with); remove deletes one. target=self (MEMORY.md, " <>
                         "default) or user (USER.md). Writes persist to disk and load at the START of " <>
@@ -457,8 +457,9 @@ defmodule Toolnexus.Agents.Home do
         slug = String.replace_suffix(name, ".md", "")
 
         with true <- String.ends_with?(name, ".md") and valid_slug?(slug),
+             # lstat: a symlink (dangling or not) is not a regular file (§7E)
              {:ok, %File.Stat{type: :regular, size: size}} <-
-               File.stat(Path.join(notes_dir, name)) do
+               File.lstat(Path.join(notes_dir, name)) do
           [{slug, size}]
         else
           _ -> []
@@ -475,7 +476,7 @@ defmodule Toolnexus.Agents.Home do
   # never applied on disk), serialized per resolved absolute path: a `:global` lock
   # keyed by the path makes concurrent callers in this node queue, so no add is lost.
   defp rmw(file, action, text, with) do
-    key = {{__MODULE__, Path.expand(file)}, self()}
+    key = {{__MODULE__, real_path(file)}, self()}
 
     :global.trans(
       key,
@@ -493,6 +494,41 @@ defmodule Toolnexus.Agents.Home do
       end,
       [node()]
     )
+  end
+
+  # The lock key is the REAL path (§7E): symlinks resolved, so two tools reaching one
+  # file through different spellings share a lock. A missing file resolves its
+  # nearest existing ancestor and re-appends the rest.
+  @doc false
+  def real_path(file) do
+    {existing, rest} = split_existing(Path.expand(file), [])
+    Path.join([resolve(existing, 0) | rest])
+  end
+
+  defp split_existing(p, rest) do
+    parent = Path.dirname(p)
+
+    cond do
+      match?({:ok, _}, File.lstat(p)) -> {p, rest}
+      parent == p -> {p, rest}
+      true -> split_existing(parent, [Path.basename(p) | rest])
+    end
+  end
+
+  # Resolve every symlink component of an existing absolute path.
+  defp resolve(path, depth) when depth > 40, do: path
+
+  defp resolve(path, depth) do
+    [root | parts] = Path.split(path)
+
+    Enum.reduce(parts, root, fn part, acc ->
+      p = Path.join(acc, part)
+
+      case :file.read_link_all(String.to_charlist(p)) do
+        {:ok, target} -> resolve(Path.expand(to_string(target), acc), depth + 1)
+        _ -> p
+      end
+    end)
   end
 
   # Write to a temp file in the same directory, flush it to disk (fsync), then rename
@@ -534,7 +570,8 @@ defmodule Toolnexus.Agents.Home do
 
   defp compute_memory("replace", cur, text, replacement) do
     if String.contains?(cur, text),
-      do: {:ok, String.replace(cur, text, replacement, global: false)},
+      # a function replacement: inserted literally, never pattern-expanded (§7E)
+      do: {:ok, String.replace(cur, text, fn _ -> replacement end, global: false)},
       else: {:error, "not found: #{text}"}
   end
 
@@ -585,11 +622,16 @@ defmodule Toolnexus.Agents.Home do
   def start_agent(%AgentDef{} = agent, rt_opts, opts \\ []) do
     opts = Map.new(opts)
     dream = agent.spec[:dream]
+    own = Agents.registry(agent)
 
-    registry =
-      if dream,
-        do: Map.merge(Agents.registry(dream.dreamer), Agents.registry(agent)),
-        else: Agents.registry(agent)
+    if dream && Map.has_key?(own, dream.dreamer.name),
+      do:
+        raise(
+          ArgumentError,
+          "startAgent: dreamer name collision: #{dream.dreamer.name} is already registered"
+        )
+
+    registry = if dream, do: Map.merge(Agents.registry(dream.dreamer), own), else: own
 
     rt = Runtime.new(rt_opts |> Map.new() |> Map.put(:registry, registry))
     {:ok, handle} = Runtime.spawn_agent(rt, Runtime.root(rt), agent.name)
@@ -610,7 +652,17 @@ defmodule Toolnexus.Agents.Home do
     # what it did is in memory/log.md.
     dream_hb =
       if dream do
-        {:ok, dh} = Runtime.spawn_agent(rt, Runtime.root(rt), dream.dreamer.name)
+        dh =
+          case Runtime.spawn_agent(rt, Runtime.root(rt), dream.dreamer.name) do
+            {:ok, dh} ->
+              dh
+
+            other ->
+              # never leak the persona's heartbeat when the dreamer cannot start
+              GenServer.stop(hb)
+              Runtime.shutdown(rt)
+              raise "startAgent: dreamer spawn failed: #{inspect(other)}"
+          end
 
         {:ok, pid} =
           Heartbeat.start_link(%{
