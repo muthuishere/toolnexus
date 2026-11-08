@@ -199,8 +199,19 @@ defmodule Toolnexus.Media.Gather do
       dir = Path.expand(job.config.gather.dir || Path.join(System.tmp_dir!(), "toolnexus-media"))
       File.mkdir_p!(dir)
       ext = url_ext(url) || Map.get(@ext, mime, ".bin")
-      name = "#{job.name}-#{job.verb}-#{System.system_time(:millisecond)}-#{seq()}#{ext}"
-      path = Path.join(dir, name)
+
+      path =
+        case slug(job.config.gather.name) do
+          "" ->
+            Path.join(
+              dir,
+              "#{job.name}-#{job.verb}-#{System.system_time(:millisecond)}-#{seq()}#{ext}"
+            )
+
+          slug ->
+            free_name(dir, slug, ext, 1)
+        end
+
       File.write!(path, bin)
 
       {:ok,
@@ -223,6 +234,32 @@ defmodule Toolnexus.Media.Gather do
     case Regex.run(~r/\.([A-Za-z0-9]{1,5})$/, last || "") do
       [_, e] -> "." <> String.downcase(e)
       _ -> nil
+    end
+  end
+
+  @doc false
+  # §7G.10b gather.name: bytes outside [A-Za-z0-9._-] ⇒ "-", leading "." / "-" dropped.
+  def slug(nil), do: ""
+
+  def slug(name) do
+    for(<<c <- to_string(name)>>, into: "", do: if(safe?(c), do: <<c>>, else: "-"))
+    |> String.replace(~r/^[.-]+/, "")
+  end
+
+  defp safe?(c),
+    do: c in ?a..?z or c in ?A..?Z or c in ?0..?9 or c in [?., ?_, ?-]
+
+  # The first of <slug><ext>, <slug>-2<ext>, … not in dir, created exclusively (no races).
+  defp free_name(dir, slug, ext, n) do
+    path = Path.join(dir, if(n == 1, do: slug <> ext, else: "#{slug}-#{n}#{ext}"))
+
+    case File.open(path, [:write, :exclusive]) do
+      {:ok, io} ->
+        File.close(io)
+        path
+
+      {:error, :eexist} ->
+        free_name(dir, slug, ext, n + 1)
     end
   end
 

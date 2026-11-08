@@ -235,7 +235,13 @@ defmodule Toolnexus.ToolResult do
   `structured` is the machine-readable result (MCP `structuredContent`) and `meta` the
   protocol metadata (MCP `_meta`); both `nil` ⇒ the wire is unchanged.
   """
-  defstruct output: "", is_error: false, parts: nil, metadata: nil, paths: nil, structured: nil, meta: nil
+  defstruct output: "",
+            is_error: false,
+            parts: nil,
+            metadata: nil,
+            paths: nil,
+            structured: nil,
+            meta: nil
 
   @type t :: %__MODULE__{
           output: String.t(),

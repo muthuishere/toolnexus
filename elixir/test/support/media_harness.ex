@@ -159,6 +159,9 @@ defmodule Toolnexus.MediaHarness do
     assert r.status == exp["status"]
     assert r.job_id == exp["jobId"]
     assert r.text == exp["text"]
+    # §7G.10b: style / model asserted only when the expected result names them.
+    if Map.has_key?(exp, "style"), do: assert(r.style == exp["style"])
+    if Map.has_key?(exp, "model"), do: assert(r.model == exp["model"])
     # D21: usage exact when present; noUsage ⇒ none; absent field ⇒ not asserted.
     cond do
       Map.has_key?(exp, "usage") -> assert r.usage == exp["usage"]

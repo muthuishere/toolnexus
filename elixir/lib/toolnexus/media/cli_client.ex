@@ -15,7 +15,9 @@ defmodule Toolnexus.Media.CliClient do
   @callback default_command() :: String.t()
   @doc "Verbs the CLI serves."
   @callback verbs() :: [String.t()]
-  @doc "Client argv after the command."
+  @doc "Prompt template for a verb; `{prompt}` is replaced by the folded prompt."
+  @callback template(verb :: String.t()) :: String.t()
+  @doc "Client argv after the command (`prompt` is the full templated prompt)."
   @callback argv(
               cwd :: String.t(),
               prompt :: String.t(),
@@ -40,10 +42,59 @@ defmodule Toolnexus.Media.CliClient do
   def supports?(mod, verb), do: verb in mod.verbs()
 
   @doc false
-  def run(mod, %Config{} = config, verb, args, ctx) do
+  def run(mod, %Config{} = config, verb, args, ctx, mock \\ false) do
     name = mod.cli_name()
     timeout = Config.positive(config.loop.timeout_ms, 600_000)
     job = Job.new(name, verb, config, ctx, timeout_ms: timeout, default_mode: "download")
+    prompt = String.replace(mod.template(verb), "{prompt}", fold_prompt(verb, args))
+
+    if mock, do: mock_run(job, config, verb, prompt), else: spawn_run(mod, job, config, prompt)
+  end
+
+  # §7G CLI mock presets: no process. Writes "<gather.dir>/<client>-mock-<verb>.<png|mp4>"
+  # holding "toolnexus mock <verb>", gathers it like a CLI file; text = the full prompt.
+  defp mock_run(job, config, verb, prompt) do
+    ext = if verb == "video", do: ".mp4", else: ".png"
+    dir = config.gather.dir || Path.join(System.tmp_dir!(), "toolnexus-media")
+    path = Path.expand(Path.join(dir, "#{job.name}-mock-#{verb}#{ext}"))
+
+    with :ok <- File.mkdir_p(dir),
+         :ok <- File.write(path, "toolnexus mock " <> verb),
+         {:ok, f} <- Gather.collect(job, {:path, path}) do
+      {:ok, %Result{files: [f], text: prompt, job_id: "mock", status: "completed"}}
+    else
+      {:error, %Error{}} = err -> err
+      {:error, reason} -> {:error, Job.fail(job, "#{job.name}: #{:file.format_error(reason)}")}
+    end
+  end
+
+  @hints [
+    {"width", "width ", " px"},
+    {"height", "height ", " px"},
+    {"seconds", "about ", " seconds long"},
+    {"aspectRatio", "aspect ratio ", ""}
+  ]
+
+  @doc """
+  The prompt a CLI style receives (§7G CLI hint folding): `prompt`, then the present size
+  hints in canonical verb order as `" (h1, h2)"`; nothing appended when none is present.
+  """
+  @spec fold_prompt(String.t(), map()) :: String.t()
+  def fold_prompt(verb, args) do
+    hints =
+      for a <- Toolnexus.Media.canonical_args(verb),
+          {name, pre, post} <- @hints,
+          name == a.name,
+          v = args[name],
+          v != nil,
+          do: pre <> Toolnexus.Media.StyleClient.render(v) <> post
+
+    prompt = Toolnexus.Media.StyleClient.render(args["prompt"] || "")
+    if hints == [], do: prompt, else: prompt <> " (" <> Enum.join(hints, ", ") <> ")"
+  end
+
+  defp spawn_run(mod, job, config, prompt) do
+    name = job.name
 
     command =
       case config.command do
@@ -65,7 +116,7 @@ defmodule Toolnexus.Media.CliClient do
         cwd = realpath(cwd)
 
         try do
-          argv = rest ++ mod.argv(cwd, args["prompt"], verb, config.model)
+          argv = rest ++ mod.argv(cwd, prompt, job.verb, config.model)
           spawn_and_collect(mod, job, path, argv, cwd)
         after
           File.rm_rf(cwd)
@@ -259,7 +310,20 @@ defmodule Toolnexus.Media.CliClient do
   end
 
   @doc false
-  def prompt_args(_verb), do: [%{name: "prompt", required: true}]
+  def prompt_args("video"),
+    do: [
+      %{name: "prompt", required: true},
+      %{name: "seconds", required: false},
+      %{name: "aspectRatio", required: false}
+    ]
+
+  def prompt_args(_verb),
+    do: [
+      %{name: "prompt", required: true},
+      %{name: "width", required: false},
+      %{name: "height", required: false},
+      %{name: "aspectRatio", required: false}
+    ]
 end
 
 defmodule Toolnexus.Media.Grok do
@@ -275,7 +339,7 @@ defmodule Toolnexus.Media.Grok do
 
   alias Toolnexus.Media.{CliClient, Config, Job}
 
-  defstruct config: %Config{}
+  defstruct config: %Config{}, mock: false
 
   @doc "Build the client (`model`, `command`, `loop`, `gather` from §7G.4)."
   def new(config \\ []), do: %__MODULE__{config: Config.new(config)}
@@ -287,9 +351,9 @@ defmodule Toolnexus.Media.Grok do
   @impl Toolnexus.Media.Client
   def args(_, verb), do: CliClient.prompt_args(verb)
   @impl Toolnexus.Media.Client
-  def image(c, args, ctx), do: CliClient.run(__MODULE__, c.config, "image", args, ctx)
+  def image(c, args, ctx), do: CliClient.run(__MODULE__, c.config, "image", args, ctx, c.mock)
   @impl Toolnexus.Media.Client
-  def video(c, args, ctx), do: CliClient.run(__MODULE__, c.config, "video", args, ctx)
+  def video(c, args, ctx), do: CliClient.run(__MODULE__, c.config, "video", args, ctx, c.mock)
 
   @templates %{
     "image" =>
@@ -306,10 +370,20 @@ defmodule Toolnexus.Media.Grok do
   def verbs, do: ["image", "video"]
 
   @impl CliClient
-  def argv(cwd, prompt, verb, model) do
-    p = String.replace(@templates[verb], "{prompt}", to_string(prompt))
+  def template(verb), do: @templates[verb]
 
-    ["-p", p, "--cwd", cwd, "--output-format", "streaming-json", "--yolo", "--no-auto-update"] ++
+  @impl CliClient
+  def argv(cwd, prompt, _verb, model) do
+    [
+      "-p",
+      prompt,
+      "--cwd",
+      cwd,
+      "--output-format",
+      "streaming-json",
+      "--yolo",
+      "--no-auto-update"
+    ] ++
       if(model, do: ["-m", model], else: [])
   end
 
@@ -411,7 +485,7 @@ defmodule Toolnexus.Media.Codex do
 
   alias Toolnexus.Media.{CliClient, Config, Job}
 
-  defstruct config: %Config{}
+  defstruct config: %Config{}, mock: false
 
   @doc "Build the client (`model`, `command`, `loop`, `gather` from §7G.4)."
   def new(config \\ []), do: %__MODULE__{config: Config.new(config)}
@@ -423,7 +497,7 @@ defmodule Toolnexus.Media.Codex do
   @impl Toolnexus.Media.Client
   def args(_, verb), do: CliClient.prompt_args(verb)
   @impl Toolnexus.Media.Client
-  def image(c, args, ctx), do: CliClient.run(__MODULE__, c.config, "image", args, ctx)
+  def image(c, args, ctx), do: CliClient.run(__MODULE__, c.config, "image", args, ctx, c.mock)
 
   @template "Generate exactly one image with your built-in image generation tool: {prompt}. Do not write code or use scripts. Reply only with the absolute path where the image was saved."
 
@@ -435,10 +509,12 @@ defmodule Toolnexus.Media.Codex do
   def verbs, do: ["image"]
 
   @impl CliClient
+  def template(_verb), do: @template
+
+  @impl CliClient
   def argv(_cwd, prompt, _verb, model) do
     ["exec", "--json", "--skip-git-repo-check", "-s", "workspace-write"] ++
-      if(model, do: ["-m", model], else: []) ++
-      [String.replace(@template, "{prompt}", to_string(prompt))]
+      if(model, do: ["-m", model], else: []) ++ [prompt]
   end
 
   @impl CliClient
@@ -492,6 +568,116 @@ defmodule Toolnexus.Media.Codex do
 
     if String.contains?(down, "usage limit") or String.contains?(down, "quota"),
       do: {:unavailable, "codex: " <> Job.cap(error, 400)},
+      else: :no
+  end
+end
+
+defmodule Toolnexus.Media.Agy do
+  @moduledoc """
+  Google Antigravity CLI client (label `"agy"`, image only): `agy -p … --output-format
+  stream-json --dangerously-skip-permissions`. The path is in the final result's response
+  text, else the newest image in `~/.gemini/antigravity-cli/brain/<conversation>`.
+  Load it with `Toolnexus.Media.load_style("google-agy-cli")`.
+  """
+  @behaviour Toolnexus.Media.Client
+  @behaviour Toolnexus.Media.CliClient
+
+  alias Toolnexus.Media.{CliClient, Config, Job}
+
+  defstruct config: %Config{}, mock: false
+
+  @doc "Build the client (`model`, `command`, `loop`, `gather` from §7G.4)."
+  def new(config \\ []), do: %__MODULE__{config: Config.new(config)}
+
+  @impl Toolnexus.Media.Client
+  def name(_), do: "agy"
+  @impl Toolnexus.Media.Client
+  def supports?(_, verb), do: CliClient.supports?(__MODULE__, verb)
+  @impl Toolnexus.Media.Client
+  def args(_, verb), do: CliClient.prompt_args(verb)
+  @impl Toolnexus.Media.Client
+  def image(c, args, ctx), do: CliClient.run(__MODULE__, c.config, "image", args, ctx, c.mock)
+
+  @impl CliClient
+  def cli_name, do: "agy"
+  @impl CliClient
+  def default_command, do: "agy"
+  @impl CliClient
+  def verbs, do: ["image"]
+
+  @impl CliClient
+  def template(_verb),
+    do:
+      "Generate exactly one image with your image generation tool: {prompt}. Do not write code. Reply only with the absolute path where the image was saved."
+
+  @impl CliClient
+  def argv(_cwd, prompt, _verb, model) do
+    ["-p", prompt, "--output-format", "stream-json", "--dangerously-skip-permissions"] ++
+      if(model, do: ["--model", model], else: [])
+  end
+
+  @impl CliClient
+  def env, do: []
+
+  @impl CliClient
+  def parse(%{"event" => "init"} = e, _raw),
+    do: %{session: str(e["conversation_id"]), status: "init"}
+
+  def parse(%{"event" => "step_update", "step_update" => %{} = u}, _raw) do
+    with t when is_binary(t) and t != "" <- u["tool_name"],
+         s when is_binary(s) and s != "" <- u["state"] do
+      %{status: "tool #{t} #{s}"}
+    else
+      _ -> %{}
+    end
+  end
+
+  def parse(%{"event" => "result"} = e, _raw) do
+    r = if is_map(e["result"]), do: e["result"], else: %{}
+    text = str(r["response"])
+    status = str(r["status"]) || ""
+
+    error =
+      cond do
+        status == "SUCCESS" -> nil
+        is_binary(r["error"]) and r["error"] != "" -> r["error"]
+        is_binary(get_in(r, ["error", "message"])) -> r["error"]["message"]
+        text not in [nil, ""] -> text
+        true -> Jason.encode!(e["result"])
+      end
+
+    u = if is_map(r["usage"]), do: r["usage"], else: %{}
+
+    usage =
+      [{"inputTokens", u["input_tokens"]}, {"outputTokens", u["output_tokens"]}]
+      |> Enum.filter(fn {_, v} -> is_number(v) end)
+      |> Map.new()
+
+    %{
+      session: str(r["conversation_id"]),
+      text: text,
+      status: "result " <> status,
+      error: error,
+      usage: if(usage == %{}, do: nil, else: usage)
+    }
+  end
+
+  def parse(%{"event" => "error", "message" => m}, _raw) when is_binary(m), do: %{error: m}
+  def parse(_, _raw), do: %{}
+
+  defp str(s) when is_binary(s) and s != "", do: s
+  defp str(_), do: nil
+
+  @impl CliClient
+  def folder(session),
+    do: Path.join([System.user_home!(), ".gemini", "antigravity-cli", "brain", session])
+
+  @impl CliClient
+  def unavailable(error, _verb) do
+    down = String.downcase(error)
+
+    if String.contains?(down, "quota") or String.contains?(down, "usage limit"),
+      do: {:unavailable, "agy: " <> Job.cap(error, 400)},
       else: :no
   end
 end

@@ -116,6 +116,7 @@ export default defineConfig({
 										{ label: 'Enable / disable tools', slug: 'cookbook/enable-disable-tools' },
 										{ label: 'Attachments & multimodal', slug: 'cookbook/attachments' },
 										{ label: 'Images, video & speech', slug: 'cookbook/media' },
+										{ label: 'Grok, Codex & Antigravity media', slug: 'cookbook/cli-media-setup' },
 										{ label: 'Bring your own HTTP client', slug: 'cookbook/bring-your-own-http-client' },
 										{ label: 'Run without a model (mock server)', slug: 'cookbook/mock-server' },
 										{ label: 'Local & in-process models', slug: 'cookbook/local-and-in-process-models' },

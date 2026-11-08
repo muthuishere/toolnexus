@@ -14,6 +14,8 @@ defmodule Toolnexus.MediaConformanceTest do
   @cases load("cases.json")["cases"]
   @clients load("clients.json")["cases"]
   @cli load("cli.json")["cases"]
+  @verb_cases load("cli.json")["verbCases"]
+  @avail_cases load("cli.json")["availabilityCases"]
   @routing load("routing.json")
   @schemas load("schemas.json")
   @fake Path.join(root(), "fake-cli/fake-cli.sh")
@@ -21,7 +23,9 @@ defmodule Toolnexus.MediaConformanceTest do
   test "case counts are exact" do
     assert length(@cases) == 49
     assert length(@clients) == 76
-    assert length(@cli) == 24
+    assert length(@cli) == 35
+    assert length(@avail_cases) == 7
+    assert length(@verb_cases) == 8
     assert length(@routing["cases"]) == 19
     assert length(@routing["schemaCases"]) == 1
   end
@@ -264,7 +268,9 @@ defmodule Toolnexus.MediaConformanceTest do
     restore = with_env(subst(c["env"], subs), nil)
     command = c["command"] || ["/bin/sh", @fake, fixture, out]
     config = c["config"] |> subst(subs) |> Map.put("command", command)
-    media = Media.create!(build(c["client"], config))
+    style = c["style"]
+    {:ok, loaded} = Media.load_style(style, config)
+    media = Media.create!(loaded)
     t0 = System.monotonic_time(:millisecond)
 
     result =
@@ -272,6 +278,9 @@ defmodule Toolnexus.MediaConformanceTest do
         case face do
           :function ->
             Media.generate(media, c["verb"], c["args"], ctx_opts(c))
+
+          :one_shot ->
+            Media.generate_media(style, c["verb"], c["args"], config, ctx_opts(c))
 
           :tool ->
             tool = Enum.find(Media.tools(media), &(&1.name == verb_tool(c["verb"])))
@@ -329,7 +338,7 @@ defmodule Toolnexus.MediaConformanceTest do
 
         exp = e["result"] ->
           assert {:ok, %Result{} = r} = res
-          assert_result(r, exp, c["client"], c["verb"], dir)
+          assert_result(r, exp, Media.Style.presets()[c["style"]], c["verb"], dir)
       end
 
       assert_cli_side_effects(e, out)
@@ -342,6 +351,14 @@ defmodule Toolnexus.MediaConformanceTest do
       progress = collect_progress()
       if exp = e["expectProgress"], do: assert(Enum.map(progress, & &1.status) == exp)
 
+      if c["oneShot"] do
+        {res, subs, dir, _out, _} = cli_face(c, :one_shot)
+        e = subst(Map.drop(c, ["fixture"]), subs)
+        assert {:ok, %Result{} = r} = res
+        assert_result(r, e["result"], Media.Style.presets()[c["style"]], c["verb"], dir)
+        collect_progress()
+      end
+
       if (t = c["tool"]) && !c["ctxTimeoutMs"] do
         {res, subs, dir, out, _} = cli_face(c, :tool)
         assert_tool(res, subst(t, subs), dir)
@@ -349,6 +366,73 @@ defmodule Toolnexus.MediaConformanceTest do
         assert_cli_side_effects(subst(Map.drop(c, ["fixture"]), subs), out)
       end
     end
+  end
+
+  # ---- cli.json verbCases: verbs() over loaded styles ----
+
+  for vc <- @verb_cases do
+    @vc vc
+    test "cli.json verbCases: #{vc["name"]}" do
+      vc = @vc
+
+      styles =
+        Enum.map(vc["styles"], fn
+          name when is_binary(name) ->
+            {:ok, s} = Media.load_style(name, command: ["/nonexistent/toolnexus-must-not-run"])
+            s
+
+          %{} = json ->
+            path = Path.join(tmp_dir("vc"), "style.json")
+            File.write!(path, Jason.encode!(json))
+            {:ok, s} = Media.load_style(path)
+            s
+        end)
+
+      media = Media.create!(styles)
+      assert Media.supported_verbs(media) == vc["expectVerbs"]
+      assert Enum.map(Media.tools(media), & &1.name) == vc["expectTools"]
+      msg = vc["error"]
+      assert {:error, %Error{message: ^msg}} = Media.generate(media, vc["unsupported"], %{})
+    end
+  end
+
+  # ---- cli.json availabilityCases: style.available() ----
+
+  for ac <- @avail_cases do
+    @ac ac
+    test "cli.json availabilityCases: #{ac["name"]}" do
+      ac = @ac
+      dir = tmp_dir("avail") |> Path.expand() |> real()
+      subs = %{"{dir}" => dir}
+      ac = subst(ac, subs)
+      restore = with_env(ac["env"], ac["unsetEnv"])
+      on_exit(restore)
+      for f <- ac["createFiles"] || [], do: File.write!(f, "")
+
+      style =
+        case ac["style"] do
+          name when is_binary(name) ->
+            {:ok, s} = Media.load_style(name, ac["config"] || %{})
+            s
+
+          %{} = json ->
+            path = Path.join(tmp_dir("avail-style"), "style.json")
+            File.write!(path, Jason.encode!(json))
+            {:ok, s} = Media.load_style(path, ac["config"] || %{})
+            s
+        end
+
+      t0 = System.monotonic_time(:millisecond)
+      got = Media.available(style)
+      assert System.monotonic_time(:millisecond) - t0 < 1000
+      e = ac["expect"]
+      assert got == %{installed: e["installed"], logged_in: e["loggedIn"], reason: e["reason"]}
+    end
+  end
+
+  defp real(dir) do
+    {out, 0} = System.cmd("pwd", ["-P"], cd: dir)
+    String.trim_trailing(out, "\n")
   end
 
   # ---- routing.json: createMedia routing with test-only custom clients ----

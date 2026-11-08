@@ -291,7 +291,7 @@ defmodule Toolnexus.MediaTest do
     on_exit(fn -> File.rm_rf!(dir) end)
     good = Path.join(dir, "s.json")
     File.write!(good, Jason.encode!(@sync_image))
-    assert Media.load_style(good) == {:ok, @sync_image}
+    assert {:ok, %Media.Style{style: @sync_image, label: "style"}} = Media.load_style(good)
     File.write!(Path.join(dir, "b.json"), "{nope")
     assert {:error, %Error{message: "media: " <> _}} = Media.load_style(Path.join(dir, "b.json"))
     File.write!(Path.join(dir, "a.json"), "[1]")
@@ -657,9 +657,9 @@ defmodule Toolnexus.MediaTest do
              {:error,
               %Error{status: :failed, message: "grok: no image file in the run (exit code 4)"}}
 
-    assert Media.image(media, prompt: "x", width: 3) ==
+    assert Media.image(media, prompt: "x", seed: 3) ==
              unavailable(
-               ~s(media: no client available for "image": grok: argument "width" not supported)
+               ~s(media: no client available for "image": grok: argument "seed" not supported)
              )
   end
 
@@ -1120,5 +1120,57 @@ defmodule Toolnexus.MediaTest do
       assert Media.image(style_media(sync_style("http://a"), http_client: t), prompt: "y") ==
                err("HTTP #{st}: nope")
     end
+  end
+
+  test "agy: parse branches, argv with model, presets and one-shot errors" do
+    alias Toolnexus.Media.Agy
+
+    assert Agy.parse(%{"event" => "step_update", "step_update" => %{"tool_name" => "x"}}, "") ==
+             %{}
+
+    assert Agy.parse(%{"event" => "error", "message" => "boom"}, "") == %{error: "boom"}
+    assert Agy.parse(%{"event" => "other"}, "") == %{}
+
+    r = fn res -> Agy.parse(%{"event" => "result", "result" => res}, "")[:error] end
+    assert r.(%{"status" => "ERROR", "error" => "e1"}) == "e1"
+    assert r.(%{"status" => "ERROR", "error" => %{"message" => "e2"}}) == "e2"
+    assert r.(%{"status" => "ERROR"}) == ~s({"status":"ERROR"})
+    assert r.(%{"status" => "SUCCESS"}) == nil
+    assert Agy.unavailable("other", "image") == :no
+    assert Agy.argv("/c", "p", "image", "m") |> Enum.take(-2) == ["--model", "m"]
+    assert Media.agy().config.model == nil
+    assert String.starts_with?(Agy.folder("c9"), System.user_home!())
+
+    assert [Media.xai_grok_cli(), Media.openai_codex_cli(), Media.google_agy_cli()] ==
+             ["xai-grok-cli", "openai-codex-cli", "google-agy-cli"]
+
+    assert [Media.xai_grok_cli_mock(), Media.openai_codex_cli_mock(), Media.google_agy_cli_mock()] ==
+             ["xai-grok-cli-mock", "openai-codex-cli-mock", "google-agy-cli-mock"]
+
+    assert {:error, %Error{}} = Media.generate_media("/nonexistent/style.json", "image", %{})
+    {:ok, s} = Media.load_style(Media.openai_codex_cli_mock())
+    assert Media.Style.name(s) == "codex"
+
+    assert {:error, %Error{message: "video: not implemented by codex"}} =
+             Media.Style.video(s, %{}, %{})
+
+    assert Toolnexus.Media.CliClient.fold_prompt("image", %{"prompt" => "a", "width" => 2.0}) ==
+             "a (width 2 px)"
+  end
+
+  test "available: key from config, string command, grok/agy auth files; gather slug" do
+    style = %Media.Style{label: "k", style: %{"headers" => %{"A" => "${TN_NEVER_SET_X}"}}}
+
+    assert Media.available(%{style | config: Media.Config.new(key: "YOUR_KEY_HERE")}).reason ==
+             "k: key from config"
+
+    {:ok, g} = Media.load_style(Media.xai_grok_cli(), command: "/nonexistent/g")
+    assert Media.available(g).reason == ~s(grok: "/nonexistent/g" not found on PATH)
+    {:ok, a} = Media.load_style(Media.google_agy_cli(), command: ["/bin/sh"])
+    assert Media.available(a).reason =~ "antigravity-oauth-token"
+    {:ok, g} = Media.load_style(Media.xai_grok_cli(), command: ["sh"])
+    assert Media.available(g).reason =~ ".grok/auth.json"
+    assert Media.Gather.slug("..-a b") == "a-b"
+    assert Media.Gather.slug(nil) == ""
   end
 end

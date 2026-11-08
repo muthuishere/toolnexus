@@ -25,16 +25,26 @@ defmodule Toolnexus.Media.Result do
   (`transcribe`, `cloneVoice`) and when a client returns text beside its files; `job_id`
   when the provider gave one. `usage` (§7G.12 D21) is a map with string keys
   `"inputTokens"`, `"outputTokens"`, `"costUsd"`, `"raw"` — only what the provider returned,
-  never estimated; `nil` when it returned none.
+  never estimated; `nil` when it returned none. `style` (§7G.10b) names who served the call
+  (preset id, HTTP style name, else the client name); `model` is the configured model for the
+  verb of a loaded style, `nil` when none was set.
   """
-  defstruct files: [], text: nil, job_id: nil, status: "completed", usage: nil
+  defstruct files: [],
+            text: nil,
+            job_id: nil,
+            status: "completed",
+            usage: nil,
+            style: nil,
+            model: nil
 
   @type t :: %__MODULE__{
           files: [Toolnexus.Media.MediaFile.t()],
           text: String.t() | nil,
           job_id: String.t() | nil,
           status: String.t(),
-          usage: map() | nil
+          usage: map() | nil,
+          style: String.t() | nil,
+          model: String.t() | nil
         }
 end
 
@@ -143,7 +153,7 @@ defmodule Toolnexus.Media.Config do
             url: nil,
             command: nil,
             loop: %{interval_ms: nil, timeout_ms: nil, on_progress: nil},
-            gather: %{mode: nil, dir: nil, max_bytes: nil, keep: true},
+            gather: %{mode: nil, dir: nil, max_bytes: nil, keep: true, name: nil},
             http_client: nil,
             http_options: []
 
@@ -174,7 +184,8 @@ defmodule Toolnexus.Media.Config do
         mode: to_mode(get(gather, :mode, "mode")),
         dir: get(gather, :dir, "dir"),
         max_bytes: get(gather, :max_bytes, "maxBytes"),
-        keep: get(gather, :keep, "keep") != false
+        keep: get(gather, :keep, "keep") != false,
+        name: get(gather, :name, "name")
       },
       http_client: get(o, :http_client, "httpClient"),
       http_options: get(o, :http_options, "httpOptions") || []
@@ -322,15 +333,68 @@ defmodule Toolnexus.Media do
     end
   end
 
-  @doc "Read one style JSON file. `{:ok, style}` (string-keyed map) or `{:error, %Error{}}`."
-  defdelegate load_style(path), to: Toolnexus.Media.StyleClient
+  @doc """
+  `loadMediaStyle(pathOrPreset, config?)` (§7G.7, ADR 0042). A built-in preset name
+  (`xai_grok_cli/0`, `openai_codex_cli/0`, `google_agy_cli/0` or a mock twin) returns a style backed by
+  that CLI client; anything else is read as a style JSON file. `config` (§7G.4: `model`,
+  `command`, `loop`, `gather`, ...) configures the client behind the style.
+
+  Returns `{:ok, %Toolnexus.Media.Style{}}` — itself a media client, so pass it to
+  `create/1` — or `{:error, %Error{}}`.
+
+      {:ok, style} = Toolnexus.Media.load_style(Toolnexus.Media.xai_grok_cli())
+      {:ok, media} = Toolnexus.Media.create(style)
+  """
+  defdelegate load_style(path_or_preset, config \\ []),
+    to: Toolnexus.Media.Style,
+    as: :load
+
+  @doc "`style.available()` (§7G.10b) — see `Toolnexus.Media.Style.available/1`."
+  defdelegate available(style), to: Toolnexus.Media.Style
+
+  @doc "Preset `\"xai-grok-cli\"`: the `grok` CLI on your subscription (image, video)."
+  def xai_grok_cli, do: "xai-grok-cli"
+  @doc "Preset `\"openai-codex-cli\"`: the `codex` CLI on your ChatGPT plan (image)."
+  def openai_codex_cli, do: "openai-codex-cli"
+  @doc "Preset `\"google-agy-cli\"`: Google's Antigravity CLI `agy` (image)."
+  def google_agy_cli, do: "google-agy-cli"
+  @doc "Mock twin of `xai_grok_cli/0`: same behaviour, no process, a fixed file."
+  def xai_grok_cli_mock, do: "xai-grok-cli-mock"
+  @doc "Mock twin of `openai_codex_cli/0`: same behaviour, no process, a fixed file."
+  def openai_codex_cli_mock, do: "openai-codex-cli-mock"
+  @doc "Mock twin of `google_agy_cli/0`: same behaviour, no process, a fixed file."
+  def google_agy_cli_mock, do: "google-agy-cli-mock"
+
+  @doc """
+  One-shot sugar: `create!(load_style(style, config)) |> generate(verb, args, opts)`.
+  """
+  @spec generate_media(
+          String.t(),
+          String.t() | atom(),
+          map() | keyword(),
+          keyword() | map(),
+          keyword()
+        ) ::
+          {:ok, Result.t()} | {:error, Error.t()}
+  def generate_media(style, verb, args, config \\ [], opts \\ []) do
+    with {:ok, s} <- load_style(style, config) do
+      generate(create!(s), verb, args, opts)
+    end
+  end
+
+  @doc "Every verb some source supports, in canonical (`verbs.json`) order."
+  @spec supported_verbs(t()) :: [String.t()]
+  def supported_verbs(%__MODULE__{} = media),
+    do: for(v <- @verb_names, supports?(media, v), do: v)
 
   @doc """
   A style client over a parsed style (§7G.7), named `style["name"] || "style"`. Uses `url`,
   `loop`, `gather` (default mode `url`), `key` (what every `${…}` header expands to) and
   `http_client` from `config`. `{:error, %Error{}}` for an invalid style.
   """
-  defdelegate style_client(style, config \\ []), to: Toolnexus.Media.StyleClient, as: :new
+  def style_client(style, config \\ [])
+  def style_client(%Toolnexus.Media.Style{style: %{} = s}, config), do: style_client(s, config)
+  def style_client(style, config), do: Toolnexus.Media.StyleClient.new(style, config)
 
   @doc "`style_client/2`, raising on an invalid style."
   defdelegate style_client!(style, config \\ []), to: Toolnexus.Media.StyleClient, as: :new!
@@ -349,6 +413,8 @@ defmodule Toolnexus.Media do
   defdelegate grok(config \\ []), to: Toolnexus.Media.Grok, as: :new
   @doc "Codex CLI client (ChatGPT plan): image."
   defdelegate codex(config \\ []), to: Toolnexus.Media.Codex, as: :new
+  @doc "Google Antigravity CLI client (`agy`): image."
+  defdelegate agy(config \\ []), to: Toolnexus.Media.Agy, as: :new
 
   # ---- function face ----
 
@@ -405,11 +471,24 @@ defmodule Toolnexus.Media do
          nil <- first_unaccepted(args, canonical) do
       try_candidates(candidates, verb, args, ctx, [])
     else
-      [] -> {:error, Error.failed(~s(media: no client supports "#{verb}"))}
+      [] -> {:error, Error.failed(~s(media: no #{noun(clients)} supports "#{verb}"))}
       # §7G.3 step 3 / D7: a non-canonical key fails the call before any client is tried.
       key -> {:error, Error.failed(~s(#{verb}: argument "#{key}" not supported))}
     end
   end
+
+  # §7G.10b: who served the call, and the configured model of a loaded style.
+  defp source_id(%Toolnexus.Media.Style{cli: cli, label: label}), do: cli || label || "style"
+  defp source_id(c), do: client_name(c)
+
+  defp source_model(%Toolnexus.Media.Style{config: cfg}, verb),
+    do: Map.get(cfg.models, verb) || cfg.model
+
+  defp source_model(_c, _verb), do: nil
+
+  # "style" when every source is a loaded style, else "client".
+  defp noun(clients),
+    do: if(Enum.all?(clients, &is_struct(&1, Toolnexus.Media.Style)), do: "style", else: "client")
 
   defp try_candidates([], verb, _args, _ctx, reasons) do
     joined = reasons |> Enum.reverse() |> Enum.join("; ")
@@ -423,6 +502,7 @@ defmodule Toolnexus.Media do
       nil ->
         case call_client(c, verb, args, ctx) do
           {:ok, %Result{} = r} ->
+            r = %{r | style: r.style || source_id(c), model: r.model || source_model(c, verb)}
             {:ok, r, client_name(c)}
 
           {:error, %Error{status: :unavailable, message: m}} ->

@@ -238,7 +238,7 @@ for f <- res.files, do: IO.puts("#{f.from} #{f.mime_type} #{f[:url]}")
   through.
 - **Errors** — `{:error, %Toolnexus.Media.Error{status: :failed | :timeout | :cancelled |
   :unavailable}}`; a media tool never raises (`is_error: true`).
-- **Advanced** — a JSON style as a client: `Media.load_style(path)` + `Media.style_client(style)`.
+- **Advanced** — a style as a client: `{:ok, style} = Media.load_style(path_or_preset)` (preset: `Media.xai_grok_cli()`, `Media.openai_codex_cli()`, `Media.google_agy_cli()`, or a `_mock` twin) then `Media.create!(style)`; one-shot `Media.generate_media(Media.xai_grok_cli(), "image", %{"prompt" => "..."})`.
 
 Run it: `mix run examples/media.exs` — uses the `grok` / `codex` CLIs when on `PATH`, ElevenLabs with
 `ELEVENLABS_API_KEY` (voice from `MEDIA_VOICE`), and paid OpenAI / fal / A2E only as fallbacks when their
