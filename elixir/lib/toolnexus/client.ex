@@ -323,6 +323,7 @@ defmodule Toolnexus.Client do
             http_options: [],
             transport: nil,
             on_error: nil,
+            fallback_models: nil,
             on_unsupported_part: nil,
             max_part_bytes: nil,
             registry: nil,
@@ -348,6 +349,11 @@ defmodule Toolnexus.Client do
   - `:on_error` — `(%{error?, status?, attempt, retryable} -> :retry | :fail)` classifies each
     failed LLM attempt (§8 Resilience). Absent ⇒ default (`retryable ⇒ :retry, else :fail`),
     byte-identical to today. A `:retry` is bounded by `:retries`. No `:suspend` tier.
+  - `:fallback_models` — ordered list of model ids tried, in order, when a call's retry
+    budget is exhausted on HTTP `503`/`529` (overload) — §8 Resilience. Each switch gets a
+    fresh retry budget; `stream` emits `%{type: "fallback", from, to}` first. `429`, other
+    statuses, network errors and an `:on_error` `:fail` never switch. Env
+    `TOOLNEXUS_DISABLE_MODEL_FALLBACK=1|true` disables it. Absent/empty ⇒ unchanged
   - `:hooks` — map with `:before_llm`, `:after_llm`, `:before_tool`, `:after_tool`
   - `:retries` (default 2), `:retry_base_ms` (default 500), `:timeout_ms` (whole-run deadline).
     `:retries` covers the transient LLM statuses `429`/`500`/`502`/`503`/`504`/`529` plus
@@ -662,12 +668,12 @@ defmodule Toolnexus.Client do
         _ -> body
       end
 
-    data =
+    {data, tmodel} =
       llm_call_json(
         %{client | model: tmodel},
         openai_url(client),
         headers_for(client, key),
-        finalize_body(client, body)
+        fn m -> finalize_body(client, Map.put(body, "model", m)) end
       )
 
     after_llm(client, data, 0, tmodel)
@@ -731,12 +737,12 @@ defmodule Toolnexus.Client do
         tc -> Map.put(body, "tool_choice", tc)
       end
 
-    data =
+    {data, tmodel} =
       llm_call_json(
         %{client | model: tmodel},
         anthropic_url(client),
         headers_for(client, key),
-        finalize_body(client, body)
+        fn m -> finalize_body(client, Map.put(body, "model", m)) end
       )
 
     after_llm(client, data, 0, tmodel)
@@ -1483,8 +1489,8 @@ defmodule Toolnexus.Client do
       else: :ok
   end
 
-  defp llm_request(client, url, headers, body), do: llm_request(client, url, headers, body, 0)
-
+  # Returns `{:ok, resp, :ok | :failed | :exhausted}` — `:failed` = on_error said fail,
+  # `:exhausted` = the retry budget ran out (the only case a fallback may advance on).
   defp llm_request(client, url, headers, body, attempt) do
     check_deadline(client)
 
@@ -1492,30 +1498,16 @@ defmodule Toolnexus.Client do
 
     case wire_call(client, url, headers, body, receive_timeout) do
       {:ok, %Req.Response{status: status} = resp} when status in 200..299 ->
-        {:ok, resp}
+        {:ok, resp, :ok}
 
       {:ok, %Req.Response{status: status} = resp} ->
         retryable = retryable_status?(status, client.retryable_statuses)
         tier = classify_error(client, %{status: status, attempt: attempt, retryable: retryable})
 
-        if tier == :fail or attempt >= client.retries do
-          {:ok, resp}
-        else
-          retry_after =
-            case Req.Response.get_header(resp, "retry-after") do
-              [v | _] -> parse_retry_after(v)
-              _ -> nil
-            end
-
-          # `!= nil`, not truthiness: `Retry-After: 0` means retry now, and 0 is
-          # truthy in Elixir but was previously rejected by the parser's `n > 0`.
-          sleep_ms =
-            if retry_after != nil,
-              do: retry_after * 1000,
-              else: client.retry_base_ms * Integer.pow(2, attempt) + :rand.uniform(100)
-
-          Process.sleep(sleep_ms)
-          llm_request(client, url, headers, body, attempt + 1)
+        cond do
+          tier == :fail -> {:ok, resp, :failed}
+          attempt >= client.retries -> {:ok, resp, :exhausted}
+          true -> retry_status(client, url, headers, body, attempt, resp)
         end
 
       {:error, e} ->
@@ -1527,6 +1519,69 @@ defmodule Toolnexus.Client do
           Process.sleep(client.retry_base_ms * Integer.pow(2, attempt) + :rand.uniform(100))
           llm_request(client, url, headers, body, attempt + 1)
         end
+    end
+  end
+
+  defp retry_status(client, url, headers, body, attempt, resp) do
+    retry_after =
+      case Req.Response.get_header(resp, "retry-after") do
+        [v | _] -> parse_retry_after(v)
+        _ -> nil
+      end
+
+    # `!= nil`, not truthiness: `Retry-After: 0` means retry now, and 0 is
+    # truthy in Elixir but was previously rejected by the parser's `n > 0`.
+    sleep_ms =
+      if retry_after != nil,
+        do: retry_after * 1000,
+        else: client.retry_base_ms * Integer.pow(2, attempt) + :rand.uniform(100)
+
+    Process.sleep(sleep_ms)
+    llm_request(client, url, headers, body, attempt + 1)
+  end
+
+  # §8 Resilience — `:fallback_models`. The chain for one model call: the turn's model,
+  # then the configured fallbacks, skipping empties and duplicates. The kill switch env
+  # is read per call.
+  defp model_chain(client, turn_model) do
+    disabled =
+      String.downcase(System.get_env("TOOLNEXUS_DISABLE_MODEL_FALLBACK") || "") in ["1", "true"]
+
+    extra = if disabled, do: [], else: List.wrap(client.fallback_models)
+
+    [turn_model | extra]
+    |> Enum.reject(&(&1 in [nil, ""]))
+    |> Enum.uniq()
+    |> case do
+      [] -> [turn_model]
+      chain -> chain
+    end
+  end
+
+  # One model call over the chain. `build` rebuilds the request body for a model (beforeLLM
+  # is NOT re-run). Returns `{{:ok, resp} | {:raise, e, stacktrace}, served_model}`.
+  defp llm_request_chain(client, url, headers, build, turn_model, on_fallback) do
+    chain_step(client, url, headers, build, model_chain(client, turn_model), on_fallback)
+  end
+
+  defp chain_step(client, url, headers, build, [model | rest], on_fallback) do
+    result =
+      try do
+        llm_request(client, url, headers, build.(model), 0)
+      rescue
+        e -> {:raise, e, __STACKTRACE__}
+      end
+
+    case {result, rest} do
+      {{:ok, %Req.Response{status: status}, :exhausted}, [next | _]} when status in [503, 529] ->
+        on_fallback.(model, next)
+        chain_step(client, url, headers, build, rest, on_fallback)
+
+      {{:ok, resp, _}, _} ->
+        {{:ok, resp}, model}
+
+      {raised, _} ->
+        {raised, model}
     end
   end
 
@@ -1611,24 +1666,31 @@ defmodule Toolnexus.Client do
   defp error_text(body), do: Jason.encode!(body)
 
   # One non-streaming LLM call, with an `llm` metric event (ok/error + per-call tokens + ms).
-  defp llm_call_json(client, url, headers, body) do
+  # `build` is `(model -> body)`; returns `{data, served_model}` (§8 fallback_models).
+  defp llm_call_json(client, url, headers, build) do
     t0 = now_ms()
 
+    {result, served} =
+      llm_request_chain(client, url, headers, build, client.model, fn _, _ -> :ok end)
+
     try do
-      case llm_request(client, url, headers, body) do
+      case result do
+        {:raise, e, stack} ->
+          reraise e, stack
+
         {:ok, %Req.Response{status: status, body: data}} when status in 200..299 ->
           {p, c} = per_call(data["usage"], client.style)
 
           emit(client, %{
             event: "llm",
-            model: client.model,
+            model: served,
             status: "ok",
             ms: now_ms() - t0,
             prompt_tokens: p,
             completion_tokens: c
           })
 
-          data
+          {data, served}
 
         {:ok, %Req.Response{} = resp} ->
           raise provider_error(resp)
@@ -1637,7 +1699,7 @@ defmodule Toolnexus.Client do
       e ->
         emit(client, %{
           event: "llm",
-          model: client.model,
+          model: served,
           status: "error",
           ms: now_ms() - t0,
           prompt_tokens: 0,
@@ -1649,14 +1711,25 @@ defmodule Toolnexus.Client do
   end
 
   # One streaming LLM call: returns the raw SSE body text (parsed by the caller).
-  defp llm_call_sse(client, url, headers, body) do
-    case llm_request(client, url, headers, body) do
+  # `build` is `(model -> body)`; returns `{sse, served_model}`. `emit` receives the
+  # `fallback` stream event before each switch (§8 fallback_models).
+  defp llm_call_sse(client, url, headers, build, turn_model, emit) do
+    on_fallback = fn from, to -> emit.(%{type: "fallback", from: from, to: to}) end
+    {result, served} = llm_request_chain(client, url, headers, build, turn_model, on_fallback)
+
+    case result do
+      {:raise, e, stack} ->
+        reraise e, stack
+
       {:ok, %Req.Response{status: status, body: data}} when status in 200..299 ->
-        cond do
-          is_binary(data) -> data
-          match?({:sse_stream, _}, data) -> data
-          true -> error_text(data)
-        end
+        sse =
+          cond do
+            is_binary(data) -> data
+            match?({:sse_stream, _}, data) -> data
+            true -> error_text(data)
+          end
+
+        {sse, served}
 
       {:ok, %Req.Response{} = resp} ->
         raise provider_error(resp)
@@ -2203,19 +2276,21 @@ defmodule Toolnexus.Client do
     {messages, tools, tmodel} = before_llm(client, st.messages, st.tools, turn)
     st = %{st | messages: messages, tools: tools, model: tmodel}
 
-    data =
+    {data, tmodel} =
       try do
         llm_call_json(
           %{client | model: tmodel},
           openai_url(client),
           headers_for(client, key),
-          openai_body(%{client | model: tmodel}, messages, tools, false)
+          fn m -> openai_body(%{client | model: m}, messages, tools, false) end
         )
       rescue
         e ->
           emit_run_error(rc(client, st), run_start, st.tool_calls, st.turns, st.usage, e)
           reraise e, __STACKTRACE__
       end
+
+    st = %{st | model: tmodel}
 
     st = %{st | usage: add_usage(st.usage, data["usage"], client.style)}
     after_llm(client, data, turn, tmodel)
@@ -2320,19 +2395,21 @@ defmodule Toolnexus.Client do
     {messages, tools, tmodel} = before_llm(client, st.messages, st.tools, turn)
     st = %{st | messages: messages, tools: tools, model: tmodel}
 
-    data =
+    {data, tmodel} =
       try do
         llm_call_json(
           %{client | model: tmodel},
           anthropic_url(client),
           headers_for(client, key),
-          anthropic_body(%{client | model: tmodel}, sys, messages, tools, false)
+          fn m -> anthropic_body(%{client | model: m}, sys, messages, tools, false) end
         )
       rescue
         e ->
           emit_run_error(rc(client, st), run_start, st.tool_calls, st.turns, st.usage, e)
           reraise e, __STACKTRACE__
       end
+
+    st = %{st | model: tmodel}
 
     st = %{st | usage: add_usage(st.usage, data["usage"], client.style)}
     after_llm(client, data, turn, tmodel)
@@ -2470,17 +2547,20 @@ defmodule Toolnexus.Client do
     t0 = now_ms()
     %{prompt_tokens: before_p, completion_tokens: before_c} = st.usage
 
-    {content, calls, usage} =
+    {content, calls, usage, tmodel} =
       try do
-        sse =
+        {sse, served} =
           llm_call_sse(
             client,
             openai_url(client),
             headers_for(client, key),
-            openai_body(%{client | model: tmodel}, messages, tools, true)
+            fn m -> openai_body(%{client | model: m}, messages, tools, true) end,
+            tmodel,
+            emit
           )
 
-        parse_openai_sse(sse, st.usage, emit)
+        {content, calls, usage} = parse_openai_sse(sse, st.usage, emit)
+        {content, calls, usage, served}
       rescue
         e ->
           emit(client, %{
@@ -2496,7 +2576,7 @@ defmodule Toolnexus.Client do
           reraise e, __STACKTRACE__
       end
 
-    st = %{st | usage: usage}
+    st = %{st | usage: usage, model: tmodel}
 
     emit(client, %{
       event: "llm",
@@ -2743,17 +2823,20 @@ defmodule Toolnexus.Client do
     t0 = now_ms()
     %{prompt_tokens: before_p, completion_tokens: before_c} = st.usage
 
-    {blocks, stop_reason, usage} =
+    {blocks, stop_reason, usage, tmodel} =
       try do
-        sse =
+        {sse, served} =
           llm_call_sse(
             client,
             anthropic_url(client),
             headers_for(client, key),
-            anthropic_body(%{client | model: tmodel}, sys, messages, tools, true)
+            fn m -> anthropic_body(%{client | model: m}, sys, messages, tools, true) end,
+            tmodel,
+            emit
           )
 
-        parse_anthropic_sse(sse, st.usage, emit)
+        {blocks, stop_reason, usage} = parse_anthropic_sse(sse, st.usage, emit)
+        {blocks, stop_reason, usage, served}
       rescue
         e ->
           emit(client, %{
@@ -2769,7 +2852,7 @@ defmodule Toolnexus.Client do
           reraise e, __STACKTRACE__
       end
 
-    st = %{st | usage: usage}
+    st = %{st | usage: usage, model: tmodel}
 
     emit(client, %{
       event: "llm",
