@@ -176,6 +176,13 @@
           "maxtoolconcurrency"
         ],
         "tier": "full"
+      },
+      {
+        "name": "stopRecovery",
+        "aliases": [
+          "stoprecovery"
+        ],
+        "tier": "full"
       }
     ]
   },

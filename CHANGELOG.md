@@ -27,6 +27,30 @@ Tracked in `openspec/changes/add-classifier-openai-decisions`. Shared fixture
 `examples/judge/backends/openai-decisions.json`. Docs: an "OpenAI (Decisions API)" section on the judge
 backends page and an openai recipe (yes/no, pick-one, score) in the judge cookbook, in all eight languages.
 
+### Stop-reason recovery (`stopRecovery`, opt-in)
+
+A run no longer has to end on a reply that is not an answer. Set **`stopRecovery: true`**
+(`stop_recovery` / `StopRecovery` / `:stop-recovery`) and the loop recovers from the three stop
+shapes Karya (go-agent-cli) hit in real runs (issue #191):
+
+- **Empty answer** (a thinking-only `end_turn`: reasoning, no text) — the empty reply is dropped
+  and the model is nudged once to give its answer. Before, `text` came back `""`.
+- **Truncated** (OpenAI `finish_reason: "length"`, Anthropic `stop_reason: "max_tokens"`) — the
+  partial stays and the model is asked to continue, up to 3 times; `text` is the joined answer.
+  Before, a half answer came back as if it were final.
+- **Malformed tool call** (arguments that are not a JSON object) — no tool runs, the reply is
+  dropped and the model is told once to call again with valid JSON. Before, the tool silently ran
+  with `{}`.
+
+Each recovery appends one byte-exact user message pinned in `SPEC.md` §8, so every port sends the
+same words. Recoveries are ordinary turns: they fire `beforeLLM`/`afterLLM`, count in `turns` and
+usage, and never exceed `maxTurns`. Applies to `run` and `stream`, both styles, resume paths and
+agent runs; not to `translate` or the in-process client. **Off by default** — with the option
+absent a run is byte-identical to before. Not done: no stream event or metric announces a
+recovery (watch for the pinned text in `beforeLLM`), and the budgets and texts are not
+configurable. Fixture: `conformance/stop_recovery/cases.json`; change
+`openspec/changes/add-stop-reason-recovery`.
+
 ### Memory hierarchy and dreaming
 
 A persona's memory can now stay small and stay true. **Everything is opt-in; a persona built

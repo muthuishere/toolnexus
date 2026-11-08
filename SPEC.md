@@ -99,6 +99,8 @@ A new language port is "correct" iff these hold. Run it against the shared
    non-2xx⇒`HTTP <status>: <body>` isError, else body text.
 10. **Unified client**: `{baseUrl,style:"openai"|"anthropic",model,apiKey?}`; system = systemPrompt+`\n\n`+skillsPrompt();
     loop call→execute tool calls→feed back (provider's tool-result shape)→repeat to maxTurns(10).
+    Opt-in `stopRecovery` (default off, §8): malformed tool args ⇒ corrective ×1, truncated ⇒ continue ×3,
+    empty answer ⇒ nudge ×1, each with a byte-exact pinned user message.
 11. **Built-in tools** (`source:"builtin"`): the default toolset — `bash, read, write, edit, grep, glob,
     webfetch, question, apply_patch, todowrite` — names + input schemas per §4A. **On by default**;
     global toggle (`builtins:false` | `builtins.disabled:true` | `builtins.enabled:false` ⇒ whole source off, MCP
@@ -2545,6 +2547,62 @@ schedule applies in every loop that runs tools: `run` and `stream`, both styles,
 Before this change every call of a response ran concurrently with no cap, so two `write` calls on
 one file could race. A host that relied on unlabelled tools running in parallel marks them
 `readOnly` or gives them a predicate.
+
+### Stop-reason recovery (change `add-stop-reason-recovery`, opt-in)
+
+`ClientOptions.stopRecovery` (idiomatic spelling per port: `stopRecovery` / `stop_recovery` /
+`StopRecovery` / `:stop-recovery`), a boolean, **default `false`**. Off, the loop is
+byte-identical to the paragraphs above. On, three response shapes that today end a run badly are
+answered with one pinned user message and another model call instead. It applies in every loop
+that runs the provider: `run` and `stream`, both styles, the resume paths and §7D agent runs.
+`translate` (§11) and the in-process client are unaffected (they have no loop / no stop reason).
+
+Each response is classified **in this order**; the first rule that matches acts:
+
+1. **Malformed tool call** — the response has tool calls and at least one has arguments that are
+   not a JSON object. OpenAI: `function.arguments` is a non-empty string (after trimming
+   whitespace) that does not parse as JSON, or parses to anything but an object. Anthropic:
+   `input` is present and not an object (non-streaming), or the accumulated `partial_json` is
+   non-empty (after trimming) and does not parse to an object (streaming). An empty/absent
+   argument string is `{}` and is **not** malformed. At most **1** per run. Action: **no tool of
+   that response runs**, no `tool_call`/`tool_result` stream event and no `toolCalls` record is
+   produced for it, the assistant message is **removed** from the transcript, and the user message
+   `CORRECTIVE` is appended. Once the budget is spent, a malformed call runs as before this change
+   (its arguments become `{}`).
+2. **Truncated** — no tool calls and the stop reason is OpenAI `finish_reason: "length"` or
+   Anthropic `stop_reason: "max_tokens"`. At most **3** per run. Action: the partial assistant
+   message **stays** in the transcript, its text is carried, and the user message `CONTINUE` is
+   appended. Once the budget is spent, the run ends as before with the carried text.
+3. **Empty answer** — no tool calls, any other stop reason, and the response text is empty after
+   trimming whitespace (the observed case is a thinking-only `end_turn`: reasoning blocks and no
+   text; a reasoning model that hides its reasoning is indistinguishable and is treated the same).
+   At most **1** per run. Action: the assistant message is **removed** from the transcript and the
+   user message `NUDGE` is appended. Once spent, the run ends as before.
+
+Otherwise the loop proceeds exactly as without the option.
+
+**Carried text.** Text of a truncated response that was continued is carried; the run's final
+`text` (and `done.result.text` in a stream) is the carried text followed by the final response's
+text, concatenated with no separator. The carry resets to empty whenever a response's tools run.
+A stream emits the `text` deltas of every response as they arrive, so its deltas already
+concatenate to the same string.
+
+**Accounting.** Every recovery call is an ordinary turn: it fires `beforeLLM`/`afterLLM`, counts in
+`turns` and usage, and is bounded by `maxTurns` (a recovery never extends `maxTurns`). A recovery is taken only when a turn remains: on the
+last permitted turn every rule is skipped and the run ends exactly as without the option. Budgets are
+per `run`/`stream` call and are not shared between calls of a conversation.
+
+**The appended user message** is `{ "role": "user", "content": TEXT }` in both styles (a plain
+string content). The three texts are byte-exact, ASCII, no trailing newline:
+
+```
+NUDGE      = "Your previous response contained no answer. Continue and give your answer."
+CONTINUE   = "Your previous response was cut off at the output token limit. Continue exactly where it stopped, without repeating anything."
+CORRECTIVE = "Your previous tool call could not be used: its arguments were not a valid JSON object. Call the tool again with arguments that are a single valid JSON object matching its input schema."
+```
+
+Fixture: `conformance/stop_recovery/cases.json` (scripted responses ⇒ expected appended messages,
+turn count and final text), replayed by every port's suite.
 
 ### Hooks (lifecycle middleware)
 
