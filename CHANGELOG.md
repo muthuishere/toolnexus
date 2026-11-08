@@ -23,7 +23,8 @@ still fans out one request per state. There is no model catalogue (#158). OpenRo
 Decisions routes have no preset yet; they work today with a `baseUrl` override and a named `apiKeyEnv`.
 The wire follows OpenAI's published reference; a live check is still pending, see
 `openspec/changes/add-classifier-openai-decisions`. Shared fixture
-`examples/judge/backends/openai-decisions.json`.
+`examples/judge/backends/openai-decisions.json`. Docs: an "OpenAI (Decisions API)" section on the judge
+backends page and an openai recipe (yes/no, pick-one, score) in the judge cookbook, in all eight languages.
 
 - **Docs:** the docs-site hero video is re-cut for 0.26.0 (80 s, new narrator). It now covers eight
   languages including Rust, typed decisions (`createClassifier`), media generation, and serving the

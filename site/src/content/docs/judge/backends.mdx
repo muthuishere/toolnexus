@@ -3,7 +3,7 @@ title: Backends & configuration
 description: systemone, llm, custom and static — what each one is for, why static is the backend CI runs with no network and no credential, and why a threshold tuned on one backend does not transfer to another.
 ---
 
-import { Aside } from '@astrojs/starlight/components';
+import { Tabs, TabItem, Aside } from '@astrojs/starlight/components';
 
 <Aside type="caution" title="Read this before you set a threshold">
 A decision is **advisory**. Calibration is **not** correctness — a decision can be confidently
@@ -74,6 +74,123 @@ you already have an OpenRouter account.
 `provider` either. Every port reports an absent cost as **absent**, never as `0`, precisely so a
 budget cannot read "free" off a backend that simply does not say. If you meter spend per decision
 from `usage.cost`, run through OpenRouter, or meter on tokens instead.
+</Aside>
+
+## OpenAI (Decisions API)
+
+`backend: "openai"` sends the same `noul` / `choice` / `score` questions to **OpenAI's Decisions
+API** and hands back the same `Decision` every other backend returns. Your questions, your state and
+the accessors you read answers with do not change; only the wire underneath does. It is one more
+row of the backend table, so it sets `baseUrl`, `model` and `apiKeyEnv` as a unit:
+
+| | value |
+|---|---|
+| `baseUrl` | `https://api.openai.com/v1` — the request goes to `POST {baseUrl}/decisions` |
+| `model` | `gpt-6-luna` |
+| `apiKeyEnv` | `OPENAI_API_KEY` |
+| images | yes, sent as `input_image` data URLs |
+
+**The key goes only to its own host.** `OPENAI_API_KEY` is attached only when the request goes to
+`api.openai.com` over **https** (the issue #155 key-to-host rule). Point `baseUrl` anywhere else —
+plain `http://api.openai.com`, a look-alike such as `api.openai.com.evil.example`, or a gateway — and
+the default key is **not** sent; name the gateway's own variable with `apiKeyEnv` instead. Every
+shared option applies unchanged: `baseUrl`, `headers`, `timeout`, the injectable HTTP client,
+`retries`, `onError`, `requestParams`, `bodyTransform`, `cache`, `onMetric`.
+
+<Tabs syncKey="lang">
+<TabItem label="JavaScript">
+```js
+import { createClassifier } from "toolnexus"
+
+// reads OPENAI_API_KEY at call time; sent only to https://api.openai.com
+const judge = createClassifier({ backend: "openai" })
+```
+</TabItem>
+<TabItem label="Python">
+```python
+from toolnexus import create_classifier
+
+# reads OPENAI_API_KEY at call time; sent only to https://api.openai.com
+judge = create_classifier(backend="openai")
+```
+</TabItem>
+<TabItem label="Go">
+```go
+// reads OPENAI_API_KEY at call time; sent only to https://api.openai.com
+judge, err := toolnexus.CreateClassifier(toolnexus.ClassifierOptions{
+	Backend: toolnexus.BackendOpenAI,
+})
+```
+</TabItem>
+<TabItem label="Java">
+```java
+// reads OPENAI_API_KEY at call time; sent only to https://api.openai.com
+Classifier judge = Classifier.create(new Classifier.Options()
+        .backend(Classifier.BACKEND_OPENAI));
+```
+</TabItem>
+<TabItem label="C#">
+```csharp
+// reads OPENAI_API_KEY at call time; sent only to https://api.openai.com
+var judge = Classifier.Create(new ClassifierOptions
+{
+    Backend = ClassifierBackend.OpenAI,
+});
+```
+</TabItem>
+<TabItem label="Elixir">
+```elixir
+# reads OPENAI_API_KEY at call time; sent only to https://api.openai.com
+{:ok, judge} = Toolnexus.Classifier.create(backend: "openai")
+```
+</TabItem>
+<TabItem label="Clojure">
+```clojure
+(require '[toolnexus.classifier :as jev])
+
+;; reads OPENAI_API_KEY at call time; sent only to https://api.openai.com
+(def judge (jev/create-classifier {:backend "openai"}))
+```
+</TabItem>
+<TabItem label="Rust">
+```rust
+use toolnexus::classifier::ClassifierBackend;
+use toolnexus::{ClassifierOptions, create_classifier};
+
+// reads OPENAI_API_KEY at call time; sent only to https://api.openai.com
+let judge = create_classifier(ClassifierOptions {
+    backend: ClassifierBackend::OpenAi,
+    ..Default::default()
+})?;
+```
+</TabItem>
+</Tabs>
+
+### How it differs from the System One backends
+
+`typesafe`, `openrouter`, `vercel` and `custom` all speak the System One wire (`POST
+{baseUrl}/systemone`); `cloudflare` wraps the same body in its run envelope. `openai` is a **third
+wire**, `decisions`, and the differences are ones you can hit:
+
+- **`calibrated: false`.** Decisions models are not System One models and no calibration claim is
+  made, so a threshold tuned on Jev **does not transfer** (see the warning below). Re-tune, or
+  decline to threshold.
+- **Keys are addressing only, as always — but answers come back by position.** Questions travel as a
+  list in ASCII key order with no names, and the library maps each answer back to your key.
+- **A `refusal` answer is an error, never a "no".** It surfaces as
+  `classifier: decisions: question "<key>" was refused`.
+- **Fails before any request** on three things the wire cannot take: a raw question type such as
+  `box` (`ClassifierUnsupported`), a `choice` with one option (the wire takes 2–255), and more than
+  400 questions.
+- **No batch call.** One `input` per request, so `states().evaluate` still fans out one request per
+  state.
+- **`usage`** keeps `input_tokens` / `output_tokens`, normalised to the System One shape.
+
+<Aside type="note" title="Not done yet">
+The wire follows OpenAI's published reference; a live check is still pending
+(`openspec/changes/add-classifier-openai-decisions`). There is no model catalogue (#158).
+OpenRouter's and Vercel's Decisions routes have no preset: use `backend: "openai"` with a `baseUrl`
+override and your own `apiKeyEnv`.
 </Aside>
 
 ## `llm` is an exit, not an equal
