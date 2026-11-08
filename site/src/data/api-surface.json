@@ -987,10 +987,9 @@
 				"java": "A2A.agentFromDir",
 				"csharp": "Home.FromDir",
 				"elixir": "Toolnexus.Agents.Home.from_dir",
-				"clojure": null,
+				"clojure": "toolnexus.agents.home/from-dir",
 				"rust": "from_dir"
-			},
-			"parityNote": "from-dir composes a persona into an AgentDef, so it needs the §7D runtime this port does not ship yet. compose-soul and memory-tool — the two halves it would combine — ARE shipped: compose the soul yourself and pass it as :system-prompt."
+			}
 		},
 		{
 			"id": "persona/memory-tool",
