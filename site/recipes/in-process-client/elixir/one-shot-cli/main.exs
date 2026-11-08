@@ -1,5 +1,5 @@
 # usage: elixir main.exs <cli> [args...]    (oneshot.exs sits next to this file)
-Mix.install([{:toolnexus, "~> 0.26"}])
+Mix.install([{:toolnexus, "~> 0.27"}])
 Code.require_file("oneshot.exs", __DIR__)
 
 add =
