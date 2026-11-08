@@ -7,7 +7,8 @@ import json
 import queue
 import subprocess
 import threading
-from typing import Any, Optional
+from contextlib import asynccontextmanager
+from typing import Any, AsyncIterator, Optional
 
 
 class StdioClosed(ConnectionError):
@@ -15,7 +16,17 @@ class StdioClosed(ConnectionError):
 
 
 class StdioConn:
-    def __init__(self, argv: list[str], env: Optional[dict[str, str]] = None, cwd: Optional[str] = None):
+    def __init__(
+        self,
+        argv: list[str],
+        env: Optional[dict[str, str]] = None,
+        cwd: Optional[str] = None,
+        probe: bool = False,
+    ):
+        # probe=True: the reader thread exits right after delivering the first response, BEFORE it
+        # issues another read — so the pipe can be handed to the frozen SDK path (§2.2a reuse) with
+        # no reader left blocked that could steal the ``initialize`` reply. ``resume()`` restarts it.
+        self._probe = probe
         self.proc = subprocess.Popen(
             argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=None, env=env, cwd=cwd
         )
@@ -38,6 +49,8 @@ class StdioConn:
                 q = self._pending.pop(json.dumps(m["id"]), None)
             if q is not None:
                 q.put(m)
+                if self._probe:
+                    return  # stop consuming stdout; resume() or sdk_streams() takes over
         with self._lock:
             self._err = StdioClosed("stdio server closed its stdout")
             waiting, self._pending = list(self._pending.values()), {}
@@ -71,6 +84,11 @@ class StdioConn:
             raise self._err or StdioClosed("stdio server closed")
         return m
 
+    def resume(self) -> None:
+        """Leaves probe mode: restarts the in-house reader (the 2026 path keeps this conn)."""
+        self._probe = False
+        threading.Thread(target=self._read, daemon=True).start()
+
     def close(self) -> None:
         try:
             if self.proc.stdin is not None:
@@ -100,3 +118,72 @@ class StdioConn:
                 self.proc.stdin.close()
         except OSError:
             pass
+
+
+@asynccontextmanager
+async def sdk_streams(sc: StdioConn) -> AsyncIterator[tuple[Any, Any]]:
+    """Hands a probed child to the ``mcp`` SDK: the ``(read, write)`` anyio memory streams
+    ``mcp.ClientSession`` takes, fed from the child's already-open pipes (mirrors
+    ``mcp.client.stdio.stdio_client``, minus the spawn). The probe reader thread must already have
+    stopped; any bytes it buffered stay inside ``proc.stdout`` and are read here first. On exit the
+    child is shut down like the SDK does: close stdin, wait, then kill."""
+    import anyio
+    import mcp.types as types
+
+    try:
+        from mcp.shared.message import SessionMessage
+    except ImportError:  # pragma: no cover - very old mcp sent bare JSONRPCMessage
+        SessionMessage = None  # type: ignore[assignment]
+
+    proc = sc.proc
+    assert proc.stdout is not None and proc.stdin is not None
+    out, stdin = proc.stdout, proc.stdin
+    read_writer, read_stream = anyio.create_memory_object_stream(0)
+    write_stream, write_reader = anyio.create_memory_object_stream(0)
+
+    async def reader() -> None:
+        try:
+            async with read_writer:
+                while True:
+                    line = await anyio.to_thread.run_sync(out.readline, abandon_on_cancel=True)
+                    if not line:
+                        return
+                    if not line.strip():
+                        continue
+                    try:
+                        msg = types.JSONRPCMessage.model_validate_json(line)
+                    except Exception as exc:  # noqa: BLE001 - surfaced to the session like the SDK
+                        await read_writer.send(exc)
+                        continue
+                    await read_writer.send(SessionMessage(msg) if SessionMessage else msg)
+        except (anyio.ClosedResourceError, anyio.BrokenResourceError):
+            await anyio.lowlevel.checkpoint()
+
+    def _write(data: bytes) -> None:
+        stdin.write(data)
+        stdin.flush()
+
+    async def writer() -> None:
+        try:
+            async with write_reader:
+                async for sm in write_reader:
+                    m = sm.message if SessionMessage else sm
+                    data = (m.model_dump_json(by_alias=True, exclude_none=True) + "\n").encode()
+                    try:
+                        await anyio.to_thread.run_sync(_write, data)
+                    except OSError:
+                        return
+        except (anyio.ClosedResourceError, anyio.BrokenResourceError):
+            await anyio.lowlevel.checkpoint()
+
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(reader)
+        tg.start_soon(writer)
+        try:
+            yield read_stream, write_stream
+        finally:
+            with anyio.CancelScope(shield=True):
+                await anyio.to_thread.run_sync(sc.close)  # stdin close -> wait 2 s -> kill
+            tg.cancel_scope.cancel()
+            await read_stream.aclose()
+            await write_stream.aclose()

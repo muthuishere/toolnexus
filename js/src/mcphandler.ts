@@ -348,7 +348,7 @@ export function createMcpHandler(toolkitTools: () => Tool[], cfg: McpHandlerConf
   /** Validates protocol header + session (stateful). Writes the HTTP error itself on failure. */
   async function checkSession(ctx: McpContext, req: IncomingMessage, res: ServerResponse): Promise<boolean> {
     const v = header(req, "MCP-Protocol-Version")
-    if (v !== "" && !legacy.includes(v)) {
+    if (v !== "" && !versions.includes(v)) {
       httpError(res, 400, "Bad Request: unsupported MCP-Protocol-Version")
       return false
     }
@@ -775,8 +775,7 @@ export function createMcpHandler(toolkitTools: () => Tool[], cfg: McpHandlerConf
     if (only2026) return true
     if (method === "initialize") return false
     const hv = header(req, "MCP-Protocol-Version")
-    if (hv === MCP_PROTOCOL_2026) return true
-    if (hv !== "" && versions.includes(hv)) return false
+    if (hv !== "" && legacy.includes(hv)) return false
     return method === "server/discover" || header(req, "Mcp-Method") !== "" || (meta !== undefined && META_VERSION in meta)
   }
 

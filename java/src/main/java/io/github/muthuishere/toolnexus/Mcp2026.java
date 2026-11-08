@@ -43,7 +43,10 @@ final class Mcp2026 {
 
     /** §2.2a: discover says "old server" — use the frozen fallback (§2.F). */
     static final class Fallback extends Exception {
-        Fallback(String why) { super(why, null, false, false); }
+        /** §2.2a: the stdio probe child to continue on (fast discover reply), or null to spawn anew. */
+        final Process proc;
+        Fallback(String why) { this(why, null); }
+        Fallback(String why, Process proc) { super(why, null, false, false); this.proc = proc; }
     }
 
     private static final int MAX_ROUNDS = 8;
@@ -112,13 +115,14 @@ final class Mcp2026 {
             if (extra != null) for (var e : extra.entrySet()) pb.environment().put(e.getKey(), String.valueOf(e.getValue()));
             if (cfg.get("cwd") != null) pb.directory(new File(String.valueOf(cfg.get("cwd"))));
             pb.redirectError(ProcessBuilder.Redirect.INHERIT); // stderr passes through, never parsed
-            client = Client.stdio(pb);
+            client = Client.stdio(pb, true);
             client.timeout(Duration.ofMillis(Math.min(timeout, 5000))); // §2.2a: silent old stdio server ⇒ fallback
         }
         Map<String, Object> d;
         try {
             d = client.discover();
         } catch (RpcError e) {
+            if (!remote) throw new Fallback("server/discover: " + e.getMessage(), client.detachStdio()); // same child
             client.close();
             throw new Fallback("server/discover: " + e.getMessage());
         } catch (Client.HttpStatusException e) {
@@ -140,9 +144,11 @@ final class Mcp2026 {
             throw e;
         }
         if (!Client.supports2026(d)) {
+            if (!remote) throw new Fallback("server/discover: 2026-07-28 not supported", client.detachStdio());
             client.close();
             throw new Fallback("server/discover: 2026-07-28 not supported");
         }
+        if (!remote) client.resumeStdio();
         client.timeout(Duration.ofMillis(timeout));
         return new Conn(name, client, timeout, waitFor, d);
     }

@@ -16,7 +16,6 @@ import http from "node:http"
 import type { AddressInfo } from "node:net"
 import { randomBytes, timingSafeEqual } from "node:crypto"
 import { Server } from "@modelcontextprotocol/sdk/server/index.js"
-import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js"
 import { ListToolsRequestSchema, CallToolRequestSchema, McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js"
 import type { Tool, ToolSource, ToolResult } from "./types.js"
 import type { ContentPart } from "./content.js"
@@ -166,6 +165,8 @@ export interface LocalMcpServer {
  */
 export async function serveLocalMcp(tools: Tool[], cfg?: MCPServeConfig): Promise<LocalMcpServer> {
   const exposed = exposedMcpTools(tools, cfg)
+  // Loaded on first serve, not at import: the transport pulls in @hono/node-server.
+  const { StreamableHTTPServerTransport } = await import("@modelcontextprotocol/sdk/server/streamableHttp.js")
   const token = randomBytes(32).toString("hex")
   const want = Buffer.from("Bearer " + token)
   const server = http.createServer((req, res) => {

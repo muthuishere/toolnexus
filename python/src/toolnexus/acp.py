@@ -64,6 +64,7 @@ import queue
 import signal
 import subprocess
 import threading
+import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
@@ -74,6 +75,7 @@ __all__ = [
     "ACPExitedError",
     "ACPLaunchError",
     "ACPPermissionTimeoutError",
+    "ACPCancelledError",
     "load_acp",
 ]
 
@@ -105,6 +107,15 @@ class ACPExitedError(ACPError):
     def __init__(self, method: str) -> None:
         super().__init__(f"acp: agent exited before replying to {method}")
         self.method = method
+
+
+class ACPCancelledError(ACPError):
+    """The turn was cancelled by the caller (``cancel`` set mid-turn); the agent was
+    sent ``session/cancel`` and the session stays usable."""
+
+
+class _TurnCancelled(Exception):
+    pass
 
 
 class ACPPermissionTimeoutError(ACPError):
@@ -499,16 +510,26 @@ class ACPClient:
 
     # -- public API --------------------------------------------------------- #
 
-    def generate(self, request: dict[str, Any]) -> dict[str, Any]:
+    def generate(self, request: dict[str, Any], cancel: Optional[threading.Event] = None) -> dict[str, Any]:
         """``Callable[[dict], dict]`` — the exact shape ``create_in_process_client``
         wants. Sends exactly one ``session/prompt`` on the warm session, accumulates
         only ``agent_message_chunk`` text, and blocks (synchronously) until the
         reader thread delivers the reply or ``permission_timeout`` elapses.
+
+        ``cancel`` (optional, anything with ``is_set()`` such as a
+        :class:`threading.Event`): when it is set mid-turn the ``session/cancel``
+        notification is sent, the turn's reply is awaited (bounded by
+        ``request_timeout``, default 30s) so the next turn never lands on a busy
+        session, and :class:`ACPCancelledError` is raised. The process and session
+        stay warm.
         """
-        return self.generate_stream(request, None)
+        return self.generate_stream(request, None, cancel)
 
     def generate_stream(
-        self, request: dict[str, Any], emit: Optional[Callable[[dict[str, Any]], None]]
+        self,
+        request: dict[str, Any],
+        emit: Optional[Callable[[dict[str, Any]], None]],
+        cancel: Optional[threading.Event] = None,
     ) -> dict[str, Any]:
         """:meth:`generate` that also reports the turn AS IT HAPPENS — the shape
         ``create_in_process_client(generate_stream=...)`` wants. ``emit`` is called
@@ -518,19 +539,25 @@ class ACPClient:
         (never part of the answer), ``tool_call`` -> ``{"type": "tool_call", "id",
         "name": title, "args": rawInput, "via": "acp"}`` and each completed/failed
         ``tool_call_update`` -> ``{"type": "tool_result", "id", "name", "output",
-        "is_error", "via": "acp"}``. The return value is :meth:`generate`'s.
+        "is_error", "via": "acp"}``. The return value and ``cancel`` are
+        :meth:`generate`'s.
         """
         with self._turn_lock:
             try:
-                return self._prompt_turn(request, emit)
+                return self._prompt_turn(request, emit, cancel)
             finally:
                 with self._state_lock:
                     self._emit = None
                     self._tool_names = {}
 
     def _prompt_turn(
-        self, request: dict[str, Any], emit: Optional[Callable[[dict[str, Any]], None]]
+        self,
+        request: dict[str, Any],
+        emit: Optional[Callable[[dict[str, Any]], None]],
+        cancel: Optional[threading.Event] = None,
     ) -> dict[str, Any]:
+        if cancel is not None and cancel.is_set():
+            raise ACPCancelledError("acp: turn cancelled")
         prompt_text = _render_prompt(request)
         with self._state_lock:
             self._accum = []
@@ -558,7 +585,19 @@ class ACPClient:
         )
 
         try:
-            msg = reply_q.get(timeout=self._opts.permission_timeout)
+            msg = self._await_reply(reply_q, cancel)
+        except _TurnCancelled:
+            # ACP: session/cancel is a notification (no id); the agent then ends the
+            # turn with stopReason "cancelled". Wait (bounded) for that reply so the
+            # next turn never lands on a session still busy with this one.
+            self._write({"jsonrpc": "2.0", "method": "session/cancel", "params": {"sessionId": self._session_id}})
+            try:
+                reply_q.get(timeout=self._opts.request_timeout or _HANDSHAKE_TIMEOUT)
+            except queue.Empty:
+                pass
+            with self._state_lock:
+                self._pending.pop(req_id, None)
+            raise ACPCancelledError("acp: turn cancelled") from None
         except queue.Empty:
             with self._state_lock:
                 self._pending.pop(req_id, None)
@@ -576,6 +615,25 @@ class ACPClient:
         with self._state_lock:
             content = "".join(self._accum)
         return {"content": content}
+
+    def _await_reply(
+        self, reply_q: "queue.Queue[dict[str, Any]]", cancel: Optional[threading.Event]
+    ) -> dict[str, Any]:
+        """The turn's reply within ``permission_timeout``; raises ``queue.Empty`` on
+        timeout and ``_TurnCancelled`` as soon as ``cancel`` is set."""
+        if cancel is None:
+            return reply_q.get(timeout=self._opts.permission_timeout)
+        deadline = time.monotonic() + self._opts.permission_timeout
+        while True:
+            if cancel.is_set():
+                raise _TurnCancelled()
+            left = deadline - time.monotonic()
+            if left <= 0:
+                raise queue.Empty
+            try:
+                return reply_q.get(timeout=min(left, 0.02))
+            except queue.Empty:
+                continue
 
     def is_alive(self) -> bool:
         """True while the child process is still running."""

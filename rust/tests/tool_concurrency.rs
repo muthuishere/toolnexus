@@ -170,6 +170,14 @@ async fn run(
         client.run("go", &tk).await.unwrap()
     };
     tk.close().await;
+    // each result must stay paired with its own call, whatever order they finished in
+    for c in &res.tool_calls {
+        assert_eq!(
+            c.output,
+            format!("out {}", c.name),
+            "result paired with wrong call"
+        );
+    }
     res.tool_calls.iter().map(|c| c.name.clone()).collect()
 }
 

@@ -193,8 +193,11 @@ pub struct AcpOptions {
     pub initialize_timeout: Duration,
     /// Bounds `session/new` and `session/set_mode`; default 30s.
     pub request_timeout: Duration,
-    /// Bounds the host permission handler; on expiry the request is answered
-    /// `cancelled` and the turn fails with [`AcpError::PermissionTimeout`]. Default 30s.
+    /// Bounds each turn (`session/prompt` until its reply), as in every other
+    /// port: a turn still unfinished after this long — typically blocked on an
+    /// unanswered `session/request_permission` — fails with
+    /// [`AcpError::PermissionTimeout`]. It also bounds the host permission
+    /// handler, whose request is then answered `cancelled`. Default 30s.
     pub permission_timeout: Duration,
     /// Host permission handler; `None` ⇒ the first `allow*` option.
     pub on_permission: Option<PermissionHandler>,
@@ -301,6 +304,7 @@ pub struct AcpClient {
     turn: Mutex<()>,
     kill_grace: Duration,
     request_timeout: Duration,
+    permission_timeout: Duration,
     agent_info: Value,
     pid: Option<u32>,
 }
@@ -380,6 +384,7 @@ impl AcpClient {
             turn: Mutex::new(()),
             kill_grace: opts.kill_grace,
             request_timeout: opts.request_timeout,
+            permission_timeout: opts.permission_timeout,
             agent_info: Value::Null,
             pid,
         };
@@ -568,6 +573,8 @@ impl AcpClient {
             _guard: guard,
             updates: rx,
             reply: Some(reply),
+            id,
+            deadline: tokio::time::Instant::now() + self.permission_timeout,
             finished: None,
             backlog: VecDeque::new(),
             seen: Vec::new(),
@@ -735,6 +742,10 @@ pub struct PromptStream<'a> {
     _guard: tokio::sync::MutexGuard<'a, ()>,
     updates: mpsc::UnboundedReceiver<TurnEvent>,
     reply: Option<oneshot::Receiver<Reply>>,
+    /// The `session/prompt` request id, dropped from `pending` on timeout.
+    id: String,
+    /// Per-turn bound (`permission_timeout` from the prompt being sent).
+    deadline: tokio::time::Instant,
     finished: Option<Reply>,
     backlog: VecDeque<SessionUpdate>,
     seen: Vec<SessionUpdate>,
@@ -780,6 +791,12 @@ impl PromptStream<'_> {
                             return Some(u);
                         }
                     }
+                }
+                _ = tokio::time::sleep_until(self.deadline) => {
+                    self.reply = None;
+                    self.client.shared.pending.lock().unwrap().remove(&self.id);
+                    let d = self.client.permission_timeout;
+                    self.finished = Some(Err(AcpError::PermissionTimeout(d)));
                 }
                 r = reply => {
                     self.reply = None;

@@ -1,6 +1,7 @@
 package bench;
 
 import io.modelcontextprotocol.client.McpSyncClient;
+import org.springaicommunity.agent.tools.SkillsTool;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.model.ChatModel;
 import org.springframework.ai.chat.prompt.Prompt;
@@ -26,6 +27,10 @@ import java.util.Map;
  * so the "init" figure below is Spring Boot context-ready time INCLUDING MCP
  * discovery (not a toolkit-only build). The per-request figure is the clean,
  * directly-comparable number. JVM warmup handled by warmup iterations.
+ *
+ * BENCH_CONFIG=skills additionally registers spring-ai-agent-utils' SkillsTool
+ * over the shared examples/skills folder (hello-world), the Spring analogue of
+ * toolnexus's `full` config (MCP tools + the `skill` tool). Default = mcp only.
  */
 @SpringBootApplication
 public class SpringAiBench {
@@ -53,6 +58,12 @@ public class SpringAiBench {
                         new ArrayList<>(clients.values()));
                 callbacks.addAll(Arrays.asList(provider.getToolCallbacks()));
             }
+        }
+        String config = env("BENCH_CONFIG", "mcp");
+        if (config.equals("skills")) {
+            callbacks.add(SkillsTool.builder()
+                    .addSkillsDirectory(System.getenv("BENCH_REPO") + "/examples/skills")
+                    .build());
         }
         System.err.println("[bench] tool callbacks discovered: " + callbacks.size()
                 + " names=" + callbacks.stream().map(ToolCallback::getToolDefinition).toList());
@@ -83,7 +94,8 @@ public class SpringAiBench {
         }
 
         StringBuilder sb = new StringBuilder();
-        sb.append("BENCHJSON {\"framework\":\"spring-ai-java\",\"language\":\"java\",");
+        sb.append("BENCHJSON {\"framework\":\"spring-ai-java")
+          .append(config.equals("skills") ? "-skills" : "").append("\",\"language\":\"java\",");
         sb.append("\"init_ms\":").append(round(initMs)).append(",");
         sb.append("\"tool_count\":").append(toolCount).append(",");
         sb.append("\"latencies_ms\":[");

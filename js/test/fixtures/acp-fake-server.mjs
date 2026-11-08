@@ -21,6 +21,9 @@
 //   hang       - sends session/request_permission and then never answers the
 //                session/prompt itself (models an unresponsive agent, so the
 //                CLIENT's own safety-net timeout is what has to save it).
+//   cancel     - a prompt containing "block" streams "working" and holds the turn until
+//                a session/cancel notification, then replies stopReason "cancelled";
+//                any later prompt answers "after-cancel-seen:<bool>".
 //   serialize  - tracks a `busy` flag; if a second session/prompt arrives
 //                while busy, replies with an error instead of processing it
 //                normally, so a client that fails to serialise turns is
@@ -112,7 +115,12 @@ rl.on("line", (line) => {
     }
 
     case "session/cancel":
-      reply(msg.id, {})
+      cancelSeen = true
+      if (msg.id !== undefined) reply(msg.id, {})
+      if (cancelPending !== null) {
+        reply(cancelPending, { stopReason: "cancelled" })
+        cancelPending = null
+      }
       break
 
     default:
@@ -120,7 +128,21 @@ rl.on("line", (line) => {
   }
 })
 
+let cancelPending = null
+let cancelSeen = false
+
 function handlePrompt(id, sessionId, userText) {
+  if (scenario === "cancel" && userText.includes("block")) {
+    // Streams one chunk, then holds the turn open until a session/cancel arrives.
+    send({ jsonrpc: "2.0", method: "session/update", params: { sessionId, update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "working" } } } })
+    cancelPending = id
+    return
+  }
+  if (scenario === "cancel") {
+    send({ jsonrpc: "2.0", method: "session/update", params: { sessionId, update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "after-cancel-seen:" + cancelSeen } } } })
+    reply(id, { stopReason: "end_turn" })
+    return
+  }
   switch (scenario) {
     case "stale":
       handleStale(id, userText)

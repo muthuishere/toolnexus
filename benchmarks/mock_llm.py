@@ -8,8 +8,18 @@ would swamp everything). The server:
   * accepts POST /chat/completions  and  POST /v1/chat/completions
   * turn 1 (no tool results in the transcript yet) -> returns TWO tool_calls:
         get_weather(city="Paris")  and  add(a=2, b=2)
-  * turn 2 (a role=="tool" message is present) -> returns a final assistant
-    message. Deterministic, no network, no cost.
+  * turn 2 (the tool results are in the transcript) -> returns a final assistant
+    message. Deterministic, no network, no cost. "Tool results present" means a
+    role=="tool" message, an Anthropic tool_result block, OR a non-assistant
+    message whose text carries the scripted get_weather result (smolagents sends
+    tool results back as role "user": "Observation: ...").
+  * if the advertised tools include `final_answer` (smolagents' ToolCallingAgent
+    only terminates on that tool call), turn 2 is a `final_answer` tool call
+    carrying the scripted text instead of a plain assistant message.
+
+The server speaks HTTP/1.1 with keep-alive, so clients that pool connections
+reuse them across LLM calls (as they would against a real provider) instead of
+paying a TCP connect per call. Request bodies may be Content-Length or chunked.
 
 It also serves a tiny non-streaming / streaming (SSE) variant so streaming
 clients work too. Anthropic /v1/messages is stubbed with the same script so an
@@ -23,6 +33,8 @@ import re
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 FINAL_TEXT = "The weather in Paris is Sunny, 22C. And 2 + 2 = 4."
+# The get_weather tool result returned by benchmarks/mcp_server.py.
+TOOL_RESULT_MARK = "Sunny, 22C"
 
 
 def _pick(tools, suffix, fallback):
@@ -49,6 +61,15 @@ def _openai_tool_calls(tools):
     ]
 
 
+def _text_of(content):
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return " ".join(b.get("text", "") for b in content
+                        if isinstance(b, dict) and isinstance(b.get("text"), str))
+    return ""
+
+
 def _has_tool_result(messages):
     for m in messages:
         role = m.get("role")
@@ -60,6 +81,19 @@ def _has_tool_result(messages):
             for block in content:
                 if isinstance(block, dict) and block.get("type") == "tool_result":
                     return True
+        # Tool results sent back in another role (smolagents: role "user",
+        # "Observation: ..."). Assistant turns are skipped: a remembered final
+        # answer also contains the mark.
+        if role not in ("assistant", "system") and TOOL_RESULT_MARK in _text_of(content):
+            return True
+    return False
+
+
+def _has_final_answer_tool(tools):
+    for t in tools or []:
+        fn = t.get("function", t) if isinstance(t, dict) else {}
+        if isinstance(fn, dict) and fn.get("name") == "final_answer":
+            return True
     return False
 
 
@@ -67,6 +101,12 @@ def _openai_body(model, want_tools, tools=None):
     if want_tools:
         message = {"role": "assistant", "content": None,
                    "tool_calls": _openai_tool_calls(tools)}
+        finish = "tool_calls"
+    elif _has_final_answer_tool(tools):
+        message = {"role": "assistant", "content": None, "tool_calls": [
+            {"id": "call_final_1", "type": "function",
+             "function": {"name": "final_answer",
+                          "arguments": json.dumps({"answer": FINAL_TEXT})}}]}
         finish = "tool_calls"
     else:
         message = {"role": "assistant", "content": FINAL_TEXT}
@@ -77,10 +117,9 @@ def _openai_body(model, want_tools, tools=None):
         "created": 0,
         "model": model or "mock-model",
         "choices": [{"index": 0, "message": message, "finish_reason": finish}],
-        # Both key spellings so every SDK validates: OpenAI Chat Completions uses
-        # prompt/completion_tokens; some newer provider schemas want input/output_tokens.
-        "usage": {"prompt_tokens": 20, "completion_tokens": 8, "total_tokens": 28,
-                  "input_tokens": 20, "output_tokens": 8},
+        # OpenAI-standard keys only. Sending the input/output_tokens aliases too
+        # breaks serde-based clients that alias them (AutoAgents: "duplicate field").
+        "usage": {"prompt_tokens": 20, "completion_tokens": 8, "total_tokens": 28},
     }
 
 
@@ -104,6 +143,9 @@ def _anthropic_body(model, want_tools, tools=None):
 
 
 class Handler(BaseHTTPRequestHandler):
+    # HTTP/1.1 => persistent connections; every response carries Content-Length.
+    protocol_version = "HTTP/1.1"
+
     def log_message(self, *args):  # silence per-request logging
         pass
 
@@ -147,12 +189,15 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def _send_sse(self, chunks):
+        # Whole stream is known up front, so frame it with Content-Length to keep
+        # the connection reusable.
+        data = b"".join(f"data: {json.dumps(c)}\n\n".encode() for c in chunks)
+        data += b"data: [DONE]\n\n"
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Content-Length", str(len(data)))
         self.end_headers()
-        for c in chunks:
-            self.wfile.write(f"data: {json.dumps(c)}\n\n".encode())
-        self.wfile.write(b"data: [DONE]\n\n")
+        self.wfile.write(data)
 
     def do_GET(self):
         if self.path.rstrip("/") in ("/health", ""):

@@ -20,7 +20,7 @@ the event. Revisit if a port cannot express it.
 - [x] 1.5h ACP host hooks: ACPOptions.OnPermission + OnUpdate, ACPClient.GenerateCtx (ctx cancel -> session/cancel) + GenerateStream, InProcessOptions.GenerateStream (in-process client streams) — acp_hooks_test.go
 - [x] 1.6 Tests: host_engine_asks_test.go, agents TestCompactorOnCompact; `go test -race ./...` green
 
-## 2. Other ports (done 2026-11-01 except 2.6d)
+## 2. Other ports (done 2026-11-01 except 2.6e)
 - [x] 2.1 js (waitFor gets `{signal}` as a 2nd arg instead of a separate waitForCtx; Toolkit.register needs no lock and the disabled-status race does not exist on a single thread)
 - [x] 2.2 python (2026-11-01: all of 1.1–1.5g; concurrent MCP load only with on_server; disabled-status race N/A — asyncio single loop)
 - [x] 2.3 java (2026-11-01: all of 1.1-1.5g; HostEngineAsksTest, HostBuiltinExtrasTest, CompactorOnCompactTest, agents/AsToolCtxTest; mcp-progress-server resource exercised; disabled-status write was already under the lock)
@@ -29,5 +29,6 @@ the event. Revisit if a port cannot express it.
 - [x] 2.6 clojure (2026-11-01: all asks + hints; no Register race or disabled-status race — toolkit is an immutable value, statuses built after the load; cooperative :cancel; :call-id needs :context? true)
 - [x] 2.6b Re-run every port against the extended examples/mcp-progress-server.mjs (now also offers a resource) — 2026-11-01: every port's MCP resource-tool test runs against it
 - [x] 2.6c SECURITY: host-scoped key resolution (BaseURL host + apiKeyEnv, no cross-provider fallback) — 2026-11-01: in all 7 ports
-- [ ] 2.6d ACP host hooks (onPermission, onUpdate, ctx cancel, streaming generate) in every port that ships an ACP source
+- [x] 2.6d ACP host hooks onPermission, onUpdate and streaming generate in every port that ships an ACP source — 2026-11-08: present in js/python/java/csharp/elixir/clojure/rust; the permission timeout bounds the whole turn in every port (rust fixed to match, `rust/tests/acp.rs` permission_timeout_bounds_the_whole_turn). Vendor presets are out of scope (ADR 0041).
+- [ ] 2.6e ACP ctx cancel (`session/cancel` on a cancelled generate) — 2026-11-08: golang, rust, js (`{signal}`), python (`cancel` Event), java (thread interrupt), csharp (CancellationToken). Remaining: elixir (#169), clojure (#170); and in js/python the in-process client's own cancel does not yet reach the ACP generate
 - [x] 2.7 Fix the disabled-status race wherever the same pattern exists — 2026-11-01: fixed in Go; java/csharp already locked; js/python/elixir/clojure N/A (single thread / immutable toolkit)

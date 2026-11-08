@@ -338,8 +338,14 @@ config keys (absent ⇒ byte-identical behaviour): `auth` (§2A), `description` 
   servers answer `-32601`, `-32600` or a "not initialized" code before `initialize`), an HTTP **400, 404, 405 or 5xx** (the Java SDK's stateless server answers an unknown method with 500; a
   server that is really down then fails on the frozen path too, so the outcome is still `failed`), or a 2xx reply that is not a JSON-RPC response for the request, or a result without
   `"2026-07-28"` in `supportedVersions`. Over **stdio**, a discover that gets no reply within
-  `min(timeout, 5 s)` also falls back (older servers may ignore a pre-`initialize` request). The probe child
-  is terminated and the frozen path starts its own process; its `env`/`cwd`/`command` are unchanged.
+  `min(timeout, 5 s)` also falls back (older servers may ignore a pre-`initialize` request).
+- **stdio probe child (amended, change `reuse-stdio-discover-probe`):** when discover gets a JSON-RPC
+  **reply** within `min(timeout, 5 s)` — an error (`-32601` etc.) or a result without `2026-07-28` — the
+  **same child** continues into `initialize` on the frozen path over the probe's pipes: exactly **one**
+  process start. Only when discover gets **no reply** (silence) is the probe child terminated and the
+  frozen path starts its own process, with `env`/`cwd`/`command` unchanged. A port whose frozen path is
+  an MCP SDK hands the SDK the probe child's open stdin/stdout (or a minimal adapter transport over
+  them). Shared fixture: `examples/mcp-2026/legacy-stdio/` (counts process starts).
 - **Load failure** (status `failed`, isolated): connection refused / DNS, an HTTP 401/403 that
   OAuth (§2A) could not satisfy, a stdio child that exits before replying.
 - **Caching (resolved):** `tools/list` is fetched once at load on the direct path (as §2.F); tool search
@@ -732,6 +738,15 @@ omitRefreshResource?: bool, allowHttp?: bool }`, plus a host-supplied **token st
   carries the native parser's own error message for a human. A host must not have to call the
   inventory surface to learn that six of eighty-seven skills vanished. A port that also has a warn
   slot MAY call it; the returned data is what conformance compares.
+- **Oversized descriptions are warned, never modified** (issue #84). A skill whose `description`
+  is longer than **1,024 Unicode code points** (the published Agent Skills limit) is reported in a
+  `warnings` list — a sibling of `skipped` on the loader result (over the exposed skills) and on
+  the S3 inventory (unfiltered) — as `{ location, reason: "oversized-description", chars }`, where
+  `chars` is the description's length in **code points** (not bytes, not UTF-16 units). Exactly
+  1,024 does not warn. Order is normative discovery order. The catalog still carries the
+  description **in full**; the catalog and the `skill` tool output stay byte-identical, and the
+  warning is the entire observable effect. A port also emits it through the warn channel it uses
+  for duplicate names (never stdout). Fixture: `conformance/skill_description/`.
 - Skill `Info { name, description, location (abs path to SKILL.md), content }`.
 - Duplicate names: first wins, log a warning.
 - **Discovery order is normative, not each ecosystem's directory walk.** "First wins" only decides
@@ -1555,10 +1570,15 @@ MCPAuthError = { status (401|403), challenge, reason } // any authenticate hook 
 
 **Routing (pinned).** With 2026-07-28 the only accepted version, every POST is a 2026 request
 (including `initialize`, which then fails header validation) and GET/DELETE ⇒ `405` (`Allow: POST`).
-With legacy versions also listed, a POST is a 2026 request iff its method is not `initialize` and
-(`MCP-Protocol-Version` is `2026-07-28`, or the header is absent/not an accepted legacy version and
-(the method is `server/discover`, or an `Mcp-Method` header is present, or `params._meta` carries
-`io.modelcontextprotocol/protocolVersion`)); everything else is served by §7C.1 unchanged. Content type
+With legacy versions also listed, a POST is a 2026 request iff its method is not `initialize`, its
+`MCP-Protocol-Version` header is absent or not a listed legacy version, and (the method is
+`server/discover`, or an `Mcp-Method` header is present, or `params._meta` carries
+`io.modelcontextprotocol/protocolVersion`); everything else is served by §7C.1 unchanged. The header
+alone never selects the 2026 wire (issue #150): a real 2026 client always sends `Mcp-Method`, so a request
+with `MCP-Protocol-Version: 2026-07-28` and neither marker is a legacy request, and the §7C.1 wire accepts
+`2026-07-28` in that header whenever it is listed. `initialize` never answers `2026-07-28`, which has no
+`initialize`: it negotiates among the listed legacy versions only (newest listed when the requested one is
+not among them), and a client that wants 2026 uses `server/discover`. Content type
 (`415`) and body size (`413`) are checked as in §7C.1; on a 2026-only handler a JSON array body ⇒
 `400` `-32600` "batch requests are not supported", an unparsable body ⇒ `400` `-32700` "Parse error".
 
@@ -2606,7 +2626,7 @@ delta until the consumer has received it, so a buffering implementation deadlock
 The injectable transport (Gap 2) is unchanged and remains the answer for proxy, mTLS and
 record-replay — this is a second constructor over it, not a second seam.
 
-#### ACP model source — host hooks (golang-first; other ports pending, `openspec/changes/add-go-host-asks`; streaming: all eight ports)
+#### ACP model source — host hooks (onPermission/onUpdate/streaming: all eight ports; cancellation: all but elixir and clojure, `openspec/changes/add-go-host-asks` 2.6e)
 
 An ACP source (one warm `session/prompt` per turn over a child agent; ADR 0031) MAY take three
 opt-in hooks. With none set its behaviour is unchanged: `session/request_permission` is answered
@@ -3916,6 +3936,13 @@ answer.data.isError  : boolean         // optional, pairs with `output`
   providers require.
 - A call for which the host supplied no result gets an explicit **error** `tool_result`
   rather than an absent slot, because an unanswered tool call is rejected by the provider.
+- **A declined answer carries its reason** (issue #125). `answer.ok == false` (e.g.
+  `answerDeclined(id, reason)`) resolves **every** outstanding call of the halted turn with an
+  error `tool_result` whose content is exactly `relay declined for <name>: <reason>` — the same
+  text as the inline relay path — with `reason` defaulting to `declined` and `<name>` falling back
+  to the call id. Any `data` on a declined answer is ignored; it is never the
+  `"no result supplied on resume"` filler, and the resume does not fail. Fixture:
+  `conformance/resume_decline/cases.json`.
 - The resume continues from the transcript and appends **no new user turn**.
 - Because `Request` and `Answer` are plain serializable data, resume works across a
   process boundary: persist both, restart, resume with a fresh client.

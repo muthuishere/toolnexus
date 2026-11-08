@@ -12,6 +12,7 @@ from .acp import (
     ACPLaunchError,
     ACPOptions,
     ACPPermissionTimeoutError,
+    ACPCancelledError,
     load_acp,
 )
 from .a2a import (
@@ -254,6 +255,7 @@ from .skill import (
     SkillInfo,
     SkillInventory,
     SkillSkip,
+    SkillWarning,
     SkillSource,
     list_skills,
     load_skills,
@@ -344,6 +346,7 @@ __all__ = [
     "ACPError",
     "ACPOptions",
     "ACPPermissionTimeoutError",
+    "ACPCancelledError",
     "ACPExitedError",
     "ACPLaunchError",
     "load_acp",
@@ -407,6 +410,7 @@ __all__ = [
     "SkillInfo",
     "SkillInventory",
     "SkillSkip",
+    "SkillWarning",
     "SkillSource",
     "list_skills",
     "load_skills",

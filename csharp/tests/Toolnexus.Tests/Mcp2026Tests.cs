@@ -179,6 +179,33 @@ public class Mcp2026Tests
         Assert.True(sw.ElapsedMilliseconds < 15000, $"took {sw.ElapsedMilliseconds}ms");
     }
 
+    [Theory]
+    [InlineData("error", 1)]
+    [InlineData("silent", 2)]
+    public async Task StdioDiscoverProbeChildIsReusedOnReply(string mode, int spawns)
+    {
+        // SPEC §2.2a (reuse-stdio-discover-probe): a fast discover reply ⇒ the SAME child continues into
+        // initialize (1 start); silence ⇒ the probe child is killed and the frozen path respawns (2 starts).
+        if (!McpProgressTests.NodeOk()) return;
+        var server = TestFixtures.Fixture(Path.Combine("mcp-2026", "legacy-stdio", "server.mjs"));
+        var count = Path.GetTempFileName();
+        try
+        {
+            await using (var src = await McpSource.LoadAsync(Cfg("legacy", new Dictionary<string, object?>
+            {
+                ["command"] = "node", ["args"] = new List<object?> { server }, ["timeout"] = 1500L,
+                ["env"] = new Dictionary<string, object?> { ["SPAWN_COUNT_FILE"] = count, ["DISCOVER_MODE"] = mode },
+            })))
+            {
+                Assert.Equal("connected", src.Status["legacy"]);
+                var r = await Tool(src, "legacy_echo").ExecuteAsync(Args(("text", "hi")));
+                Assert.Equal("echo:hi", r.Output);
+                Assert.Equal(spawns, File.ReadAllLines(count).Count(l => l.StartsWith("start ")));
+            }
+        }
+        finally { File.Delete(count); }
+    }
+
     [Fact]
     public async Task OldServerFallsBackToTheFrozenSdkPath()
     {

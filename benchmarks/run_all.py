@@ -138,7 +138,7 @@ def run_target(name, cmd, env_extra=None, cwd=None):
 def targets():
     t = []
     if os.environ.get("TN_PY"):
-        for cfg in ("mcp", "full"):
+        for cfg in ("mcp", "full", "native"):
             t.append((f"toolnexus-python-{cfg}",
                       [os.environ["TN_PY"], f"{REPO}/benchmarks/run_toolnexus.py",
                        "--config", cfg, "--runs", RUNS, "--warmup", WARMUP], None))
@@ -178,18 +178,23 @@ def targets():
                       [os.environ["GO_BIN"], "-config", cfg,
                        "-runs", RUNS, "-warmup", WARMUP], None))
     if os.environ.get("JAVA_APP"):
-        for cfg in ("mcp", "full"):
+        for cfg in ("mcp", "full", "native"):
             t.append((f"toolnexus-java-{cfg}",
                       [os.environ["JAVA_APP"], "-config", cfg, "-runs", RUNS, "-warmup", WARMUP], None))
     if os.environ.get("SPRING_JAR"):
         t.append(("spring-ai-java",
                   ["java", "-jar", os.environ["SPRING_JAR"]],
                   {"BENCH_RUNS": RUNS, "BENCH_WARMUP": WARMUP}))
+        # MCP tools + spring-ai-agent-utils SkillsTool over examples/skills —
+        # the Spring analogue of toolnexus's `full` config.
+        t.append(("spring-ai-java-skills",
+                  ["java", "-jar", os.environ["SPRING_JAR"]],
+                  {"BENCH_RUNS": RUNS, "BENCH_WARMUP": WARMUP, "BENCH_CONFIG": "skills"}))
     if os.environ.get("LC4J_APP"):
         t.append(("langchain4j-mcp",
                   [os.environ["LC4J_APP"], "-config", "mcp", "-runs", RUNS, "-warmup", WARMUP], None))
     if os.environ.get("TN_CSHARP_DLL"):
-        for cfg in ("mcp", "full"):
+        for cfg in ("mcp", "full", "native"):
             t.append((f"toolnexus-csharp-{cfg}",
                       ["dotnet", os.environ["TN_CSHARP_DLL"], "-config", cfg,
                        "-runs", RUNS, "-warmup", WARMUP], None))
@@ -248,7 +253,6 @@ def targets():
             t.append((f"toolnexus-rust-{cfg}",
                       [os.environ["TN_RUST_BIN"], "-config", cfg, "-runs", RUNS, "-warmup", WARMUP], None))
     # swiftide builds a fresh Agent per request (it keeps history) inside the timed span.
-    # autoagents fails against the shared mock (duplicate prompt_tokens/input_tokens).
     for envv, nm in (("RIG_BIN", "rig-mcp"), ("SWIFTIDE_BIN", "swiftide-mcp"),
                      ("AUTOAGENTS_BIN", "autoagents-mcp")):
         if os.environ.get(envv):

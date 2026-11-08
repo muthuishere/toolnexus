@@ -11,11 +11,10 @@ mock via api_base.
                 + OpenAIServerModel + ToolCallingAgent
   per-request = agent.run(QUESTION)  (fresh memory each run: reset=True default)
 
-KNOWN INCOMPATIBILITY with the shared mock: smolagents sends tool results back
-as role "user" ("tool-response" -> user in models.py), never role "tool", and a
-ToolCallingAgent only terminates on a `final_answer` tool call. The mock keys
-its final turn on a role "tool" message, so it keeps returning tool calls and
-the agent hits max_steps. The runner exits non-zero instead of reporting numbers.
+smolagents sends tool results back as role "user" ("Observation: ...") and a
+ToolCallingAgent only terminates on a `final_answer` tool call; the shared mock
+handles both (it detects the tool results in any role and answers turn 2 with a
+`final_answer` call when that tool is advertised).
 Deps: smolagents 1.26 + mcpadapt 0.1.19 need mcp<2 (mcpadapt imports
 `streamablehttp_client`, removed in mcp 2.x) and `websockets`.
 """
@@ -63,9 +62,6 @@ def main():
             final_text = str(res)
 
     if not final_text.startswith("The weather in Paris"):
-        # Known: smolagents maps tool results to role "user" (models.py
-        # MessageRole.TOOL_RESPONSE -> USER) and only stops on a `final_answer`
-        # tool call, so against the shared mock it loops to max_steps.
         raise SystemExit(f"smolagents: no valid final answer (got {final_text!r}); see docstring")
 
     print(json.dumps({

@@ -101,12 +101,12 @@ class Tracker:
         self.peak = 0
         self.log: list[str] = []
 
-    def tool(self, name: str, read_only: bool) -> Tool:
+    def tool(self, name: str, read_only: bool, secs: float = 0.06) -> Tool:
         async def execute(args, ctx=None):
             self.inflight += 1
             self.peak = max(self.peak, self.inflight)
             self.log.append(f"start {name}")
-            await asyncio.sleep(0.06)
+            await asyncio.sleep(secs)
             self.inflight -= 1
             self.log.append(f"end {name}")
             return ToolResult(output=f"out {name}", is_error=False)
@@ -124,7 +124,9 @@ class Tracker:
 MODES = [("openai", False), ("anthropic", False), ("openai", True), ("anthropic", True)]
 
 
-async def _run(style: str, stream: bool, names: list[str], tools: list[Tool], cap: int | None = None) -> list[str]:
+async def _run(
+    style: str, stream: bool, names: list[str], tools: list[Tool], cap: int | None = None, field: str = "name"
+) -> list[str]:
     srv = _server(names)
     tk = await create_toolkit(builtins=False, extra_tools=tools)
     try:
@@ -132,11 +134,11 @@ async def _run(style: str, stream: bool, names: list[str], tools: list[Tool], ca
         client = create_client(base_url=base, style=style, model="m", api_key="k", max_tool_concurrency=cap)
         if not stream:
             r = await client.run("go", toolkit=tk)
-            return [c["name"] if isinstance(c, dict) else c.name for c in r.tool_calls]
+            return [c[field] if isinstance(c, dict) else getattr(c, field) for c in r.tool_calls]
         got: list[str] = []
         async for ev in client.stream("go", toolkit=tk):
             if ev["type"] == "done":
-                got = [c["name"] if isinstance(c, dict) else c.name for c in ev["result"].tool_calls]
+                got = [c[field] if isinstance(c, dict) else getattr(c, field) for c in ev["result"].tool_calls]
         return got
     finally:
         await tk.close()
@@ -164,6 +166,18 @@ async def test_read_only_calls_overlap(style, stream):
     got = await _run(style, stream, names, tools)
     assert tr.peak == 6
     assert got == names
+
+
+@pytest.mark.parametrize("style,stream", MODES)
+async def test_results_keep_emitted_order_when_calls_finish_out_of_order(style, stream):
+    tr = Tracker()
+    names = ["r1", "r2", "r3", "r4"]
+    # r1 is slowest, r4 fastest: completion order is the reverse of emitted order
+    tools = [tr.tool(x, True, 0.02 * (len(names) - i)) for i, x in enumerate(names)]
+    outputs = await _run(style, stream, names, tools, field="output")
+    assert [e for e in tr.log if e.startswith("end ")] == ["end r4", "end r3", "end r2", "end r1"]
+    # each call keeps its own output, in emitted order
+    assert outputs == [f"out {x}" for x in names]
 
 
 @pytest.mark.parametrize("style,stream", MODES)

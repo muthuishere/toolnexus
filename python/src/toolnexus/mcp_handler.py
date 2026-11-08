@@ -580,7 +580,7 @@ class McpHandler:
     async def _check_session(self, ctx: McpContext, rs: _Responder) -> bool:
         assert ctx.request is not None
         v = ctx.request.header("mcp-protocol-version")
-        if v and v not in self._legacy:
+        if v and v not in self.versions:
             await rs.plain(400, "Bad Request: unsupported MCP-Protocol-Version")
             return False
         if self.cfg.stateless:
@@ -991,9 +991,7 @@ class McpHandler:
         if method == "initialize":
             return False
         hv = req.header("mcp-protocol-version")
-        if hv == MCP_PROTOCOL_2026:
-            return True
-        if hv and hv in self.versions:
+        if hv and hv in self._legacy:
             return False
         return method == "server/discover" or req.header("mcp-method") != "" or (meta is not None and _META_VERSION in meta)
 

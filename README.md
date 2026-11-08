@@ -41,9 +41,9 @@ npm i toolnexus                                   # JS / TypeScript
 pip install toolnexus                             # Python
 go get github.com/muthuishere/toolnexus/golang    # Go
 dotnet add package Toolnexus                       # C#
-{:toolnexus, "~> 0.26"}                             # Elixir (mix.exs deps)
-# Java (Maven): io.github.muthuishere:toolnexus:0.26.0
-# Clojure (deps.edn): net.clojars.muthuishere/toolnexus {:mvn/version "0.26.0"} — JVM and cljgo
+{:toolnexus, "~> 0.27"}                             # Elixir (mix.exs deps)
+# Java (Maven): io.github.muthuishere:toolnexus:0.27.0
+# Clojure (deps.edn): net.clojars.muthuishere/toolnexus {:mvn/version "0.27.0"} — JVM and cljgo
 cargo add toolnexus                                # Rust (crates.io)
 ```
 
@@ -56,9 +56,7 @@ interface and drives **any** model with them.
 
 ## Built on toolnexus
 
-- **[wfnexus](https://github.com/muthuishere/wfnexus)**: typed pipelines for coding agents. Each step is a whole agent with scoped tools, a budget, guardrails and a JSON-schema output.
-- **[deemwar Spotlight](https://spot.deemwar.com/)**: a local-first, press-a-key assistant with cited answers over your windows, mail and files.
-- **[deemwar MCP store](https://mcp.deemwar.com/)**: turns your own API into MCP tools and agent skills.
+- **[wfnexus](https://muthuishere.github.io/wfnexus/)**: typed pipelines for coding agents. Each step is a whole agent with scoped tools, a budget, guardrails and a JSON-schema output.
 
 Built something on toolnexus? Open a PR adding one line here: name, link and what it does.
 

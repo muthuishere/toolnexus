@@ -23,7 +23,7 @@ the same output in every language.
 
 ```toml
 [dependencies]
-toolnexus = "0.26"
+toolnexus = "0.27"
 tokio = { version = "1", features = ["full"] }
 serde_json = "1"
 ```
@@ -274,7 +274,7 @@ let client = create_in_process_client(InProcessOptions {
 | `mcp-http` | on | MCP over streamable HTTP. Without it you get stdio MCP servers only. |
 | `serve` | on | `Toolkit::serve` (the A2A agent and the MCP server) and `Toolkit::mcp_handler`. |
 
-For a lean build, use `toolnexus = { version = "0.26", default-features = false }`.
+For a lean build, use `toolnexus = { version = "0.27", default-features = false }`.
 
 ## More examples
 

@@ -524,6 +524,53 @@ async fn stdio_silent_discover_falls_back() {
     assert!(t0.elapsed() >= std::time::Duration::from_millis(800));
 }
 
+/// SPEC §2.2a: a fast discover error keeps the probe child for `initialize`
+/// (one spawn); discover silence kills it and the frozen path respawns (two).
+async fn legacy_stdio_spawns(mode: &str) -> usize {
+    let f = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../examples/mcp-2026/legacy-stdio/server.mjs")
+        .canonicalize()
+        .unwrap();
+    let count = std::env::temp_dir().join(format!(
+        "toolnexus-rust-spawns-{mode}-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&count);
+    let cfg = json!({"leg": {
+        "command": ["node", f.to_string_lossy()],
+        "env": {"SPAWN_COUNT_FILE": count.to_string_lossy(), "DISCOVER_MODE": mode},
+        "timeout": 1500,
+    }});
+    let src = load(cfg, opts()).await;
+    assert_eq!(src.status["leg"], McpStatus::Connected, "{:?}", src.errors);
+    let r = call(&src, "leg_echo", json!({"text": "hi"})).await;
+    assert_eq!(r.output, "echo:hi");
+    src.close().await;
+    let n = std::fs::read_to_string(&count)
+        .unwrap()
+        .lines()
+        .filter(|l| l.starts_with("start"))
+        .count();
+    let _ = std::fs::remove_file(&count);
+    n
+}
+
+#[tokio::test]
+async fn legacy_stdio_discover_error_reuses_the_probe_child() {
+    if !node() {
+        return;
+    }
+    assert_eq!(legacy_stdio_spawns("error").await, 1);
+}
+
+#[tokio::test]
+async fn legacy_stdio_discover_silence_respawns() {
+    if !node() {
+        return;
+    }
+    assert_eq!(legacy_stdio_spawns("silent").await, 2);
+}
+
 // ---------------------------------------------------------------------------
 // OAuth
 // ---------------------------------------------------------------------------

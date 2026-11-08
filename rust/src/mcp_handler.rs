@@ -760,7 +760,7 @@ impl McpHandler {
     ) -> Result<McpRequestContext, Box<Response<McpBody>>> {
         let h = &self.inner;
         let v = rc.header("mcp-protocol-version");
-        if !v.is_empty() && !h.legacy.iter().any(|x| x == v) {
+        if !v.is_empty() && !h.versions.iter().any(|x| x == v) {
             return Err(Box::new(plain_error(
                 StatusCode::BAD_REQUEST,
                 "Bad Request: unsupported MCP-Protocol-Version",

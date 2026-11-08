@@ -97,13 +97,17 @@ class ToolConcurrencyTest {
         final List<String> log = new ArrayList<>();
 
         Tool tool(String name, boolean readOnly) {
+            return tool(name, readOnly, 60);
+        }
+
+        Tool tool(String name, boolean readOnly, long ms) {
             Tool t = NativeTool.of(name, name, Map.of("type", "object", "properties", Map.of()), (Map<String, Object> a) -> {
                 synchronized (this) {
                     inflight++;
                     peak = Math.max(peak, inflight);
                     log.add("start " + name);
                 }
-                try { Thread.sleep(60); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+                try { Thread.sleep(ms); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
                 synchronized (this) {
                     inflight--;
                     log.add("end " + name);
@@ -115,6 +119,10 @@ class ToolConcurrencyTest {
     }
 
     static List<String> run(String style, boolean stream, List<String> names, List<Tool> tools, Integer cap) throws IOException {
+        return run(style, stream, names, tools, cap, false);
+    }
+
+    static List<String> run(String style, boolean stream, List<String> names, List<Tool> tools, Integer cap, boolean outputs) throws IOException {
         HttpServer srv = server(names);
         Toolkit tk = Toolkit.create(new Toolkit.Options().builtins(false).extraTools(tools.toArray(new Tool[0])));
         try {
@@ -124,7 +132,7 @@ class ToolConcurrencyTest {
             LlmClient c = LlmClient.create(o);
             LlmClient.RunResult r = stream ? c.stream("go", tk, ev -> {}) : c.run("go", tk);
             List<String> got = new ArrayList<>();
-            for (LlmClient.ToolCall tc : r.toolCalls) got.add(tc.name);
+            for (LlmClient.ToolCall tc : r.toolCalls) got.add(outputs ? tc.output : tc.name);
             return got;
         } finally {
             tk.close();
@@ -163,6 +171,20 @@ class ToolConcurrencyTest {
         List<String> got = run(style, stream, names, tools(tr, names), null);
         assertEquals(6, tr.peak);
         assertEquals(names, got);
+    }
+
+    @ParameterizedTest
+    @CsvSource({"openai,false", "anthropic,false", "openai,true", "anthropic,true"})
+    void resultsKeepEmittedOrderWhenCallsFinishOutOfOrder(String style, boolean stream) throws IOException {
+        Tracker tr = new Tracker();
+        List<String> names = List.of("r1", "r2", "r3", "r4");
+        // r1 is slowest, r4 fastest: completion order is the reverse of emitted order
+        List<Tool> ts = new ArrayList<>();
+        for (int i = 0; i < names.size(); i++) ts.add(tr.tool(names.get(i), true, 40L * (names.size() - i)));
+        List<String> outputs = run(style, stream, names, ts, null, true);
+        assertEquals(List.of("end r4", "end r3", "end r2", "end r1"), tr.log.stream().filter(e -> e.startsWith("end ")).toList());
+        // each call keeps its own output, in emitted order
+        assertEquals(List.of("out r1", "out r2", "out r3", "out r4"), outputs);
     }
 
     @ParameterizedTest
