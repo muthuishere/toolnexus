@@ -1,0 +1,43 @@
+{
+  "description": "SPEC §8 'Stop-reason recovery'. Style-neutral scripted responses; every port replays each case in BOTH styles (openai, anthropic) and in BOTH loops (run, stream). Mapping: stop 'end' => openai finish_reason 'stop' / anthropic stop_reason 'end_turn'; 'truncated' => 'length' / 'max_tokens'; 'tool' => 'tool_calls' / 'tool_use'. A tool call's 'arguments' is the raw string: openai sends it verbatim as function.arguments; anthropic sends input = the parsed value when it parses to a JSON object, else (non-streaming) input = the raw string, (streaming) partial_json = the raw string. 'thinking' is reasoning text: anthropic sends a {type:'thinking', thinking, signature:'sig'} block before any text block; openai sends it as message.reasoning_content (streaming: delta.reasoning_content) — the client ignores it either way. The toolkit holds one native tool 'echo' (input schema: object, no required fields) that returns the text 'ok'. Expected: 'turns' = provider calls made; 'text' = RunResult.text (and done.result.text); 'recoveries' = the pinned user messages appended, in order, each being the LAST message of the next request; 'toolRuns' = the args each echo execution received, in order.",
+  "messages": {
+    "NUDGE": "Your previous response contained no answer. Continue and give your answer.",
+    "CONTINUE": "Your previous response was cut off at the output token limit. Continue exactly where it stopped, without repeating anything.",
+    "CORRECTIVE": "Your previous tool call could not be used: its arguments were not a valid JSON object. Call the tool again with arguments that are a single valid JSON object matching its input schema."
+  },
+  "cases": [
+    {"name": "off_thinking_only", "stopRecovery": false,
+     "responses": [{"thinking": "hmm", "text": "", "stop": "end"}],
+     "expect": {"turns": 1, "text": "", "recoveries": [], "toolRuns": []}},
+    {"name": "nudge", "stopRecovery": true,
+     "responses": [{"thinking": "hmm", "text": "", "stop": "end"}, {"text": "answer", "stop": "end"}],
+     "expect": {"turns": 2, "text": "answer", "recoveries": ["NUDGE"], "toolRuns": []}},
+    {"name": "nudge_once", "stopRecovery": true,
+     "responses": [{"text": "", "stop": "end"}, {"text": "", "stop": "end"}, {"text": "never", "stop": "end"}],
+     "expect": {"turns": 2, "text": "", "recoveries": ["NUDGE"], "toolRuns": []}},
+    {"name": "continue", "stopRecovery": true,
+     "responses": [{"text": "Hel", "stop": "truncated"}, {"text": "lo", "stop": "end"}],
+     "expect": {"turns": 2, "text": "Hello", "recoveries": ["CONTINUE"], "toolRuns": []}},
+    {"name": "continue_cap", "stopRecovery": true,
+     "responses": [{"text": "a", "stop": "truncated"}, {"text": "b", "stop": "truncated"}, {"text": "c", "stop": "truncated"}, {"text": "d", "stop": "truncated"}, {"text": "never", "stop": "end"}],
+     "expect": {"turns": 4, "text": "abcd", "recoveries": ["CONTINUE", "CONTINUE", "CONTINUE"], "toolRuns": []}},
+    {"name": "off_truncated", "stopRecovery": false,
+     "responses": [{"text": "Hel", "stop": "truncated"}],
+     "expect": {"turns": 1, "text": "Hel", "recoveries": [], "toolRuns": []}},
+    {"name": "corrective", "stopRecovery": true,
+     "responses": [{"toolCalls": [{"name": "echo", "arguments": "{bad"}], "stop": "tool"}, {"toolCalls": [{"name": "echo", "arguments": "{\"x\":1}"}], "stop": "tool"}, {"text": "done", "stop": "end"}],
+     "expect": {"turns": 3, "text": "done", "recoveries": ["CORRECTIVE"], "toolRuns": [{"x": 1}]}},
+    {"name": "corrective_once", "stopRecovery": true,
+     "responses": [{"toolCalls": [{"name": "echo", "arguments": "{bad"}], "stop": "tool"}, {"toolCalls": [{"name": "echo", "arguments": "[1]"}], "stop": "tool"}, {"text": "done", "stop": "end"}],
+     "expect": {"turns": 3, "text": "done", "recoveries": ["CORRECTIVE"], "toolRuns": [{}]}},
+    {"name": "off_malformed", "stopRecovery": false,
+     "responses": [{"toolCalls": [{"name": "echo", "arguments": "{bad"}], "stop": "tool"}, {"text": "done", "stop": "end"}],
+     "expect": {"turns": 2, "text": "done", "recoveries": [], "toolRuns": [{}]}},
+    {"name": "last_turn_no_recovery", "stopRecovery": true, "maxTurns": 1,
+     "responses": [{"text": "", "stop": "end"}],
+     "expect": {"turns": 1, "text": "", "recoveries": [], "toolRuns": []}},
+    {"name": "carry_resets_on_tools", "stopRecovery": true,
+     "responses": [{"text": "A", "stop": "truncated"}, {"text": "", "toolCalls": [{"name": "echo", "arguments": "{}"}], "stop": "tool"}, {"text": "C", "stop": "end"}],
+     "expect": {"turns": 3, "text": "C", "recoveries": ["CONTINUE"], "toolRuns": [{}]}}
+  ]
+}

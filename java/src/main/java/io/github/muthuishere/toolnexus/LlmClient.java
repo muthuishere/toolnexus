@@ -109,6 +109,10 @@ public final class LlmClient {
         public Map<String, String> headers;
         public String systemPrompt;
         public Integer maxTurns;       // default 10
+        /** SPEC §8 "Stop-reason recovery" (default false): answer a malformed tool call with a
+         * corrective message (once), a truncated reply (length/max_tokens) with a continue message
+         * (up to 3 times, text joined) and an empty answer with a nudge (once). Off ⇒ unchanged. */
+        public boolean stopRecovery;
         /** Cap on concurrency-safe tool calls of one response running at once (SPEC §8 "Tool
          * scheduling"). null ⇒ env {@code TOOLNEXUS_MAX_TOOL_CONCURRENCY} when a positive
          * integer, else 10. Unsafe calls (anything not read-only) always run alone. */
@@ -200,6 +204,7 @@ public final class LlmClient {
         public Options headers(Map<String, String> v) { this.headers = v; return this; }
         public Options systemPrompt(String v) { this.systemPrompt = v; return this; }
         public Options maxTurns(int v) { this.maxTurns = v; return this; }
+        public Options stopRecovery(boolean v) { this.stopRecovery = v; return this; }
         public Options maxToolConcurrency(int v) { this.maxToolConcurrency = v; return this; }
         public Options hooks(Hooks v) { this.hooks = v; return this; }
         public Options retries(int v) { this.retries = v; return this; }
@@ -2296,6 +2301,7 @@ public final class LlmClient {
         int turns = 0;
         long runStart = System.currentTimeMillis();
         String[] lastModel = {opts.model}; // §8: the model of the last model call (reported)
+        StopRecovery rec = new StopRecovery(opts.stopRecovery);
         // §8A: tool message -> the synthetic user message spliced in after it on the wire only.
         java.util.IdentityHashMap<Object, Object> relocated = new java.util.IdentityHashMap<>();
 
@@ -2339,11 +2345,25 @@ public final class LlmClient {
                         (Map<String, Object>) ((Map<String, Object>) choices.get(0)).get("message");
                 messages.add(message);
                 List<Object> calls = (List<Object>) message.get("tool_calls");
+                boolean malformed = false;
+                if (calls != null) for (Object c : calls) {
+                    Map<String, Object> fn = (Map<String, Object>) ((Map<String, Object>) c).get("function");
+                    if (fn != null && fn.get("arguments") != null) malformed |= StopRecovery.malformedArgs(String.valueOf(fn.get("arguments")));
+                }
+                Object msgContent = message.get("content");
+                String msgText = msgContent == null ? "" : String.valueOf(msgContent);
+                String nudge = rec.decide(turn == maxTurns() - 1, calls != null && !calls.isEmpty(), malformed,
+                        "length".equals(((Map<String, Object>) choices.get(0)).get("finish_reason")), msgText);
+                if (nudge != null) {
+                    if (rec.dropped) messages.remove(messages.size() - 1);
+                    messages.add(msg("user", nudge));
+                    continue;
+                }
                 if (calls == null || calls.isEmpty()) {
-                    Object content = message.get("content");
-                    return endRun(lastModel[0], runStart, content == null ? "" : String.valueOf(content),
+                    return endRun(lastModel[0], runStart, rec.carry + msgText,
                             messages, toolCalls, turns, usage);
                 }
+                rec.carry = "";
 
                 // Execute all tool calls in this turn concurrently (true parallel tool calling).
                 int n = calls.size();
@@ -2434,6 +2454,7 @@ public final class LlmClient {
         int turns = 0;
         long runStart = System.currentTimeMillis();
         String[] lastModel = {opts.model}; // §8: the model of the last model call (reported)
+        StopRecovery rec = new StopRecovery(opts.stopRecovery);
 
         // One virtual-thread executor for the whole run; tool calls in a turn run on it.
         ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
@@ -2477,18 +2498,32 @@ public final class LlmClient {
                 messages.add(assistant);
 
                 List<Map<String, Object>> uses = new ArrayList<>();
+                boolean malformed = false;
+                StringBuilder text = new StringBuilder();
                 for (Object b : content) {
                     Map<String, Object> block = (Map<String, Object>) b;
-                    if ("tool_use".equals(block.get("type"))) uses.add(block);
+                    if ("tool_use".equals(block.get("type"))) {
+                        Object in = block.get("input");
+                        if (in != null && !(in instanceof Map)) {
+                            // §8: input that is not an object is malformed; if it runs, it runs as {}.
+                            malformed = true;
+                            block.put("input", new LinkedHashMap<String, Object>());
+                        }
+                        uses.add(block);
+                    }
+                    if ("text".equals(block.get("type"))) text.append(String.valueOf(block.get("text")));
+                }
+                String nudge = rec.decide(turn == maxTurns() - 1, !uses.isEmpty(), malformed,
+                        "max_tokens".equals(data.get("stop_reason")), text.toString());
+                if (nudge != null) {
+                    if (rec.dropped) messages.remove(messages.size() - 1);
+                    messages.add(msg("user", nudge));
+                    continue;
                 }
                 if (uses.isEmpty()) {
-                    StringBuilder text = new StringBuilder();
-                    for (Object b : content) {
-                        Map<String, Object> block = (Map<String, Object>) b;
-                        if ("text".equals(block.get("type"))) text.append(String.valueOf(block.get("text")));
-                    }
-                    return endRun(lastModel[0], runStart, text.toString(), messages, toolCalls, turns, usage);
+                    return endRun(lastModel[0], runStart, rec.carry + text, messages, toolCalls, turns, usage);
                 }
+                rec.carry = "";
 
                 // Execute all tool_use blocks in this turn concurrently (true parallel tool calling).
                 int n = uses.size();
@@ -2580,6 +2615,7 @@ public final class LlmClient {
         int turns = 0;
         long runStart = System.currentTimeMillis();
         String[] lastModel = {opts.model}; // §8: the model of the last model call (reported)
+        StopRecovery rec = new StopRecovery(opts.stopRecovery);
         // §8A: tool message -> the synthetic user message spliced in after it on the wire only.
         java.util.IdentityHashMap<Object, Object> relocated = new java.util.IdentityHashMap<>();
 
@@ -2624,6 +2660,7 @@ public final class LlmClient {
                 StringBuilder content = new StringBuilder();
                 // index -> accumulated tool call (id/name/args assembled across deltas).
                 Map<Integer, String[]> acc = new LinkedHashMap<>(); // [id, name, args]
+                String[] finish = {""};
                 List<Integer> order = new ArrayList<>();
                 try {
                     // The JDK HttpClient streams the SSE response as lines — ideal for SSE.
@@ -2644,6 +2681,7 @@ public final class LlmClient {
                             addUsage(usage, (Map<String, Object>) j.get("usage"), "openai");
                             List<Object> choices = (List<Object>) j.get("choices");
                             if (choices == null || choices.isEmpty()) continue;
+                            if (((Map<String, Object>) choices.get(0)).get("finish_reason") instanceof String fr && !fr.isEmpty()) finish[0] = fr;
                             Map<String, Object> delta = (Map<String, Object>) ((Map<String, Object>) choices.get(0)).get("delta");
                             if (delta == null) continue;
                             Object dc = delta.get("content");
@@ -2681,14 +2719,24 @@ public final class LlmClient {
                     opts.hooks.afterLLM.accept(new AfterLLMEvent(resp, turnModel, turn));
                 }
 
+                boolean malformed = false;
+                for (int index : order) malformed |= StopRecovery.malformedArgs(acc.get(index)[2]);
+                String nudge = rec.decide(turn == maxTurns() - 1, !order.isEmpty(), malformed,
+                        "length".equals(finish[0]), content.toString());
+                if (nudge != null) {
+                    if (!rec.dropped) messages.add(msg("assistant", content.toString())); // only a truncated text reply is kept
+                    messages.add(msg("user", nudge));
+                    continue;
+                }
                 if (order.isEmpty()) {
                     messages.add(msg("assistant", content.toString()));
                     onEvent.accept(StreamEvent.usage(copyUsage(usage)));
-                    RunResult done = endRun(lastModel[0], runStart, content.toString(), messages, toolCalls, turns, usage);
+                    RunResult done = endRun(lastModel[0], runStart, rec.carry + content, messages, toolCalls, turns, usage);
                     onEvent.accept(StreamEvent.done(done));
                     return done;
                 }
 
+                rec.carry = "";
                 // Append the assistant message carrying the assembled tool_calls.
                 List<Object> assembledCalls = new ArrayList<>();
                 for (int index : order) {
@@ -2794,6 +2842,7 @@ public final class LlmClient {
         int turns = 0;
         long runStart = System.currentTimeMillis();
         String[] lastModel = {opts.model}; // §8: the model of the last model call (reported)
+        StopRecovery rec = new StopRecovery(opts.stopRecovery);
 
         ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
         try {
@@ -2894,9 +2943,11 @@ public final class LlmClient {
                 // Build the assistant content blocks from what we assembled.
                 List<Object> content = new ArrayList<>();
                 List<Map<String, Object>> uses = new ArrayList<>();
+                boolean malformed = false;
                 for (int index : order) {
                     Map<String, Object> b = blocks.get(index);
                     if ("tool_use".equals(b.get("type"))) {
+                        malformed |= StopRecovery.malformedArgs(b.get("json").toString());
                         Map<String, Object> tu = new LinkedHashMap<>();
                         tu.put("type", "tool_use");
                         tu.put("id", b.get("id"));
@@ -2917,18 +2968,26 @@ public final class LlmClient {
                 assistant.put("content", content);
                 messages.add(assistant);
 
+                StringBuilder text = new StringBuilder();
+                for (Object b : content) {
+                    Map<String, Object> blk = (Map<String, Object>) b;
+                    if ("text".equals(blk.get("type"))) text.append(String.valueOf(blk.get("text")));
+                }
+                String nudge = rec.decide(turn == maxTurns() - 1, !uses.isEmpty(), malformed,
+                        "max_tokens".equals(stopReason[0]), text.toString());
+                if (nudge != null) {
+                    if (rec.dropped) messages.remove(messages.size() - 1);
+                    messages.add(msg("user", nudge));
+                    continue;
+                }
                 if (!"tool_use".equals(stopReason[0]) || uses.isEmpty()) {
-                    StringBuilder text = new StringBuilder();
-                    for (Object b : content) {
-                        Map<String, Object> blk = (Map<String, Object>) b;
-                        if ("text".equals(blk.get("type"))) text.append(String.valueOf(blk.get("text")));
-                    }
                     onEvent.accept(StreamEvent.usage(copyUsage(usage)));
-                    RunResult done = endRun(lastModel[0], runStart, text.toString(), messages, toolCalls, turns, usage);
+                    RunResult done = endRun(lastModel[0], runStart, rec.carry + text, messages, toolCalls, turns, usage);
                     onEvent.accept(StreamEvent.done(done));
                     return done;
                 }
 
+                rec.carry = "";
                 int n = uses.size();
                 for (Map<String, Object> u : uses) {
                     onEvent.accept(callEvent(String.valueOf(u.get("id")), String.valueOf(u.get("name")),

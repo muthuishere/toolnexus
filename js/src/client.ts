@@ -42,6 +42,10 @@ export interface ClientOptions {
   headers?: Record<string, string>
   systemPrompt?: string
   maxTurns?: number
+  /** SPEC §8 "Stop-reason recovery". Default false. On, an empty answer is nudged once, a
+   * `length`/`max_tokens` cut is continued (up to 3 times, text carried) and malformed tool-call
+   * arguments get one corrective turn — each an ordinary turn, only while a turn remains. */
+  stopRecovery?: boolean
   /** Cap on concurrency-safe tool calls of one response running at once (SPEC §8 "Tool
    * scheduling"). Absent ⇒ env `TOOLNEXUS_MAX_TOOL_CONCURRENCY` when a positive integer, else 10.
    * Unsafe calls (anything not read-only) always run alone. */
@@ -1204,6 +1208,38 @@ export class Client {
     }
   }
 
+  /**
+   * §8 stop-reason recovery: classify the response just appended to `messages` and, when a rule
+   * fires, remove (or keep) that assistant message, append the pinned user message, and return
+   * true — the caller then takes another turn. Never on the last permitted turn.
+   */
+  private recover(rs: Recovery | undefined, turn: number, messages: any[], hasCalls: boolean, malformed: boolean, truncated: boolean, text: string): boolean {
+    if (!rs || turn >= (this.opts.maxTurns ?? 10) - 1) return false
+    let msg: string
+    if (hasCalls) {
+      if (!malformed || rs.corrected) return false
+      rs.corrected = true
+      messages.pop()
+      msg = CORRECTIVE
+    } else if (truncated) {
+      if (rs.continues >= 3) return false
+      rs.continues++
+      rs.carry += text
+      msg = CONTINUE
+    } else {
+      if (text.trim() !== "" || rs.nudged) return false
+      rs.nudged = true
+      messages.pop()
+      msg = NUDGE
+    }
+    messages.push({ role: "user", content: msg })
+    return true
+  }
+
+  private newRecovery(): Recovery | undefined {
+    return this.opts.stopRecovery ? { nudged: false, continues: 0, corrected: false, carry: "" } : undefined
+  }
+
   // ---- OpenAI-style: POST {baseUrl}/chat/completions ----
   private async runOpenAIWithSignal(signal: AbortSignal, prompt: PromptInput, toolkit: Toolkit | undefined, history?: any[], onInterrupt?: OnInterrupt): Promise<RunResult> {
     const key = resolveKey(this.opts)
@@ -1222,6 +1258,7 @@ export class Client {
     let lastModel = this.opts.model
     // Results finished in the current tool phase, by call id — what an interrupted save keeps.
     const done = new Map<string, ToolResult>()
+    const rs = this.newRecovery()
 
     try {
       for (let turn = 0; turn < (this.opts.maxTurns ?? 10); turn++) {
@@ -1244,7 +1281,10 @@ export class Client {
         const msg = data.choices[0].message
         messages.push(msg)
         const calls = msg.tool_calls ?? []
-        if (calls.length === 0) return this.endRun(runStart, lastModel, msg.content ?? "", messages, toolCalls, turns, usage)
+        if (this.recover(rs, turn, messages, calls.length > 0, calls.some((c: any) => malformedArgs(c.function?.arguments)),
+          data.choices[0].finish_reason === "length", typeof msg.content === "string" ? msg.content : "")) continue
+        if (calls.length === 0) return this.endRun(runStart, lastModel, (rs?.carry ?? "") + (msg.content ?? ""), messages, toolCalls, turns, usage)
+        if (rs) rs.carry = ""
         // execute all tool calls in this turn concurrently (true parallel tool calling)
         done.clear()
         const settled = await untilAborted(signal, this.schedule(toolkit,
@@ -1333,6 +1373,7 @@ export class Client {
     let lastModel = this.opts.model
     // Results finished in the current tool phase, by call id — what an interrupted save keeps.
     const done = new Map<string, ToolResult>()
+    const rs = this.newRecovery()
 
     try {
       for (let turn = 0; turn < (this.opts.maxTurns ?? 10); turn++) {
@@ -1359,15 +1400,16 @@ export class Client {
         if (this.opts.hooks?.afterLLM) await this.opts.hooks.afterLLM({ response: data, model: turnModel, turn })
         messages.push({ role: "assistant", content: data.content })
         const uses = (data.content ?? []).filter((b: any) => b.type === "tool_use")
-        if (uses.length === 0) {
-          const text = (data.content ?? []).filter((b: any) => b.type === "text").map((b: any) => b.text).join("")
-          return this.endRun(runStart, lastModel, text, messages, toolCalls, turns, usage)
-        }
+        const text = (data.content ?? []).filter((b: any) => b.type === "text").map((b: any) => b.text).join("")
+        if (this.recover(rs, turn, messages, uses.length > 0, uses.some((u: any) => u.input !== undefined && !isObj(u.input)),
+          data.stop_reason === "max_tokens", text)) continue
+        if (uses.length === 0) return this.endRun(runStart, lastModel, (rs?.carry ?? "") + text, messages, toolCalls, turns, usage)
+        if (rs) rs.carry = ""
         // execute all tool_use blocks in this turn concurrently (true parallel tool calling)
         done.clear()
         const settled = await untilAborted(signal, this.schedule(toolkit,
-          uses, (use: any) => [use.name, use.input ?? {}], async (use: any) => {
-            let { args, result } = await this.runTool(toolkit, use.name, use.input ?? {}, use.id, turn, signal)
+          uses, (use: any) => [use.name, objArgs(use.input)], async (use: any) => {
+            let { args, result } = await this.runTool(toolkit, use.name, objArgs(use.input), use.id, turn, signal)
             let halted: Request | undefined
             const req = pendingOf(result)
             if (req) {
@@ -1418,6 +1460,7 @@ export class Client {
     let lastModel = this.opts.model
     // Results finished in the current tool phase, by call id — what an interrupted save keeps.
     const done = new Map<string, ToolResult>()
+    const rs = this.newRecovery()
 
     try {
       for (let turn = 0; turn < (this.opts.maxTurns ?? 10); turn++) {
@@ -1433,6 +1476,7 @@ export class Client {
         const t0 = Date.now()
         const beforeP = usage.promptTokens, beforeC = usage.completionTokens
         let content = ""
+        let finish = ""
         const acc = new Map<number, { id: string; name: string; args: string }>()
         try {
           const res = yield* this.llmFetchEvents(`${this.opts.baseUrl.replace(/\/$/, "")}/chat/completions`, {
@@ -1456,6 +1500,7 @@ export class Client {
             if (j?.usage) addUsage(usage, j.usage, "openai")
             const choice = j?.choices?.[0]
             const d = choice?.delta
+            if (choice?.finish_reason) finish = choice.finish_reason
             if (d?.content) { content += d.content; yield { type: "text", delta: d.content } }
             for (const tc of d?.tool_calls ?? []) {
               const slot = acc.get(tc.index) ?? { id: "", name: "", args: "" }
@@ -1473,13 +1518,16 @@ export class Client {
         if (this.opts.hooks?.afterLLM) await this.opts.hooks.afterLLM({ response: { streamed: true, usage }, model: turnModel, turn })
 
         const calls = [...acc.values()]
+        messages.push(calls.length === 0
+          ? { role: "assistant", content }
+          : { role: "assistant", content: content || null, tool_calls: calls.map((c) => ({ id: c.id, type: "function", function: { name: c.name, arguments: c.args } })) })
+        if (this.recover(rs, turn, messages, calls.length > 0, calls.some((c) => malformedArgs(c.args)), finish === "length", content)) continue
         if (calls.length === 0) {
-          messages.push({ role: "assistant", content })
           yield { type: "usage", usage }
-          yield { type: "done", result: this.endRun(runStart, lastModel, content, messages, toolCalls, turns, usage) }
+          yield { type: "done", result: this.endRun(runStart, lastModel, (rs?.carry ?? "") + content, messages, toolCalls, turns, usage) }
           return
         }
-        messages.push({ role: "assistant", content: content || null, tool_calls: calls.map((c) => ({ id: c.id, type: "function", function: { name: c.name, arguments: c.args } })) })
+        if (rs) rs.carry = ""
         for (const c of calls) yield this.callEvent(c.id, c.name, safeJson(c.args))
         done.clear()
         const settled = await untilAborted(signal, this.schedule(toolkit, calls, (c) => [c.name, safeJson(c.args)], async (c) => {
@@ -1531,6 +1579,7 @@ export class Client {
     let lastModel = this.opts.model
     // Results finished in the current tool phase, by call id — what an interrupted save keeps.
     const done = new Map<string, ToolResult>()
+    const rs = this.newRecovery()
 
     try {
       for (let turn = 0; turn < (this.opts.maxTurns ?? 10); turn++) {
@@ -1576,12 +1625,16 @@ export class Client {
         const content = [...blocks.values()].map((b) => b.type === "tool_use" ? { type: "tool_use", id: b.id, name: b.name, input: safeJson(b.json || "{}") } : { type: "text", text: b.text })
         messages.push({ role: "assistant", content })
         const uses = content.filter((b: any) => b.type === "tool_use")
-        if (stopReason !== "tool_use" || uses.length === 0) {
-          const text = content.filter((b: any) => b.type === "text").map((b: any) => b.text).join("")
+        const hasCalls = stopReason === "tool_use" && uses.length > 0
+        const text = content.filter((b: any) => b.type === "text").map((b: any) => b.text).join("")
+        if (this.recover(rs, turn, messages, hasCalls, [...blocks.values()].some((b) => b.type === "tool_use" && malformedArgs(b.json)),
+          stopReason === "max_tokens", text)) continue
+        if (!hasCalls) {
           yield { type: "usage", usage }
-          yield { type: "done", result: this.endRun(runStart, lastModel, text, messages, toolCalls, turns, usage) }
+          yield { type: "done", result: this.endRun(runStart, lastModel, (rs?.carry ?? "") + text, messages, toolCalls, turns, usage) }
           return
         }
+        if (rs) rs.carry = ""
         for (const u of uses as any[]) yield this.callEvent(u.id, u.name, u.input)
         done.clear()
         const settled = await untilAborted(signal, this.schedule(toolkit, uses as any[], (u: any) => [u.name, u.input ?? {}], async (u: any) => {
@@ -1903,12 +1956,29 @@ function safeParse(s: string): any {
   }
 }
 
+const NUDGE = "Your previous response contained no answer. Continue and give your answer."
+const CONTINUE = "Your previous response was cut off at the output token limit. Continue exactly where it stopped, without repeating anything."
+const CORRECTIVE = "Your previous tool call could not be used: its arguments were not a valid JSON object. Call the tool again with arguments that are a single valid JSON object matching its input schema."
+
+/** Per-run budgets + carried text of §8 stop-reason recovery. */
+interface Recovery { nudged: boolean; continues: number; corrected: boolean; carry: string }
+
+function isObj(v: unknown): boolean {
+  return typeof v === "object" && v !== null && !Array.isArray(v)
+}
+
+/** A raw argument string that is non-empty (trimmed) and not a JSON object (§8). */
+function malformedArgs(s: unknown): boolean {
+  return typeof s === "string" && s.trim() !== "" && !isObj(safeParse(s))
+}
+
+/** Tool-call arguments as an object: anything that is not a JSON object becomes `{}` (§8). */
 function safeJson(s: string): Record<string, unknown> {
-  try {
-    return JSON.parse(s || "{}")
-  } catch {
-    return {}
-  }
+  return objArgs(safeParse(s || "{}"))
+}
+
+function objArgs(v: unknown): Record<string, unknown> {
+  return isObj(v) ? (v as Record<string, unknown>) : {}
 }
 
 /**

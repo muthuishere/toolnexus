@@ -305,6 +305,7 @@ defmodule Toolnexus.Client do
             headers: %{},
             system_prompt: nil,
             max_turns: 10,
+            stop_recovery: false,
             max_tool_concurrency: nil,
             hooks: %{},
             retries: 2,
@@ -343,6 +344,9 @@ defmodule Toolnexus.Client do
     belong to (SPEC §4C). Never logged.
   - `:system_prompt` — prepended to the toolkit's skills prompt (joined with `"\\n\\n"`)
   - `:max_turns` (default 10)
+  - `:stop_recovery` (default `false`) — SPEC §8 "Stop-reason recovery": a malformed tool call
+    gets a corrective message (once), a truncated reply (`length`/`max_tokens`) a continue
+    message (up to 3, text joined), an empty answer a nudge (once). Off ⇒ loop unchanged
   - `:max_tool_concurrency` — cap on concurrency-safe tool calls of one response running at
     once (SPEC §8 "Tool scheduling"). Absent ⇒ env `TOOLNEXUS_MAX_TOOL_CONCURRENCY` when a
     positive integer, else 10. Unsafe calls (anything not read-only) always run alone.
@@ -2222,7 +2226,8 @@ defmodule Toolnexus.Client do
       tool_calls: [],
       usage: zero_usage(),
       turns: 0,
-      model: client.model
+      model: client.model,
+      rec: new_recovery()
     }
 
     loop_openai(client, toolkit, key, run_start, st, 0)
@@ -2265,22 +2270,37 @@ defmodule Toolnexus.Client do
 
     st = %{st | usage: add_usage(st.usage, data["usage"], client.style)}
     after_llm(client, data, turn, tmodel)
-    msg = data["choices"] |> List.first() |> Map.get("message")
+    choice = data["choices"] |> List.first()
+    msg = Map.get(choice, "message")
     st = %{st | messages: st.messages ++ [msg]}
     TurnGuard.checkpoint(st.messages)
     calls = msg["tool_calls"] || []
+    malformed = Enum.any?(calls, &malformed_args?(&1["function"]["arguments"]))
+    truncated = choice["finish_reason"] == "length"
 
+    case recover(client, st, turn, calls != [], malformed, truncated, msg["content"] || "") do
+      {:recover, st} ->
+        loop_openai(client, toolkit, key, run_start, st, turn + 1)
+
+      {:proceed, st} ->
+        loop_openai_tail(client, toolkit, key, run_start, st, turn, msg, calls)
+    end
+  end
+
+  defp loop_openai_tail(client, toolkit, key, run_start, st, turn, msg, calls) do
     if calls == [] do
       end_run(
         rc(client, st),
         run_start,
-        msg["content"] || "",
+        st.rec.carry <> (msg["content"] || ""),
         st.messages,
         st.tool_calls,
         st.turns,
         st.usage
       )
     else
+      st = reset_carry(st)
+
       call_specs =
         Enum.map(calls, fn call ->
           {call["id"], call["function"]["name"], safe_json(call["function"]["arguments"])}
@@ -2340,7 +2360,8 @@ defmodule Toolnexus.Client do
       tool_calls: [],
       usage: zero_usage(),
       turns: 0,
-      model: client.model
+      model: client.model,
+      rec: new_recovery()
     }
 
     loop_anthropic(client, toolkit, key, sys, run_start, st, 0)
@@ -2382,16 +2403,34 @@ defmodule Toolnexus.Client do
 
     st = %{st | usage: add_usage(st.usage, data["usage"], client.style)}
     after_llm(client, data, turn, tmodel)
-    content = data["content"] || []
+    raw_content = data["content"] || []
+    content = Enum.map(raw_content, &normalize_use/1)
     st = %{st | messages: st.messages ++ [%{"role" => "assistant", "content" => content}]}
     TurnGuard.checkpoint(st.messages)
     uses = Enum.filter(content, &(&1["type"] == "tool_use"))
+    text = content |> Enum.filter(&(&1["type"] == "text")) |> Enum.map_join("", & &1["text"])
 
+    malformed =
+      Enum.any?(raw_content, &(&1["type"] == "tool_use" and malformed_input?(&1["input"])))
+
+    truncated = data["stop_reason"] == "max_tokens"
+
+    case recover(client, st, turn, uses != [], malformed, truncated, text) do
+      {:recover, st} ->
+        loop_anthropic(client, toolkit, key, sys, run_start, st, turn + 1)
+
+      {:proceed, st} ->
+        loop_anthropic_tail(client, toolkit, key, sys, run_start, st, turn, uses, text)
+    end
+  end
+
+  defp loop_anthropic_tail(client, toolkit, key, sys, run_start, st, turn, uses, text) do
     if uses == [] do
-      text = content |> Enum.filter(&(&1["type"] == "text")) |> Enum.map_join("", & &1["text"])
+      text = st.rec.carry <> text
       end_run(rc(client, st), run_start, text, st.messages, st.tool_calls, st.turns, st.usage)
     else
-      call_specs = Enum.map(uses, fn use -> {use["id"], use["name"], use["input"] || %{}} end)
+      st = reset_carry(st)
+      call_specs = Enum.map(uses, fn use -> {use["id"], use["name"], use["input"]} end)
       settled = exec_calls(client, toolkit, call_specs, turn)
 
       # Record in tool-call order; on the FIRST durable halt include that tool_result block,
@@ -2487,7 +2526,8 @@ defmodule Toolnexus.Client do
       tool_calls: [],
       usage: zero_usage(),
       turns: 0,
-      model: client.model
+      model: client.model,
+      rec: new_recovery()
     }
 
     stream_loop_openai(client, toolkit, key, run_start, st, 0, emit)
@@ -2519,7 +2559,7 @@ defmodule Toolnexus.Client do
     t0 = now_ms()
     %{prompt_tokens: before_p, completion_tokens: before_c} = st.usage
 
-    {content, calls, usage} =
+    {content, calls, usage, finish} =
       try do
         sse =
           llm_call_sse(
@@ -2558,6 +2598,20 @@ defmodule Toolnexus.Client do
 
     after_llm(client, %{streamed: true, usage: usage}, turn, tmodel)
 
+    malformed = Enum.any?(calls, &malformed_args?(&1.args))
+    probe = %{st | messages: st.messages ++ [%{"role" => "assistant", "content" => content}]}
+
+    case recover(client, probe, turn, calls != [], malformed, finish == "length", content) do
+      {:recover, st} ->
+        stream_loop_openai(client, toolkit, key, run_start, st, turn + 1, emit)
+
+      {:proceed, probe} ->
+        st = %{st | rec: probe.rec}
+        stream_openai_tail(client, toolkit, key, run_start, st, turn, emit, content, calls)
+    end
+  end
+
+  defp stream_openai_tail(client, toolkit, key, run_start, st, turn, emit, content, calls) do
     if calls == [] do
       st = %{st | messages: st.messages ++ [%{"role" => "assistant", "content" => content}]}
       emit.(%{type: "usage", usage: st.usage})
@@ -2568,7 +2622,7 @@ defmodule Toolnexus.Client do
           end_run(
             rc(client, st),
             run_start,
-            content,
+            st.rec.carry <> content,
             st.messages,
             st.tool_calls,
             st.turns,
@@ -2576,6 +2630,8 @@ defmodule Toolnexus.Client do
           )
       })
     else
+      st = reset_carry(st)
+
       assistant = %{
         "role" => "assistant",
         "content" => if(content == "", do: nil, else: content),
@@ -2671,7 +2727,7 @@ defmodule Toolnexus.Client do
   end
 
   defp parse_openai_sse(body, usage, emit) do
-    acc0 = %{content: "", slots: %{}, order: [], usage: usage}
+    acc0 = %{content: "", slots: %{}, order: [], usage: usage, finish: nil}
 
     lines =
       case body do
@@ -2709,14 +2765,21 @@ defmodule Toolnexus.Client do
       end)
 
     calls = Enum.map(acc.order, &acc.slots[&1])
-    {acc.content, calls, acc.usage}
+    {acc.content, calls, acc.usage, acc.finish}
   end
 
   defp apply_openai_chunk(acc, nil, _emit), do: acc
 
   defp apply_openai_chunk(acc, j, emit) do
     acc = if j["usage"], do: %{acc | usage: add_usage(acc.usage, j["usage"], "openai")}, else: acc
-    delta = j["choices"] |> List.wrap() |> List.first() |> then(&(&1 && &1["delta"]))
+    choice = j["choices"] |> List.wrap() |> List.first()
+    delta = choice && choice["delta"]
+
+    acc =
+      case choice && choice["finish_reason"] do
+        fr when is_binary(fr) and fr != "" -> %{acc | finish: fr}
+        _ -> acc
+      end
 
     acc =
       case delta && delta["content"] do
@@ -2760,7 +2823,8 @@ defmodule Toolnexus.Client do
       tool_calls: [],
       usage: zero_usage(),
       turns: 0,
-      model: client.model
+      model: client.model,
+      rec: new_recovery()
     }
 
     stream_loop_anthropic(client, toolkit, key, sys, run_start, st, 0, emit)
@@ -2848,9 +2912,25 @@ defmodule Toolnexus.Client do
     st = %{st | messages: st.messages ++ [%{"role" => "assistant", "content" => content}]}
     TurnGuard.checkpoint(st.messages)
     uses = Enum.filter(content, &(&1["type"] == "tool_use"))
+    text = content |> Enum.filter(&(&1["type"] == "text")) |> Enum.map_join("", & &1["text"])
+    malformed = Enum.any?(blocks, &(&1.type == "tool_use" and malformed_args?(&1.json)))
+    truncated = stop_reason == "max_tokens"
+
+    case recover(client, st, turn, uses != [], malformed, truncated, text) do
+      {:recover, st} ->
+        stream_loop_anthropic(client, toolkit, key, sys, run_start, st, turn + 1, emit)
+
+      {:proceed, st} ->
+        tail = {uses, text, stop_reason}
+        stream_anthropic_tail(client, toolkit, key, sys, run_start, st, turn, emit, tail)
+    end
+  end
+
+  defp stream_anthropic_tail(client, toolkit, key, sys, run_start, st, turn, emit, tail) do
+    {uses, text, stop_reason} = tail
 
     if stop_reason != "tool_use" or uses == [] do
-      text = content |> Enum.filter(&(&1["type"] == "text")) |> Enum.map_join("", & &1["text"])
+      text = st.rec.carry <> text
       emit.(%{type: "usage", usage: st.usage})
 
       emit.(%{
@@ -2859,6 +2939,8 @@ defmodule Toolnexus.Client do
           end_run(rc(client, st), run_start, text, st.messages, st.tool_calls, st.turns, st.usage)
       })
     else
+      st = reset_carry(st)
+
       Enum.each(uses, fn u ->
         emit.(tool_event(client, %{type: "tool_call", id: u["id"]}, u["name"], u["input"]))
       end)
@@ -3030,6 +3112,76 @@ defmodule Toolnexus.Client do
       _ -> %{}
     end
   end
+
+  # ---- stop-reason recovery (SPEC §8, opt-in `:stop_recovery`) ----
+
+  @stop_nudge "Your previous response contained no answer. Continue and give your answer."
+  @stop_continue "Your previous response was cut off at the output token limit. Continue exactly where it stopped, without repeating anything."
+  @stop_corrective "Your previous tool call could not be used: its arguments were not a valid JSON object. Call the tool again with arguments that are a single valid JSON object matching its input schema."
+
+  @doc false
+  def stop_recovery_messages,
+    do: %{nudge: @stop_nudge, continue: @stop_continue, corrective: @stop_corrective}
+
+  defp new_recovery, do: %{correct: 0, cont: 0, nudges: 0, carry: ""}
+
+  defp reset_carry(st), do: %{st | rec: %{st.rec | carry: ""}}
+
+  # `st.messages` ends with the assembled assistant message. Returns `{:recover, st}` with the
+  # pinned user message appended (assistant dropped for corrective/nudge), or `{:proceed, st}`.
+  defp recover(client, st, turn, has_calls, malformed, truncated, text) do
+    rec = st.rec
+
+    decision =
+      cond do
+        not client.stop_recovery or turn >= client.max_turns - 1 ->
+          nil
+
+        has_calls and malformed and rec.correct < 1 ->
+          {@stop_corrective, true, %{rec | correct: 1}}
+
+        not has_calls and truncated and rec.cont < 3 ->
+          {@stop_continue, false, %{rec | cont: rec.cont + 1, carry: rec.carry <> text}}
+
+        not has_calls and not truncated and String.trim(text) == "" and rec.nudges < 1 ->
+          {@stop_nudge, true, %{rec | nudges: 1}}
+
+        true ->
+          nil
+      end
+
+    case decision do
+      nil ->
+        {:proceed, st}
+
+      {msg, drop, rec} ->
+        messages = if drop, do: Enum.drop(st.messages, -1), else: st.messages
+
+        {:recover,
+         %{st | rec: rec, messages: messages ++ [%{"role" => "user", "content" => msg}]}}
+    end
+  end
+
+  # A raw arguments string is malformed when non-blank and not a JSON object.
+  defp malformed_args?(nil), do: false
+  defp malformed_args?(raw) when is_map(raw), do: false
+
+  defp malformed_args?(raw) when is_binary(raw) do
+    t = String.trim(raw)
+    t != "" and not match?({:ok, %{}}, Jason.decode(t))
+  end
+
+  defp malformed_args?(_), do: true
+
+  defp malformed_input?(nil), do: false
+  defp malformed_input?(in_) when is_map(in_), do: false
+  defp malformed_input?(_), do: true
+
+  # A tool_use whose input is not an object runs with (and is recorded as) `{}`.
+  defp normalize_use(%{"type" => "tool_use"} = b),
+    do: Map.put(b, "input", if(is_map(b["input"]), do: b["input"], else: %{}))
+
+  defp normalize_use(b), do: b
 
   defp last_text(messages) do
     messages
