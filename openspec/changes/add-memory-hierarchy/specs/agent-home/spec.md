@@ -47,12 +47,10 @@ injection view.
 - **THEN** the file on disk is the original 3 MB plus the new entry
 
 ### Requirement: Built-in dreaming
-The library SHALL provide `dreamOnce(dir, opts)` (one dream pass, returns a `DreamReport`) and
-`startDreaming(dir, opts)` (the same pass on a §7E heartbeat via `startAgent`, `everyMs`
-required). Both SHALL build the dreamer from a library-owned prompt that is byte-identical in
-every port, with only the `memory` tool (notes enabled) and `transcriptSearchTool(opts.store)`,
-and SHALL require no `HEARTBEAT.md` or other file from the user. Every pass SHALL append one
-entry to `memory/log.md` when it changed anything.
+The library SHALL provide `dreamOnce(dir, opts)` (one pass, returns a `DreamReport`) and
+`startDreaming(dir, opts)` (the same pass on a §7E heartbeat). The dreamer SHALL use a
+library-owned prompt identical in every port, only the `memory` and `transcript_search` tools,
+need no user-written file, and append one `memory/log.md` entry per pass that changed anything.
 
 #### Scenario: One pass with no user-written files
 - **WHEN** `dreamOnce(dir, { client, store })` runs on a home holding only `MEMORY.md`, and the scripted model fixes one contradicted line
