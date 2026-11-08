@@ -6,7 +6,7 @@
 
 ## 2. Ports (method + fake agent `session/set_mode` + `TN_FAKE_REJECT_MODE` + liveSwitch test)
 
-- [ ] 2.1 js — `setMode` / `setModel`
+- [x] 2.1 js — `setMode` / `setModel`
 - [ ] 2.2 python — `set_mode` / `set_model`
 - [ ] 2.3 golang — `SetMode(ctx, mode)` / `SetModel(ctx, model)`
 - [ ] 2.4 java — `setMode` / `setModel`

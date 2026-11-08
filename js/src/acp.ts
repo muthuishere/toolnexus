@@ -108,6 +108,12 @@ export interface ACPClient {
     emit: (event: StreamEvent) => void,
     opts?: ACPGenerateOptions,
   ) => Promise<InProcessResponse>
+  /** Sends `session/set_mode {sessionId, modeId}` on the running session (no restart). The
+   *  agent's error rejects this call only; the client stays usable. */
+  setMode: (mode: string) => Promise<void>
+  /** Changes the model on the running session exactly as the `model` option does:
+   *  `session/set_config_option {configId:"model"}`, then `session/set_model`; both failing rejects. */
+  setModel: (model: string) => Promise<void>
   /** Terminates the agent's process group. Idempotent — a second call is a no-op. */
   close: () => Promise<void>
   /** The agent's raw `initialize` result. */
@@ -366,20 +372,21 @@ export async function loadACP(opts: ACPOptions): Promise<ACPClient> {
   if (opts.mode) {
     await step("session/set_mode", () => call("session/set_mode", { sessionId, modeId: opts.mode }))
   }
-  if (opts.model) {
-    // Passed through unchanged. Stable ACP spelling first, then the older session/set_model.
-    const model = opts.model
-    await step(`set model ${JSON.stringify(model)}`, async () => {
+  // Passed through unchanged. Stable ACP spelling first, then the older session/set_model.
+  const sendModel = async (model: string): Promise<void> => {
+    try {
+      await call("session/set_config_option", { sessionId, configId: "model", value: model })
+    } catch (e1) {
       try {
-        await call("session/set_config_option", { sessionId, configId: "model", value: model })
-      } catch (e1) {
-        try {
-          await call("session/set_model", { sessionId, modelId: model })
-        } catch (e2) {
-          throw new Error(`${(e1 as Error).message}; ${(e2 as Error).message}`)
-        }
+        await call("session/set_model", { sessionId, modelId: model })
+      } catch (e2) {
+        throw new Error(`${(e1 as Error).message}; ${(e2 as Error).message}`)
       }
-    })
+    }
+  }
+  if (opts.model) {
+    const model = opts.model
+    await step(`set model ${JSON.stringify(model)}`, () => sendModel(model))
   }
 
   // Serialises turns: one ACP session is one conversation, so concurrent
@@ -533,7 +540,20 @@ export async function loadACP(opts: ACPOptions): Promise<ACPClient> {
   const generate = (request: InProcessRequest, callOpts?: ACPGenerateOptions): Promise<InProcessResponse> =>
     generateStream(request, undefined, callOpts)
 
-  const client: ACPClient = { generate, generateStream, close, initializeResult }
+  // SPEC §8C (#197): sent at once on the running session — no restart, not queued behind a turn.
+  const liveCall = async (label: string, fn: () => Promise<unknown>): Promise<void> => {
+    if (closed) throw new Error("toolnexus: ACP client is closed")
+    try {
+      await fn()
+    } catch (e) {
+      throw new Error(`toolnexus: acp: ${label}: ${e instanceof Error ? e.message : String(e)}`)
+    }
+  }
+  const setMode = (mode: string) =>
+    liveCall("session/set_mode", () => call("session/set_mode", { sessionId, modeId: mode }))
+  const setModel = (model: string) => liveCall(`set model ${JSON.stringify(model)}`, () => sendModel(model))
+
+  const client: ACPClient = { generate, generateStream, setMode, setModel, close, initializeResult }
   // Non-enumerable, undocumented — internal test hook only, so the public
   // ACPClient surface stays exactly {generate, generateStream, close}.
   Object.defineProperty(client, "_pid", { value: child.pid, enumerable: false })
