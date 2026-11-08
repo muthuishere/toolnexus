@@ -1324,12 +1324,12 @@ func TestMediaConformanceCLIVerbs(t *testing.T) {
 	}
 	var f struct {
 		VerbCases []struct {
-			Name          string
-			Styles        []json.RawMessage
-			ExpectVerbs   []string
-			ExpectTools   []string
-			Unsupported   string
-			Error         string
+			Name        string
+			Styles      []json.RawMessage
+			ExpectVerbs []string
+			ExpectTools []string
+			Unsupported string
+			Error       string
 		}
 	}
 	if err := json.Unmarshal(b, &f); err != nil {

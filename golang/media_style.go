@@ -182,8 +182,8 @@ type brokenStyle struct {
 	err  error
 }
 
-func (b brokenStyle) Name() string        { return b.name }
-func (brokenStyle) Supports(string) bool  { return false }
+func (b brokenStyle) Name() string       { return b.name }
+func (brokenStyle) Supports(string) bool { return false }
 func (b brokenStyle) Image(context.Context, map[string]any, MediaCall) (MediaResult, error) {
 	return MediaResult{}, b.err
 }
