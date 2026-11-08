@@ -320,6 +320,23 @@ export interface Hooks {
   beforeTool?(ev: { name: string; args: Record<string, unknown>; id?: string; turn: number; hints?: ToolHints }): void | { args?: Record<string, unknown>; result?: ToolResult } | Promise<void | { args?: Record<string, unknown>; result?: ToolResult }>
   /** After a tool runs. Return { result } to replace the result. */
   afterTool?(ev: { name: string; args: Record<string, unknown>; result: ToolResult; id?: string; turn: number }): void | { result?: ToolResult } | Promise<void | { result?: ToolResult }>
+  /** At each round boundary (SPEC §8, #192): after a round's tool results (final=false), or when the
+   * model stopped with a turn remaining (final=true, text = its answer). Each `inject` string is
+   * appended as a user message; a non-empty inject on a final round CONTINUES the loop. */
+  afterRound?(ev: AfterRoundEvent): void | RoundInjection | Promise<void | RoundInjection>
+}
+
+/** The `afterRound` hook event. */
+export interface AfterRoundEvent {
+  turn: number
+  final: boolean
+  text: string
+  messages: any[]
+}
+
+/** What an `afterRound` hook may return. */
+export interface RoundInjection {
+  inject?: string[]
 }
 
 /** A tool call the model made, plus its result + metadata. */
@@ -1215,7 +1232,10 @@ export class Client {
         const msg = data.choices[0].message
         messages.push(msg)
         const calls = msg.tool_calls ?? []
-        if (calls.length === 0) return this.endRun(runStart, lastModel, msg.content ?? "", messages, toolCalls, turns, usage)
+        if (calls.length === 0) {
+          if (await this.roundEnd(messages, turn, true, msg.content ?? "")) continue
+          return this.endRun(runStart, lastModel, msg.content ?? "", messages, toolCalls, turns, usage)
+        }
         // execute all tool calls in this turn concurrently (true parallel tool calling)
         done.clear()
         const settled = await untilAborted(signal, this.schedule(toolkit,
@@ -1240,6 +1260,7 @@ export class Client {
           messages.push(toolMessage(s.call.id, s.call.function.name, s.result))
           if (s.halted) return this.pendingRun(runStart, lastModel, s.halted, messages, toolCalls, turns, usage)
         }
+        await this.roundEnd(messages, turn, false, "")
       }
       return this.endRun(runStart, lastModel, lastText(messages), messages, toolCalls, turns, usage, true)
     } catch (e) {
@@ -1247,6 +1268,20 @@ export class Client {
       onInterrupt?.(interruptedTranscript(messages, this.opts.style === "anthropic", done))
       throw e
     }
+  }
+
+  /** §8 afterRound: fire the round-boundary hook and append its injections as user messages.
+   * Returns true when something was appended. A final round fires only when a turn remains. */
+  private async roundEnd(messages: any[], turn: number, final: boolean, text: string): Promise<boolean> {
+    const h = this.opts.hooks?.afterRound
+    if (!h) return false
+    if (final && turn + 1 >= (this.opts.maxTurns ?? 10)) return false
+    const out = await h({ turn, final, text, messages })
+    let added = false
+    for (const m of out?.inject ?? []) {
+      if (typeof m === "string" && m !== "") { messages.push({ role: "user", content: m }); added = true }
+    }
+    return added
   }
 
   private result(model: string, text: string, messages: any[], toolCalls: ToolCallRecord[], turns: number, usage: Usage, exhausted = false): RunResult {
@@ -1332,6 +1367,7 @@ export class Client {
         const uses = (data.content ?? []).filter((b: any) => b.type === "tool_use")
         if (uses.length === 0) {
           const text = (data.content ?? []).filter((b: any) => b.type === "text").map((b: any) => b.text).join("")
+          if (await this.roundEnd(messages, turn, true, text)) continue
           return this.endRun(runStart, lastModel, text, messages, toolCalls, turns, usage)
         }
         // execute all tool_use blocks in this turn concurrently (true parallel tool calling)
@@ -1362,6 +1398,7 @@ export class Client {
         }
         messages.push({ role: "user", content })
         if (halted) return this.pendingRun(runStart, lastModel, halted, messages, toolCalls, turns, usage)
+        await this.roundEnd(messages, turn, false, "")
       }
       return this.endRun(runStart, lastModel, "", messages, toolCalls, turns, usage, true)
     } catch (e) {
@@ -1446,6 +1483,7 @@ export class Client {
         const calls = [...acc.values()]
         if (calls.length === 0) {
           messages.push({ role: "assistant", content })
+          if (await this.roundEnd(messages, turn, true, content)) continue
           yield { type: "usage", usage }
           yield { type: "done", result: this.endRun(runStart, lastModel, content, messages, toolCalls, turns, usage) }
           return
@@ -1477,6 +1515,7 @@ export class Client {
           messages.push(toolMessage(c.id, c.name, result))
           yield this.resultEvent(c.id, c.name, safeJson(c.args), result)
         }
+        await this.roundEnd(messages, turn, false, "")
       }
       yield { type: "done", result: this.endRun(runStart, lastModel, lastText(messages), messages, toolCalls, turns, usage, true) }
     } catch (e) {
@@ -1549,6 +1588,7 @@ export class Client {
         const uses = content.filter((b: any) => b.type === "tool_use")
         if (stopReason !== "tool_use" || uses.length === 0) {
           const text = content.filter((b: any) => b.type === "text").map((b: any) => b.text).join("")
+          if (await this.roundEnd(messages, turn, true, text)) continue
           yield { type: "usage", usage }
           yield { type: "done", result: this.endRun(runStart, lastModel, text, messages, toolCalls, turns, usage) }
           return
@@ -1582,6 +1622,7 @@ export class Client {
           yield this.resultEvent(u.id, u.name, u.input, result)
         }
         messages.push({ role: "user", content: results })
+        await this.roundEnd(messages, turn, false, "")
       }
       yield { type: "done", result: this.endRun(runStart, lastModel, "", messages, toolCalls, turns, usage, true) }
     } catch (e) {
