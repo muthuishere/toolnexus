@@ -43,7 +43,7 @@ Everything lives outside the repo in `~/.marketing/toolnexus/`:
      is NOT (no graph orchestration, no hosted platform, no RAG/vector store — that's citenexus).
    - **Reddit:** one post per relevant sub, after checking the sub's self-promotion rules.
 5. **Never post without the owner's explicit go in this conversation.** Posting is outward-facing.
-   toolnexus is a personal (github.com/muthuishere) project: post from the owner's personal accounts only, never the Deemwar page or account. When the owner says go, post through the `chrome-agent` skill (it stages without `--confirm`;
+   toolnexus is a personal (github.com/muthuishere) project: post from the owner's personal accounts only, never the Deemwar page or account, and no draft may mention Deemwar or link deemwar.com. When the owner says go, post through the `chrome-agent` skill (it stages without `--confirm`;
    confirm only after the owner approves the staged post). Never hand-roll a browser.
 6. **Record it.** After each post: set the draft's header to `POSTED <url>`, append
    `date · channel · posted · URL` to `<version>/README.md`, and **add a row to
