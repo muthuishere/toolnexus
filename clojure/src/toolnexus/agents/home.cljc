@@ -437,12 +437,29 @@
    "\n"
    ["You are dreaming: an offline pass over your own memory. Memory exists so that a future session decides better. MEMORY.md is a short index loaded at the start of every session; notes (memory target \"note:<slug>\") hold the detail; the transcripts (transcript_search) are the ground truth of what actually happened."
     "Work in this order:"
-    "1. Verify: read MEMORY.md and the notes it points to (memory read, memory list) and check each claim against the transcripts. Fix a claim the transcripts contradict; remove one they no longer support."
+    "1. Verify: read MEMORY.md and the notes it points to (memory read, memory list) and check each claim against the transcripts. Fix or remove a claim only when it is contradicted by the transcripts; a claim they do not mention stays (transcripts may be pruned)."
     "2. Demote: move detail out of MEMORY.md into a note and leave a one-line [[slug]] pointer, so the index stays short."
     "3. Merge: fold duplicate or conflicting notes into one."
     "4. Repair links: point every [[slug]] at an existing note or create it; give every note an index line."
     "5. Log: if you changed anything, append exactly one entry with memory add, target \"note:log\", text starting \"dream: \" and naming every change and why."
     "If nothing needs changing, write nothing and reply HEARTBEAT_OK."]))
+
+;; The dream guard (§7E "Dreaming"): the dreamer's `memory` tool refuses every
+;; action on USER.md and replace/remove on note:log, before anything is read or
+;; written, so a dream never touches the user model and its log is append-only.
+(defn- dream-refusal [args]
+  (let [target (:target args) action (:action args)]
+    (cond
+      (= "user" target) "dreamer: USER.md is off-limits"
+      (and (= "note:log" target) (contains? #{"replace" "remove"} action))
+      "dreamer: memory/log.md is append-only")))
+
+(defn- dream-guard [mem]
+  (let [ex (:execute mem)]
+    (assoc mem :execute
+           (fn
+             ([args] (if-let [m (dream-refusal args)] (tool/failure m) (ex args)))
+             ([args ctx] (if-let [m (dream-refusal args)] (tool/failure m) (ex args ctx)))))))
 
 (defn dreamer
   "The built-in dreamer preset (§7E \"Dreaming\"): a plain AgentDef whose tools
@@ -470,7 +487,7 @@
      :does  (str "dreams over the memory in " dir)
      :soul  (str "## HEARTBEAT.md\n\n" (str/join "\n\n" parts))
      :model (or (:model opts) "inherit")
-     :tools [(memory-tool dir {:notes true}) search]}))
+     :tools [(dream-guard (memory-tool dir {:notes true})) search]}))
 
 ;; ---------------------------------------------------------------------------
 ;; The directory IS the agent (§7E)

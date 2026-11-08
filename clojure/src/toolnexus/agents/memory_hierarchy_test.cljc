@@ -357,6 +357,25 @@
 (deftest dream-prompt-is-byte-identical
   (is (= (:dreamPrompt (dream-fx)) home/dream-prompt)))
 
+(deftest d7-dream-guard-keeps-user-md-and-log-safe
+  (let [e (:D7_dreamGuard (:expect (dream-fx)))]
+    (with-home (:files e)
+      (fn [dir]
+        (let [mem (first (:tools (home/dreamer dir {:store (dream-store (dream-fx))})))]
+          (doseq [c (:cases e)]
+            (is (= {:output (:output c) :isError (:isError c)} (call mem (:args c))) (:name c)))
+          (let [t (tree dir)]
+            (is (= (sort (map kstr (keys (:files e)))) (sort (keys t))))
+            (doseq [[k v] (:filesAfter e)] (is (= v (get t (kstr k))) (kstr k))))
+          (let [p (:plainToolStillWrites e)]
+            (is (= {:output (:output p) :isError (:isError p)}
+                   (call (home/memory-tool dir {:notes true}) (:args p))))))))))
+
+(deftest d8-dream-prompt-removes-only-contradicted-claims
+  (let [e (:D8_promptKeepsUnmentionedClaims (:expect (dream-fx)))]
+    (is (str/includes? home/dream-prompt (:dreamPromptContains e)))
+    (is (not (str/includes? home/dream-prompt (:dreamPromptNotContains e))))))
+
 (deftest d1-mt-moon-build-gate
   (let [fx  (dream-fx)
         g   (:D1_mtMoonBuildGate (:expect fx))
