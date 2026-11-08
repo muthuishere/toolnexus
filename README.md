@@ -1,6 +1,6 @@
 # Toolnexus
 
-**The simplest agent library, and the fastest in most languages we've measured.** Build in the
+**Simpler than all. Faster than most. The complete agentic backbone.** Build in the
 language you're comfortable with: JavaScript, Python, Go, Java, C#, Elixir, Clojure or Rust, with the
 same behaviour in each. MCP servers, agent skills, your own functions and media generation, for any LLM.
 
