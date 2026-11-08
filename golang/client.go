@@ -453,7 +453,7 @@ type RunResult struct {
 // surface on a channel — see Stream.
 type StreamEvent struct {
 	// Type discriminates the event: "text" | "thought" | "tool_call" |
-	// "tool_result" | "usage" | "done" | "error". "thought" comes only from an
+	// "tool_result" | "usage" | "retry" | "done" | "error". "thought" comes only from an
 	// in-process stream source (ACP agent_thought_chunk, Via "acp") and is
 	// never part of the answer.
 	Type string
@@ -485,6 +485,15 @@ type StreamEvent struct {
 	Request *Request
 	// Err is the terminal error (Type == "error"); the channel closes right after.
 	Err error
+	// Attempt (1-based failed attempt), Max (the effective retry budget),
+	// DelayMs (the exact wait about to be slept), Status (HTTP status; 0 on a
+	// network error) and Reason ("HTTP <status>" | "network") describe a
+	// retry (Type == "retry"), emitted just before the wait.
+	Attempt int
+	Max     int
+	DelayMs int64
+	Status  int
+	Reason  string
 }
 
 // addUsage sums one response's usage object into acc. Numbers arrive from JSON
@@ -987,6 +996,18 @@ func retryAfterSeconds(v string) (time.Duration, bool) {
 	return time.Duration(secs) * time.Second, true
 }
 
+// shouldRetryHeader parses an x-should-retry value: trimmed "true"/"false"
+// (case-insensitive) overrides the default classification; anything else is ignored.
+func shouldRetryHeader(v string) (bool, bool) {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "true":
+		return true, true
+	case "false":
+		return false, true
+	}
+	return false, false
+}
+
 // backoff computes the exponential-backoff-with-jitter delay for an attempt, or
 // honors a Retry-After header (in whole seconds) when present.
 func (c *Client) backoff(attempt int, retryAfter string) time.Duration {
@@ -1002,7 +1023,12 @@ func (c *Client) backoff(attempt int, retryAfter string) time.Duration {
 // (429/500/502/503/504/529) plus network errors and anything RetryableStatuses added,
 // honoring Retry-After. ctx cancellation/timeout aborts the in-flight request
 // and is NOT retried. The caller owns resp.Body. Mirrors js Client.llmFetch.
-func (c *Client) llmFetch(ctx context.Context, endpoint string, headers map[string]string, raw []byte) (*http.Response, error) {
+//
+// onRetry (streaming only, nil elsewhere) receives a Type "retry" event just
+// before each retry wait, carrying the exact delay about to be slept (SPEC
+// § Resilience, "Retry event"). A non-ok response's x-should-retry header
+// (true/false) overrides the default retryable classification before OnError.
+func (c *Client) llmFetch(ctx context.Context, endpoint string, headers map[string]string, raw []byte, onRetry func(StreamEvent)) (*http.Response, error) {
 	retries := c.retries()
 	// Default classifier = today's behavior, expressed as an OnError. A TierRetry is
 	// always capped by the budget below (attempt == retries stops regardless).
@@ -1039,7 +1065,11 @@ func (c *Client) llmFetch(ctx context.Context, endpoint string, headers map[stri
 			if tier == TierFail || attempt == retries {
 				return nil, err
 			}
-			if werr := sleep(ctx, c.backoff(attempt, "")); werr != nil {
+			d := c.backoff(attempt, "")
+			if onRetry != nil {
+				onRetry(StreamEvent{Type: "retry", Attempt: attempt + 1, Max: retries, DelayMs: d.Milliseconds(), Reason: "network"})
+			}
+			if werr := sleep(ctx, d); werr != nil {
 				return nil, werr
 			}
 			continue
@@ -1048,13 +1078,20 @@ func (c *Client) llmFetch(ctx context.Context, endpoint string, headers map[stri
 			return resp, nil
 		}
 		retryable := isRetryableStatus(resp.StatusCode, c.opts.RetryableStatuses)
+		if v, ok := shouldRetryHeader(resp.Header.Get("X-Should-Retry")); ok {
+			retryable = v
+		}
 		tier := classify(ErrorInfo{Status: resp.StatusCode, Attempt: attempt, Retryable: retryable})
 		if tier == TierFail || attempt == retries {
 			return resp, nil // caller surfaces the non-ok status
 		}
 		ra := resp.Header.Get("Retry-After")
 		resp.Body.Close()
-		if werr := sleep(ctx, c.backoff(attempt, ra)); werr != nil {
+		d := c.backoff(attempt, ra)
+		if onRetry != nil {
+			onRetry(StreamEvent{Type: "retry", Attempt: attempt + 1, Max: retries, DelayMs: d.Milliseconds(), Status: resp.StatusCode, Reason: fmt.Sprintf("HTTP %d", resp.StatusCode)})
+		}
+		if werr := sleep(ctx, d); werr != nil {
 			return nil, werr
 		}
 	}
@@ -1130,7 +1167,7 @@ func (c *Client) postJSON(ctx context.Context, endpoint string, headers map[stri
 	if err != nil {
 		return nil, err
 	}
-	resp, err := c.llmFetch(ctx, endpoint, headers, raw)
+	resp, err := c.llmFetch(ctx, endpoint, headers, raw, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -1836,7 +1873,7 @@ func (c *Client) streamOpenAI(ctx context.Context, prompt any, tk *Toolkit, hist
 		t0 := time.Now()
 		lastModel = turnModel
 		beforeP, beforeC := usage.PromptTokens, usage.CompletionTokens
-		resp, err := c.llmFetch(ctx, endpoint, map[string]string{"Authorization": "Bearer " + key}, body)
+		resp, err := c.llmFetch(ctx, endpoint, map[string]string{"Authorization": "Bearer " + key}, body, func(e StreamEvent) { ch <- e })
 		if err != nil {
 			c.emitLLM(turnModel, "error", t0, 0, 0)
 			return err
@@ -2121,7 +2158,7 @@ func (c *Client) streamAnthropic(ctx context.Context, prompt any, tk *Toolkit, h
 		t0 := time.Now()
 		lastModel = turnModel
 		beforeP, beforeC := usage.PromptTokens, usage.CompletionTokens
-		resp, err := c.llmFetch(ctx, endpoint, headers, body)
+		resp, err := c.llmFetch(ctx, endpoint, headers, body, func(e StreamEvent) { ch <- e })
 		if err != nil {
 			c.emitLLM(turnModel, "error", t0, 0, 0)
 			return err

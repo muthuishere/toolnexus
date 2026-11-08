@@ -379,4 +379,158 @@ public class LlmClientResilienceTests
         await Assert.ThrowsAnyAsync<Exception>(() => client.RunAsync("hi", tk));
         Assert.Equal(3, hits);
     }
+
+    // ---- §8 Retry event (streaming only) + x-should-retry override ----
+
+    private const string OkBody = "{\"choices\":[{\"message\":{\"content\":\"ok\"}}],"
+        + "\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1,\"total_tokens\":2}}";
+    private const string OpenAISse = "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\ndata: [DONE]\n\n";
+    private const string AnthropicSse =
+        "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n"
+        + "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"ok\"}}\n\n"
+        + "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\n"
+        + "data: {\"type\":\"message_stop\"}\n\n";
+
+    private static LlmClient Client(string baseUrl, string style, int retries, Func<LlmClient.ErrorInfo, LlmClient.Tier>? onError = null) =>
+        LlmClient.Create(new LlmClient.Options
+        {
+            BaseUrl = baseUrl, Style = style, Model = "x", ApiKey = "k",
+            Retries = retries, RetryBaseMs = 5, OnError = onError,
+        });
+
+    [Theory]
+    [InlineData("openai")]
+    [InlineData("anthropic")]
+    public async Task Streaming429EmitsRetryEventBeforeText(string style)
+    {
+        var hits = 0;
+        using var server = new StubServer(ctx =>
+        {
+            if (Interlocked.Increment(ref hits) == 1)
+            {
+                ctx.Response.Headers.Add("Retry-After", "0");
+                StubServer.Respond(ctx, 429, "slow down");
+                return;
+            }
+            StubServer.Respond(ctx, 200, style == "openai" ? OpenAISse : AnthropicSse);
+        });
+        await using var tk = await Toolkit.CreateAsync(new Toolkit.Options());
+        var evs = new List<LlmClient.StreamEvent>();
+        var res = await Client(server.BaseUrl, style, 2).StreamAsync("hi", tk, evs.Add);
+        Assert.Equal("ok", res.Text);
+        var r = evs[0];
+        Assert.Equal(LlmClient.StreamKind.Retry, r.Type);
+        Assert.Equal(1, r.Attempt);
+        Assert.Equal(2, r.Max);
+        Assert.Equal(0L, r.DelayMs);
+        Assert.Equal(429, r.Status);
+        Assert.Equal("HTTP 429", r.Reason);
+        Assert.Equal(LlmClient.StreamKind.Text, evs[1].Type);
+        Assert.Equal(LlmClient.StreamKind.Done, evs[^1].Type);
+        Assert.Single(evs, e => e.Type == LlmClient.StreamKind.Retry);
+    }
+
+    [Fact]
+    public async Task StreamingNetworkErrorEmitsRetryEventWithoutStatus()
+    {
+        string url;
+        using (var dead = new StubServer(_ => { })) url = dead.BaseUrl; // closed port ⇒ network error
+        await using var tk = await Toolkit.CreateAsync(new Toolkit.Options());
+        var evs = new List<LlmClient.StreamEvent>();
+        await Assert.ThrowsAnyAsync<Exception>(() => Client(url, "openai", 1).StreamAsync("hi", tk, evs.Add));
+        var r = Assert.Single(evs, e => e.Type == LlmClient.StreamKind.Retry);
+        Assert.Equal(1, r.Attempt);
+        Assert.Equal(1, r.Max);
+        Assert.Null(r.Status);
+        Assert.Equal("network", r.Reason);
+        Assert.True(r.DelayMs >= 5);
+    }
+
+    [Fact]
+    public async Task Streaming400EmitsNoRetryEvent()
+    {
+        var hits = 0;
+        using var server = new StubServer(ctx => { Interlocked.Increment(ref hits); StubServer.Respond(ctx, 400, "bad"); });
+        await using var tk = await Toolkit.CreateAsync(new Toolkit.Options());
+        var evs = new List<LlmClient.StreamEvent>();
+        await Assert.ThrowsAnyAsync<Exception>(() => Client(server.BaseUrl, "openai", 2).StreamAsync("hi", tk, evs.Add));
+        Assert.DoesNotContain(evs, e => e.Type == LlmClient.StreamKind.Retry);
+        Assert.Equal(1, hits);
+    }
+
+    [Fact]
+    public async Task XShouldRetryTrueMakes400Retryable()
+    {
+        var hits = 0;
+        using var server = new StubServer(ctx =>
+        {
+            if (Interlocked.Increment(ref hits) == 1)
+            {
+                ctx.Response.Headers.Add("x-should-retry", "true");
+                StubServer.Respond(ctx, 400, "bad");
+                return;
+            }
+            StubServer.Respond(ctx, 200, OkBody);
+        });
+        await using var tk = await Toolkit.CreateAsync(new Toolkit.Options());
+        Assert.Equal("ok", (await Client(server.BaseUrl, "openai", 2).RunAsync("hi", tk)).Text);
+        Assert.Equal(2, hits);
+    }
+
+    [Fact]
+    public async Task XShouldRetryFalseMakes503Terminal()
+    {
+        var hits = 0;
+        using var server = new StubServer(ctx =>
+        {
+            Interlocked.Increment(ref hits);
+            ctx.Response.Headers.Add("X-Should-Retry", " False ");
+            StubServer.Respond(ctx, 503, "busy");
+        });
+        await using var tk = await Toolkit.CreateAsync(new Toolkit.Options());
+        var ex = await Assert.ThrowsAnyAsync<Exception>(() => Client(server.BaseUrl, "openai", 2).RunAsync("hi", tk));
+        Assert.Contains("503", ex.Message);
+        Assert.Equal(1, hits);
+    }
+
+    [Fact]
+    public async Task XShouldRetryTrueStillLetsOnErrorFail()
+    {
+        var hits = 0;
+        var seen = new List<bool>();
+        using var server = new StubServer(ctx =>
+        {
+            Interlocked.Increment(ref hits);
+            ctx.Response.Headers.Add("x-should-retry", "true");
+            StubServer.Respond(ctx, 400, "bad");
+        });
+        await using var tk = await Toolkit.CreateAsync(new Toolkit.Options());
+        await Assert.ThrowsAnyAsync<Exception>(() => Client(server.BaseUrl, "openai", 2, info =>
+        {
+            seen.Add(info.Retryable);
+            return LlmClient.Tier.Fail;
+        }).RunAsync("hi", tk));
+        Assert.Equal(1, hits);
+        Assert.Equal(new[] { true }, seen);
+    }
+
+    [Fact]
+    public async Task RunRetrying429IsUnchanged()
+    {
+        var hits = 0;
+        using var server = new StubServer(ctx =>
+        {
+            if (Interlocked.Increment(ref hits) == 1)
+            {
+                ctx.Response.Headers.Add("Retry-After", "0");
+                StubServer.Respond(ctx, 429, "slow");
+                return;
+            }
+            StubServer.Respond(ctx, 200, OkBody);
+        });
+        await using var tk = await Toolkit.CreateAsync(new Toolkit.Options());
+        var r = await Client(server.BaseUrl, "openai", 2).RunAsync("hi", tk);
+        Assert.Equal("ok", r.Text);
+        Assert.Equal(2, hits);
+    }
 }

@@ -405,6 +405,10 @@ export type StreamEvent =
   | { type: "tool_result"; id: string; name: string; output: string; isError: boolean; metadata?: Record<string, unknown>; via?: "call_tool" | "acp" }
   | { type: "usage"; usage: Usage }
   | { type: "pending"; request: Request }
+  /** Emitted just before each LLM retry wait (streaming only). `attempt` is 1-based (the
+   *  failed zero-based attempt + 1), `max` the configured `retries`, `delayMs` the exact wait,
+   *  `status` the HTTP status (absent on a network error), `reason` "HTTP <status>" | "network". */
+  | { type: "retry"; attempt: number; max: number; delayMs: number; status?: number; reason: string }
   | { type: "done"; result: RunResult }
 
 function addUsage(acc: Usage, raw: any, style: ClientStyle): void {
@@ -952,6 +956,18 @@ export class Client {
    * plus network errors and anything `retryableStatuses` added, honoring Retry-After; aborts via signal.
    * The retry-vs-fail decision is the host's `onError` (default: retryable-within-budget ⇒ retry). */
   private async llmFetch(url: string, init: RequestInit, signal: AbortSignal): Promise<Response> {
+    // Same loop as the streaming path; its retry events are simply dropped here.
+    const it = this.llmFetchEvents(url, init, signal)
+    for (;;) {
+      const r = await it.next()
+      if (r.done) return r.value
+    }
+  }
+
+  /** The retry loop behind `llmFetch`, as a generator: yields a `retry` StreamEvent just before
+   * each retry wait (its `delayMs` is the exact wait slept) and returns the final Response.
+   * The streaming generators consume it with `yield*`. */
+  private async *llmFetchEvents(url: string, init: RequestInit, signal: AbortSignal): AsyncGenerator<StreamEvent, Response, unknown> {
     const retries = this.opts.retries ?? 2
     const base = this.opts.retryBaseMs ?? 500
     // Default classifier = today's behavior, expressed as an onError. A "retry" is always
@@ -959,22 +975,32 @@ export class Client {
     const classify = this.opts.onError ?? ((info: ErrorInfo): ErrorTier => (info.retryable ? "retry" : "fail"))
     let lastErr: unknown
     for (let attempt = 0; attempt <= retries; attempt++) {
+      let res: Response
       try {
-        const res = await (this.opts.fetch ?? (await defaultFetch()))(url, { ...init, signal })
-        if (res.ok) return res
-        const retryable = isRetryableStatus(res.status, this.opts.retryableStatuses)
-        const tier = classify({ status: res.status, attempt, retryable })
-        if (tier === "fail" || attempt === retries) return res // caller surfaces the non-ok status
-        const ra = retryAfterMs(res.headers.get("retry-after"))
-        // `?? `, not `|| `: Retry-After: 0 means "retry now", not "no opinion".
-        await delay(ra ?? base * 2 ** attempt + Math.random() * 100, signal)
+        res = await (this.opts.fetch ?? (await defaultFetch()))(url, { ...init, signal })
       } catch (e) {
         if (signal.aborted) throw e // abort/timeout: don't retry
         lastErr = e
         const tier = classify({ error: e, attempt, retryable: true })
         if (tier === "fail" || attempt === retries) throw e
-        await delay(base * 2 ** attempt + Math.random() * 100, signal)
+        const wait = base * 2 ** attempt + Math.random() * 100
+        yield { type: "retry", attempt: attempt + 1, max: retries, delayMs: wait, reason: "network" }
+        await delay(wait, signal)
+        continue
       }
+      if (res.ok) return res
+      let retryable = isRetryableStatus(res.status, this.opts.retryableStatuses)
+      // The provider's own verdict wins over the status set (SPEC 8 x-should-retry).
+      const sr = res.headers.get("x-should-retry")?.trim().toLowerCase()
+      if (sr === "true") retryable = true
+      else if (sr === "false") retryable = false
+      const tier = classify({ status: res.status, attempt, retryable })
+      if (tier === "fail" || attempt === retries) return res // caller surfaces the non-ok status
+      const ra = retryAfterMs(res.headers.get("retry-after"))
+      // `?? `, not `|| `: Retry-After: 0 means "retry now", not "no opinion".
+      const wait = ra ?? base * 2 ** attempt + Math.random() * 100
+      yield { type: "retry", attempt: attempt + 1, max: retries, delayMs: wait, status: res.status, reason: `HTTP ${res.status}` }
+      await delay(wait, signal)
     }
     throw lastErr
   }
@@ -1409,7 +1435,7 @@ export class Client {
         let content = ""
         const acc = new Map<number, { id: string; name: string; args: string }>()
         try {
-          const res = await this.llmFetch(`${this.opts.baseUrl.replace(/\/$/, "")}/chat/completions`, {
+          const res = yield* this.llmFetchEvents(`${this.opts.baseUrl.replace(/\/$/, "")}/chat/completions`, {
             method: "POST",
             headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json", ...this.opts.headers },
             body: JSON.stringify(this.openaiBody(messages, tools, true, turnModel)),
@@ -1522,7 +1548,7 @@ export class Client {
         const blocks = new Map<number, { type: string; text?: string; id?: string; name?: string; json?: string }>()
         let stopReason = ""
         try {
-          const res = await this.llmFetch(endpoint, {
+          const res = yield* this.llmFetchEvents(endpoint, {
             method: "POST",
             headers: { "x-api-key": key, "anthropic-version": "2023-06-01", "Content-Type": "application/json", ...this.opts.headers },
             body: JSON.stringify(this.anthropicBody(system, messages, tools, true, turnModel)),

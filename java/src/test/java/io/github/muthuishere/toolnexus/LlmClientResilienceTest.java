@@ -405,4 +405,140 @@ class LlmClientResilienceTest {
         tk.close();
     }
 
+
+    // ---- §8 Retry event (streaming only) + x-should-retry override ----
+
+    private static final String OPENAI_SSE =
+            "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\ndata: [DONE]\n\n";
+    private static final String ANTHROPIC_SSE =
+            "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n"
+                    + "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"ok\"}}\n\n"
+                    + "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\n"
+                    + "data: {\"type\":\"message_stop\"}\n\n";
+
+    private static void respondH(com.sun.net.httpserver.HttpExchange ex, int status, String body,
+                                 String hName, String hVal) throws IOException {
+        if (hName != null) ex.getResponseHeaders().add(hName, hVal);
+        respond(ex, status, body);
+    }
+
+    private LlmClient client(int port, String style, int retries, java.util.function.Function<LlmClient.ErrorInfo, LlmClient.Tier> onError) {
+        LlmClient.Options o = new LlmClient.Options()
+                .baseUrl("http://127.0.0.1:" + port).style(style).model("x").apiKey("k")
+                .retries(retries).retryBaseMs(5);
+        if (onError != null) o.onError(onError);
+        return LlmClient.create(o);
+    }
+
+    private void assertRetryEventThenAnswer(String style, String sse) throws IOException {
+        AtomicInteger hits = new AtomicInteger(0);
+        int port = start(ex -> {
+            if (hits.incrementAndGet() == 1) { respondH(ex, 429, "slow down", "Retry-After", "0"); return; }
+            respond(ex, 200, sse);
+        });
+        Toolkit tk = Toolkit.create(new Toolkit.Options());
+        List<LlmClient.StreamEvent> evs = client(port, style, 2, null).stream("hi", tk).toList();
+        assertEquals(LlmClient.StreamEvent.Kind.RETRY, evs.get(0).type());
+        assertEquals(new LlmClient.StreamEvent.RetryInfo(1, 2, 0L, 429, "HTTP 429"), evs.get(0).retry());
+        assertEquals(LlmClient.StreamEvent.Kind.TEXT, evs.get(1).type());
+        assertEquals(LlmClient.StreamEvent.Kind.DONE, evs.get(evs.size() - 1).type());
+        assertEquals("ok", evs.get(evs.size() - 1).result().text);
+        assertEquals(1, evs.stream().filter(e -> e.type() == LlmClient.StreamEvent.Kind.RETRY).count());
+        tk.close();
+    }
+
+    @Test
+    void streamingOpenAI429EmitsRetryEventBeforeText() throws IOException {
+        assertRetryEventThenAnswer("openai", OPENAI_SSE);
+    }
+
+    @Test
+    void streamingAnthropic429EmitsRetryEventBeforeText() throws IOException {
+        assertRetryEventThenAnswer("anthropic", ANTHROPIC_SSE);
+    }
+
+    @Test
+    void streamingNetworkErrorEmitsRetryEventWithoutStatus() throws IOException {
+        int port = start(ex -> respond(ex, 200, ""));
+        server.stop(0);
+        server = null; // closed port: every attempt is a network error
+        Toolkit tk = Toolkit.create(new Toolkit.Options());
+        List<LlmClient.StreamEvent> evs = new java.util.ArrayList<>();
+        assertThrows(RuntimeException.class, () -> client(port, "openai", 1, null).stream("hi", tk, evs::add));
+        List<LlmClient.StreamEvent> retries = evs.stream()
+                .filter(e -> e.type() == LlmClient.StreamEvent.Kind.RETRY).toList();
+        assertEquals(1, retries.size());
+        LlmClient.StreamEvent.RetryInfo r = retries.get(0).retry();
+        assertEquals(1, r.attempt());
+        assertEquals(1, r.max());
+        assertEquals("network", r.reason());
+        assertEquals(null, r.status());
+        assertTrue(r.delayMs() >= 5, "backoff drawn, got " + r.delayMs());
+        tk.close();
+    }
+
+    @Test
+    void streaming400EmitsNoRetryEvent() throws IOException {
+        AtomicInteger hits = new AtomicInteger(0);
+        int port = start(ex -> { hits.incrementAndGet(); respond(ex, 400, "bad"); });
+        Toolkit tk = Toolkit.create(new Toolkit.Options());
+        List<LlmClient.StreamEvent> evs = new java.util.ArrayList<>();
+        assertThrows(RuntimeException.class, () -> client(port, "openai", 2, null).stream("hi", tk, evs::add));
+        assertTrue(evs.stream().noneMatch(e -> e.type() == LlmClient.StreamEvent.Kind.RETRY));
+        assertEquals(1, hits.get());
+        tk.close();
+    }
+
+    @Test
+    void xShouldRetryTrueMakes400Retryable() throws IOException {
+        AtomicInteger hits = new AtomicInteger(0);
+        int port = start(ex -> {
+            if (hits.incrementAndGet() == 1) { respondH(ex, 400, "bad", "x-should-retry", "true"); return; }
+            respond(ex, 200, OK_BODY);
+        });
+        Toolkit tk = Toolkit.create(new Toolkit.Options());
+        assertEquals("ok", client(port, "openai", 2, null).run("hi", tk).text);
+        assertEquals(2, hits.get());
+        tk.close();
+    }
+
+    @Test
+    void xShouldRetryFalseMakes503Terminal() throws IOException {
+        AtomicInteger hits = new AtomicInteger(0);
+        int port = start(ex -> { hits.incrementAndGet(); respondH(ex, 503, "busy", "X-Should-Retry", " False "); });
+        Toolkit tk = Toolkit.create(new Toolkit.Options());
+        RuntimeException e = assertThrows(RuntimeException.class, () -> client(port, "openai", 2, null).run("hi", tk));
+        assertTrue(e.getMessage().contains("503"), e.getMessage());
+        assertEquals(1, hits.get());
+        tk.close();
+    }
+
+    @Test
+    void xShouldRetryTrueStillLetsOnErrorFail() throws IOException {
+        AtomicInteger hits = new AtomicInteger(0);
+        List<Boolean> seen = new java.util.ArrayList<>();
+        int port = start(ex -> { hits.incrementAndGet(); respondH(ex, 400, "bad", "x-should-retry", "true"); });
+        Toolkit tk = Toolkit.create(new Toolkit.Options());
+        assertThrows(RuntimeException.class, () -> client(port, "openai", 2, info -> {
+            seen.add(info.retryable());
+            return LlmClient.Tier.FAIL;
+        }).run("hi", tk));
+        assertEquals(1, hits.get());
+        assertEquals(List.of(true), seen);
+        tk.close();
+    }
+
+    @Test
+    void runRetrying429IsUnchanged() throws IOException {
+        AtomicInteger hits = new AtomicInteger(0);
+        int port = start(ex -> {
+            if (hits.incrementAndGet() == 1) { respondH(ex, 429, "slow", "Retry-After", "0"); return; }
+            respond(ex, 200, OK_BODY);
+        });
+        Toolkit tk = Toolkit.create(new Toolkit.Options());
+        LlmClient.RunResult r = client(port, "openai", 2, null).run("hi", tk);
+        assertEquals("ok", r.text);
+        assertEquals(2, hits.get());
+        tk.close();
+    }
 }

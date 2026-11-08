@@ -1082,6 +1082,8 @@ public final class LlmClient {
      *   <li>{@code TOOL_CALL_ARGS} — an ACP agent reported a call's input after the call began
      *       ({@code id}, {@code name}, {@code args}, {@code via} set; SPEC §8C, issue #188).</li>
      *   <li>{@code USAGE} — token usage so far ({@code usage} set).</li>
+     *   <li>{@code RETRY} — the LLM request failed retryably and the loop is about to wait
+     *       {@link RetryInfo#delayMs} and try again ({@code retry} set). Streaming only.</li>
      *   <li>{@code DONE} — terminal event carrying the final {@link RunResult} ({@code result} set).</li>
      * </ul>
      */
@@ -1089,8 +1091,29 @@ public final class LlmClient {
                               Map<String, Object> args, String output, boolean isError,
                               Usage usage, RunResult result, Request request,
                               List<Map<String, Object>> parts, Map<String, Object> metadata,
-                              String via) {
-        public enum Kind { TEXT, TOOL_CALL, TOOL_RESULT, USAGE, PENDING, DONE, THOUGHT, TOOL_CALL_ARGS }
+                              String via, RetryInfo retry) {
+        public enum Kind { TEXT, TOOL_CALL, TOOL_RESULT, USAGE, PENDING, DONE, THOUGHT, TOOL_CALL_ARGS, RETRY }
+
+        /**
+         * Payload of a {@link Kind#RETRY} event (§8 "Retry event"): {@code attempt} is the 1-based
+         * retry about to happen, {@code max} the configured {@code retries}, {@code delayMs} the exact
+         * wait about to be slept, {@code status} the HTTP status (null on a network error), and
+         * {@code reason} {@code "HTTP <status>"} or {@code "network"}.
+         */
+        public record RetryInfo(int attempt, int max, long delayMs, Integer status, String reason) {}
+
+        /** Without {@code retry} (every event that is not a {@link Kind#RETRY}). */
+        public StreamEvent(Kind type, String delta, String id, String name,
+                           Map<String, Object> args, String output, boolean isError,
+                           Usage usage, RunResult result, Request request,
+                           List<Map<String, Object>> parts, Map<String, Object> metadata, String via) {
+            this(type, delta, id, name, args, output, isError, usage, result, request, parts, metadata, via, null);
+        }
+
+        static StreamEvent retry(int attempt, int max, long delayMs, Integer status) {
+            return new StreamEvent(Kind.RETRY, null, null, null, null, null, false, null, null, null, null, null,
+                    null, new RetryInfo(attempt, max, delayMs, status, status == null ? "network" : "HTTP " + status));
+        }
 
         /** Without {@code via} (every event that is not a tool-tiers {@code call_tool} call). */
         public StreamEvent(Kind type, String delta, String id, String name,
@@ -2605,7 +2628,7 @@ public final class LlmClient {
                 try {
                     // The JDK HttpClient streams the SSE response as lines — ideal for SSE.
                     HttpResponse<Stream<String>> res =
-                            llmSend(url, headers, body, deadline, HttpResponse.BodyHandlers.ofLines());
+                            llmSend(url, headers, body, deadline, HttpResponse.BodyHandlers.ofLines(), onEvent);
                     if (res.statusCode() < 200 || res.statusCode() >= 300) {
                         String b = res.body() == null ? "" : res.body().collect(Collectors.joining("\n"));
                         throw providerError(res.statusCode(), b,
@@ -2808,7 +2831,7 @@ public final class LlmClient {
                 String[] stopReason = {""};
                 try {
                     HttpResponse<Stream<String>> res =
-                            llmSend(endpoint, headers, body, deadline, HttpResponse.BodyHandlers.ofLines());
+                            llmSend(endpoint, headers, body, deadline, HttpResponse.BodyHandlers.ofLines(), onEvent);
                     if (res.statusCode() < 200 || res.statusCode() >= 300) {
                         String b = res.body() == null ? "" : res.body().collect(Collectors.joining("\n"));
                         throw providerError(res.statusCode(), b,
@@ -3201,6 +3224,14 @@ public final class LlmClient {
     private <T> HttpResponse<T> llmSend(String url, Map<String, String> headers,
                                         Map<String, Object> body, Deadline deadline,
                                         HttpResponse.BodyHandler<T> handler) {
+        return llmSend(url, headers, body, deadline, handler, null);
+    }
+
+    /** As above; {@code onRetry} (streaming only, nullable) receives a {@link StreamEvent.Kind#RETRY}
+     * event immediately before each retry wait. */
+    private <T> HttpResponse<T> llmSend(String url, Map<String, String> headers,
+                                        Map<String, Object> body, Deadline deadline,
+                                        HttpResponse.BodyHandler<T> handler, Consumer<StreamEvent> onRetry) {
         int retries = retries();
         long base = retryBaseMs();
         RuntimeException lastErr = null;
@@ -3214,9 +3245,14 @@ public final class LlmClient {
                 // §8 Resilience: classify EVERY non-2xx (the host may retry a normally-terminal
                 // status, or fail a retryable one). A RETRY is still bounded by the budget below.
                 boolean retryable = isRetryableStatus(status, opts.retryableStatuses);
+                // x-should-retry: a server-sent true/false overrides the default classification.
+                String xsr = res.headers().firstValue("x-should-retry").map(String::trim).orElse("");
+                if (xsr.equalsIgnoreCase("true")) retryable = true;
+                else if (xsr.equalsIgnoreCase("false")) retryable = false;
                 Tier tier = classify(new ErrorInfo(null, status, attempt, retryable));
                 if (tier == Tier.FAIL || attempt == retries) return res; // caller handles non-2xx
                 long wait = retryAfterMs(res).orElse((long) (base * Math.pow(2, attempt) + Math.random() * 100));
+                if (onRetry != null) onRetry.accept(StreamEvent.retry(attempt + 1, retries, wait, status));
                 sleep(wait, deadline);
             } catch (HttpTimeoutException e) {
                 throw new TimeoutException(timeoutMessage(deadline.timeoutMs)); // not retried
@@ -3225,7 +3261,9 @@ public final class LlmClient {
                 // §8 Resilience: a network throw is retryable=true by default; the host may FAIL it.
                 Tier tier = classify(new ErrorInfo(e, 0, attempt, true));
                 if (tier == Tier.FAIL || attempt == retries) throw lastErr;
-                sleep((long) (base * Math.pow(2, attempt) + Math.random() * 100), deadline);
+                long wait = (long) (base * Math.pow(2, attempt) + Math.random() * 100);
+                if (onRetry != null) onRetry.accept(StreamEvent.retry(attempt + 1, retries, wait, null));
+                sleep(wait, deadline);
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
                 // §7D: classify by TOKEN STATE, not by the interrupt itself — an external cancel is

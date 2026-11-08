@@ -315,6 +315,15 @@ def _resolve_key(api_key: Optional[str], base_url: str, api_key_env: Optional[st
 _RETRY_AFTER_MAX = 2147483647  # ~68 years; the widest second count all seven ports hold exactly
 
 
+def _should_retry_override(value: Optional[str]) -> Optional[bool]:
+    """The provider's ``x-should-retry`` verdict (§8): trimmed ``true``/``false``,
+    case-insensitive; anything else (or absent) is no opinion."""
+    if value is None:
+        return None
+    v = value.strip().lower()
+    return True if v == "true" else False if v == "false" else None
+
+
 def _parse_retry_after(value: Optional[str]) -> Optional[int]:
     """Honour ``Retry-After`` only in its delay-seconds form.
 
@@ -389,7 +398,7 @@ class ProviderError(Exception):
     deprecated alias for ``body``.
     """
 
-    def __init__(self, status: int, text: str, retry_after: Optional[str]) -> None:
+    def __init__(self, status: int, text: str, retry_after: Optional[str], should_retry: Optional[str] = None) -> None:
         body = safe_error_body(status, text)
         shown = capped_error_body(status, text)
         super().__init__(f"LLM {status}: {shown}" if shown else f"LLM {status}")
@@ -397,6 +406,8 @@ class ProviderError(Exception):
         self.body = body
         self.text = body
         self.retry_after = retry_after
+        #: The raw ``x-should-retry`` header, or None (§8 x-should-retry override).
+        self.should_retry = should_retry
 
 
 #: Back-compat alias — the type was private before it was worth catching.
@@ -412,7 +423,8 @@ def _open(url: str, headers: dict[str, str], payload: dict[str, Any], timeout: f
     except urllib.error.HTTPError as e:
         text = e.read().decode("utf-8", errors="replace")
         ra = e.headers.get("Retry-After") if e.headers else None
-        raise _HttpError(e.code, text, ra) from None
+        sr = e.headers.get("x-should-retry") if e.headers else None
+        raise _HttpError(e.code, text, ra, sr) from None
 
 
 _KEEPALIVE = threading.local()
@@ -1702,8 +1714,28 @@ class Client:
         ``Retry-After``. Aborts (timeout/cancel) are not retried.
 
         ``worker`` returns whatever it produces (a parsed dict for non-streaming, or
-        a live response for streaming). Mirrors JS ``llmFetch``.
+        a live response for streaming). Mirrors JS ``llmFetch``. Retry events from
+        :meth:`_llm_fetch_events` are dropped here: only streaming surfaces them.
         """
+        result: Any = None
+        async for kind, value in self._llm_fetch_events(worker, url, headers, payload, deadline, cancel):
+            if kind == "result":
+                result = value
+        return result
+
+    async def _llm_fetch_events(
+        self,
+        worker,
+        url: str,
+        headers: dict[str, str],
+        payload: dict[str, Any],
+        deadline: Optional[float],
+        cancel: Optional[asyncio.Event],
+    ) -> AsyncGenerator[tuple[str, Any], None]:
+        """The retry loop behind :meth:`_llm_fetch`. Yields ``("retry", event)``
+        immediately before each retry wait (the §8 streaming ``retry`` event, whose
+        ``delay_ms`` is the exact wait about to be slept) and finally
+        ``("result", value)``."""
         base = self.retry_base_ms / 1000.0
         # Default classifier = today's behavior, expressed as an on_error. A "retry" is
         # always capped by the budget below (attempt == retries stops regardless).
@@ -1714,10 +1746,14 @@ class Client:
         for attempt in range(self.retries + 1):
             per_req = self._remaining(deadline, cancel)
             try:
-                return await self._fetch_once(worker, url, headers, payload, per_req, cancel)
+                result = await self._fetch_once(worker, url, headers, payload, per_req, cancel)
             except _HttpError as e:
                 last_err = e
                 retryable = _is_retryable_status(e.status, self.retryable_statuses)
+                # The provider's own verdict wins over the status set (§8 x-should-retry).
+                override = _should_retry_override(getattr(e, "should_retry", None))
+                if override is not None:
+                    retryable = override
                 tier = classify({"status": e.status, "attempt": attempt, "retryable": retryable})
                 if tier == "fail" or attempt == self.retries:
                     raise
@@ -1730,7 +1766,16 @@ class Client:
                     if delay is not None
                     else base * (2 ** attempt) + random.random() * 0.1
                 )
+                yield "retry", {
+                    "type": "retry",
+                    "attempt": attempt + 1,
+                    "max": self.retries,
+                    "delay_ms": int(round(wait * 1000)),
+                    "status": e.status,
+                    "reason": f"HTTP {e.status}",
+                }
                 await self._sleep(wait, deadline, cancel)
+                continue
             except (RunTimeout, RunCancelled):
                 raise  # never retry an abort
             except (urllib.error.URLError, OSError, TimeoutError) as e:
@@ -1743,7 +1788,18 @@ class Client:
                 tier = classify({"error": e, "attempt": attempt, "retryable": True})
                 if tier == "fail" or attempt == self.retries:
                     raise
-                await self._sleep(base * (2 ** attempt) + random.random() * 0.1, deadline, cancel)
+                wait = base * (2 ** attempt) + random.random() * 0.1
+                yield "retry", {
+                    "type": "retry",
+                    "attempt": attempt + 1,
+                    "max": self.retries,
+                    "delay_ms": int(round(wait * 1000)),
+                    "reason": "network",
+                }
+                await self._sleep(wait, deadline, cancel)
+                continue
+            yield "result", result
+            return
         assert last_err is not None
         raise last_err
 
@@ -2181,7 +2237,8 @@ class Client:
         cancel: Optional[asyncio.Event] = None,
     ) -> AsyncGenerator[dict[str, Any], None]:
         """Streaming variant: async-iterate live event dicts (text deltas,
-        tool_call/tool_result, usage, done). With an ``id`` it is stateful (like
+        tool_call/tool_result, usage, done, and ``retry`` — ``{type, attempt, max,
+        delay_ms, status?, reason}`` emitted just before each LLM retry wait). With an ``id`` it is stateful (like
         :meth:`ask`): the thread's transcript is loaded as history before streaming,
         and saved back to the ConversationStore on the terminal ``done`` event.
         No ``id`` ⇒ stateless. Mirrors the JS ``stream``.
@@ -2674,6 +2731,9 @@ class Client:
                 stop_reason = ""
                 try:
                     async for line in self._sse_lines(endpoint, req_headers, payload, deadline, cancel):
+                        if isinstance(line, dict):  # a retry event (§8)
+                            yield line
+                            continue
                         if not line.startswith("data:"):
                             continue
                         j = _safe_parse(line[5:].strip())
@@ -2778,7 +2838,14 @@ class Client:
         """
         loop = asyncio.get_running_loop()
         # Initial connection uses the retrying fetch (retries transient connect errors).
-        resp = await self._llm_fetch(self._transport.open, url, headers, payload, deadline, cancel)
+        # Each retry surfaces to the consumer as a §8 ``retry`` stream event (a dict,
+        # like the in-process side channel) before its wait.
+        resp: Any = None
+        async for kind, value in self._llm_fetch_events(self._transport.open, url, headers, payload, deadline, cancel):
+            if kind == "retry":
+                yield value
+            else:
+                resp = value
 
         queue: asyncio.Queue = asyncio.Queue(maxsize=256)
         _SENTINEL = object()

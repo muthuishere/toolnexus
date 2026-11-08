@@ -744,15 +744,24 @@ public sealed partial class LlmClient
     /// <summary>Stream event kinds. <c>Thought</c> is a model's reasoning as reported by its source
     /// (e.g. an ACP agent's <c>agent_thought_chunk</c>): surfaced live, never part of the answer.
     /// <c>ToolCallArgs</c> is a call's input an ACP agent reported on a <c>tool_call_update</c>
-    /// after the call began (<c>Id</c>, <c>Name</c>, <c>Args</c>, <c>Via</c>; SPEC §8C, issue #188).</summary>
-    public enum StreamKind { Text, ToolCall, ToolResult, Usage, Pending, Done, Thought, ToolCallArgs }
+    /// after the call began (<c>Id</c>, <c>Name</c>, <c>Args</c>, <c>Via</c>; SPEC §8C, issue #188).
+    /// <c>Retry</c> (streaming only): the LLM request failed retryably and the loop is about to wait
+    /// <see cref="StreamEvent.DelayMs"/> and try again.</summary>
+    public enum StreamKind { Text, ToolCall, ToolResult, Usage, Pending, Done, Thought, ToolCallArgs, Retry }
 
     public sealed record StreamEvent(
         StreamKind Type, string? Delta = null, string? Id = null, string? Name = null,
         IDictionary<string, object?>? Args = null, string? Output = null, bool IsError = false,
         Usage? Usage = null, RunResult? Result = null, Request? Request = null,
-        IDictionary<string, object?>? Metadata = null, string? Via = null)
+        IDictionary<string, object?>? Metadata = null, string? Via = null,
+        int? Attempt = null, int? Max = null, long? DelayMs = null, int? Status = null, string? Reason = null)
     {
+        /// <summary>§8 Retry event: <c>Attempt</c> is the 1-based retry about to happen, <c>Max</c> the
+        /// configured retries, <c>DelayMs</c> the exact wait, <c>Status</c> the HTTP status (null on a
+        /// network error), <c>Reason</c> <c>"HTTP &lt;status&gt;"</c> or <c>"network"</c>.</summary>
+        internal static StreamEvent RetryEvent(int attempt, int max, long delayMs, int? status) =>
+            new(StreamKind.Retry, Attempt: attempt, Max: max, DelayMs: delayMs, Status: status,
+                Reason: status is { } st ? $"HTTP {st}" : "network");
         /// <summary>§10: a tool is waiting on an out-of-band resolution (emitted before <c>WaitFor</c> runs).</summary>
         internal static StreamEvent PendingEvent(Request request) => new(StreamKind.Pending, Request: request);
         internal static StreamEvent Text(string delta) => new(StreamKind.Text, Delta: delta);
@@ -1618,7 +1627,7 @@ public sealed partial class LlmClient
                 var beforeC = usage.CompletionTokens;
                 try
                 {
-                    await foreach (var line in SseLinesAsync(url, BaseHeaders(key, false), body, deadline, external).ConfigureAwait(false))
+                    await foreach (var line in SseLinesAsync(url, BaseHeaders(key, false), body, deadline, onEvent, external).ConfigureAwait(false))
                     {
                         if (!line.StartsWith("data:")) continue;
                         var payload = line[5..].Trim();
@@ -1792,7 +1801,7 @@ public sealed partial class LlmClient
                 var beforeC = usage.CompletionTokens;
                 try
                 {
-                    await foreach (var line in SseLinesAsync(endpoint, BaseHeaders(key, true), body, deadline, external).ConfigureAwait(false))
+                    await foreach (var line in SseLinesAsync(endpoint, BaseHeaders(key, true), body, deadline, onEvent, external).ConfigureAwait(false))
                     {
                         if (!line.StartsWith("data:")) continue;
                         if (Json.ParseLoose(line[5..].Trim()) is not IDictionary<string, object?> j) continue;
@@ -1983,7 +1992,8 @@ public sealed partial class LlmClient
     }
 
     private async Task<HttpResponseMessage> LlmSendAsync(string url, Dictionary<string, string> headers,
-        Dictionary<string, object?> body, Deadline deadline, bool streaming, CancellationToken external)
+        Dictionary<string, object?> body, Deadline deadline, bool streaming, CancellationToken external,
+        Action<StreamEvent>? onRetry = null)
     {
         var retries = Retries();
         var baseMs = RetryBaseMs();
@@ -2023,10 +2033,18 @@ public sealed partial class LlmClient
                 var status = (int)res.StatusCode;
                 if (status is >= 200 and < 300) return res;
                 var retryable = IsRetryableStatus(status, _opts.RetryableStatuses);
+                // x-should-retry: a server-sent true/false overrides the default classification.
+                if (res.Headers.TryGetValues("x-should-retry", out var xsrs))
+                {
+                    var xsr = xsrs.FirstOrDefault()?.Trim();
+                    if (string.Equals(xsr, "true", StringComparison.OrdinalIgnoreCase)) retryable = true;
+                    else if (string.Equals(xsr, "false", StringComparison.OrdinalIgnoreCase)) retryable = false;
+                }
                 var tier = classify(new ErrorInfo(null, status, attempt, retryable));
                 if (tier == Tier.Fail || attempt == retries) return res; // caller handles non-2xx
                 var wait = RetryAfterMs(res) ?? (long)(baseMs * Math.Pow(2, attempt) + Random.Shared.Next(0, 100));
                 res.Dispose();
+                onRetry?.Invoke(StreamEvent.RetryEvent(attempt + 1, retries, wait, status));
                 await SleepAsync(wait, deadline, external).ConfigureAwait(false);
             }
             // Cancellation classification (SPEC §7D cancellation contract): an EXTERNAL cancel is
@@ -2042,7 +2060,9 @@ public sealed partial class LlmClient
                 lastErr = new InvalidOperationException("LLM request failed: " + e.Message, e);
                 var tier = classify(new ErrorInfo(e, null, attempt, true)); // network errors are retryable by default
                 if (tier == Tier.Fail || attempt == retries) throw lastErr;
-                await SleepAsync((long)(baseMs * Math.Pow(2, attempt) + Random.Shared.Next(0, 100)), deadline, external).ConfigureAwait(false);
+                var wait = (long)(baseMs * Math.Pow(2, attempt) + Random.Shared.Next(0, 100));
+                onRetry?.Invoke(StreamEvent.RetryEvent(attempt + 1, retries, wait, null));
+                await SleepAsync(wait, deadline, external).ConfigureAwait(false);
             }
         }
         throw lastErr ?? new InvalidOperationException("LLM request failed");
@@ -2117,10 +2137,10 @@ public sealed partial class LlmClient
     }
 
     private async IAsyncEnumerable<string> SseLinesAsync(string url, Dictionary<string, string> headers,
-        Dictionary<string, object?> body, Deadline deadline,
+        Dictionary<string, object?> body, Deadline deadline, Action<StreamEvent>? onRetry,
         [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken external)
     {
-        using var res = await LlmSendAsync(url, headers, body, deadline, true, external).ConfigureAwait(false);
+        using var res = await LlmSendAsync(url, headers, body, deadline, true, external, onRetry).ConfigureAwait(false);
         if ((int)res.StatusCode is < 200 or >= 300)
         {
             var b = await res.Content.ReadAsStringAsync(external).ConfigureAwait(false);

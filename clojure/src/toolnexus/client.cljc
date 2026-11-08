@@ -1050,6 +1050,36 @@
       (if (= :retry (f info)) :retry :fail)
       default)))
 
+;; NOTE: `failed?` (transport) results never reach this — §8 says x-should-retry is
+;; never consulted on a network error, and there is no response to read it from.
+(defn- should-retry-override
+  "§8 \"x-should-retry override\": a non-ok response whose `x-should-retry`
+  header (name case-insensitive) is a trimmed `true`/`false` (value
+  case-insensitive) sets `:retryable?` to that value BEFORE `:on-error` runs.
+  Any other value, or no header, keeps `default`."
+  [res default]
+  (let [v (some-> (http/header res "x-should-retry") str str/trim str/lower-case)]
+    (case v
+      "true"  true
+      "false" false
+      default)))
+
+(defn- emit-retry!
+  "§8 \"Retry event (streaming only)\". Clojure has no `stream` entry point: the
+  run's `:on-event` sink IS its event channel (SPEC §8 Streaming), so a run
+  given `:on-event` is this port's streaming path and receives
+  `{:type \"retry\" :attempt :max :delay-ms :status? :reason}` BEFORE the wait.
+  A run without `:on-event` (plain run/ask) emits nothing, and an in-process
+  `:generate-stream` client has no wire and emits none."
+  [client attempt budget delay-ms status]
+  (when-let [on-event (and (not (::stream-http-client client)) (::on-event client))]
+    (on-event (cond-> {:type     "retry"
+                       :attempt  (inc attempt)
+                       :max      budget
+                       :delay-ms delay-ms
+                       :reason   (if status (str "HTTP " status) "network")}
+                status (assoc :status status)))))
+
 (defn- post-with-retry
   "One LLM round trip, with the §resilience-policy retry loop around it. A
   transport failure and a non-2xx both become a thrown ex-info — unlike a TOOL
@@ -1090,8 +1120,10 @@
                          ;; caller set (D5).
                          :retryable? (boolean (and (not timed-out?)
                                                    (or failed?
-                                                       (retryable-status?
-                                                        status (:retryable-statuses client)))))}
+                                                       (should-retry-override
+                                                        res
+                                                        (retryable-status?
+                                                         status (:retryable-statuses client))))))}
                 verdict (if timed-out? :fail (classify client info))
                 throw!  (fn []
                           (cond
@@ -1106,14 +1138,18 @@
                             :else
                             (throw (provider-error status (:body res) (http/header res "retry-after")))))]
             (if (and (= :retry verdict) (< attempt budget))
-              (do (ktime/sleep! (or (retry-after-ms res)
-                                    ;; exponential backoff + jitter, identical to
-                                    ;; the other six ports: base * 2^attempt plus
-                                    ;; a uniform 0..99ms so a fleet retrying the
-                                    ;; same upstream does not re-collide in lockstep.
-                                    (+ (* base-ms (bit-shift-left 1 attempt))
-                                       (rand-int 100))))
-                  (recur (inc attempt)))
+              ;; The wait is computed ONCE so the retry event reports exactly
+              ;; the delay that is then slept.
+              (let [delay-ms (or (retry-after-ms res)
+                                 ;; exponential backoff + jitter, identical to
+                                 ;; the other six ports: base * 2^attempt plus
+                                 ;; a uniform 0..99ms so a fleet retrying the
+                                 ;; same upstream does not re-collide in lockstep.
+                                 (+ (* base-ms (bit-shift-left 1 attempt))
+                                    (rand-int 100)))]
+                (emit-retry! client attempt budget delay-ms (when-not failed? status))
+                (ktime/sleep! delay-ms)
+                (recur (inc attempt)))
               (throw!))))))))
 
 (defn wire-opts
