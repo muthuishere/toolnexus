@@ -186,6 +186,9 @@ jobs:
         with:
           distribution: temurin
           java-version: "21"
+      - name: Gradle from GitHub mirror (services.gradle.org has returned 504s)
+        env: { GH_TOKEN: "${{ github.token }}" }
+        run: ./scripts/ci-gradle-dist.sh
       - run: ./gradlew test --no-daemon
 
   csharp:
@@ -355,6 +358,11 @@ jobs:
       - if: matrix.lang == 'javascript'
         run: npm install && npm run build
         working-directory: js
+      - if: matrix.lang == 'java'
+        name: Gradle from GitHub mirror (services.gradle.org has returned 504s)
+        env: { GH_TOKEN: "${{ github.token }}" }
+        run: ./scripts/ci-gradle-dist.sh
+        working-directory: java
       - if: matrix.lang == 'java'
         run: ./gradlew jar --no-daemon
         working-directory: java
