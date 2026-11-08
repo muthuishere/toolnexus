@@ -1,0 +1,111 @@
+---
+title: "transcript_search_tool"
+description: "A read-only tool that searches past conversation transcripts — the ground truth for memory. — Python."
+sidebar:
+  label: "transcript_search_tool"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Python</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md#7e-agent-home--personas-source-agent-persona-surface">SPEC §7E</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/python/src/toolnexus/transcript_search.py">python/src/toolnexus/transcript_search.py</a>
+</p>
+
+```python
+def transcript_search_tool(store, *, max_results: int = 20, snippet_chars: int = 200,
+                           name: str = "transcript_search") -> Tool   # toolnexus
+```
+
+`transcript_search_tool` turns a conversation store into a plain, read-only tool named `transcript_search`. The
+model calls it with `{query, conversationId?, limit?}`. It does a case-insensitive substring
+match over the text of every message: plain content, text parts, tool-call arguments (as JSON)
+and tool-result text. Conversations come in the order the store's `list()` returns them (newest
+first), and messages in index order.
+
+The output is one line per hit, `<conversationId>#<index> <role>: <snippet>`. The snippet is
+centred on the first match, `snippetChars` characters long (characters, not bytes), with `…`
+marking cut text. No hits gives `no matches`. Hits past the limit add a final `(+<k> more)`. An
+empty query is an error. The tool never writes. Construction fails if the store has no `list()`.
+
+## When to use it
+
+Use it wherever an agent needs to check **what actually happened** rather than what it
+remembered: the [dreamer](/api/python/persona/dreamer/) uses it to verify memory, and a persona
+can use it to answer "what did I tell you about X last month?".
+
+## Why this and not the alternative
+
+<Aside type="note" title="Why not write it yourself with defineTool?">
+You could wrap `store.list()` and `store.get()` yourself. But messages are stored in each
+provider's own shape (OpenAI or Anthropic, plain text or multimodal parts, tool calls), so
+"what text is in this message" is fiddly. Getting it the same in every language is exactly
+the job this library does. This tool does it once, the same way in all eight ports.
+</Aside>
+
+It does not exclude anything by default. To hide the current conversation, give it a store
+that filters it out.
+
+## Examples
+
+### 1. The smallest useful call — search everything
+
+```python
+from toolnexus import FileConversationStore, transcript_search_tool
+
+search = transcript_search_tool(FileConversationStore("./data/conversations"))
+
+res = await search.execute({"query": "mt. moon"})
+print(res.output)
+# conv-42#3 user: …we finally got through Mt. Moon after the Zubat swarm…
+# (or "no matches")
+```
+
+### 2. The realistic case — give a persona its own transcript search
+
+```python
+from toolnexus import FileConversationStore, transcript_search_tool
+from toolnexus.agents import agent_from_dir
+
+store = FileConversationStore("./data/conversations")
+
+# Let the persona itself look up what was actually said, not just what it remembered.
+ava = agent_from_dir("./personas/ava", tools=[transcript_search_tool(store)])
+```
+
+### 3. The full surface — options and the narrower inputs
+
+```python
+from toolnexus import FileConversationStore, transcript_search_tool
+
+search = transcript_search_tool(
+    FileConversationStore("./data/conversations"),
+    max_results=5,       # ceiling for the `limit` input
+    snippet_chars=80,    # code points, not bytes
+    name="past_chats",
+)
+
+res = await search.execute({"query": "invoice", "conversationId": "conv-42", "limit": 3})
+print(res.output)   # at most 3 lines, then "(+<k> more)" if there were more
+```
+
+## Options
+
+| Option | Default | What it does |
+|---|---|---|
+| maxResults | `20` | Most hits per call, and the ceiling for the `limit` input. |
+| snippetChars | `200` | Snippet length in characters (code points), not bytes. |
+| name | `transcript_search` | The tool name the model sees. |
+
+Input fields the model fills in:
+
+| Field | Type | What it does |
+|---|---|---|
+| `query` | string | Required, non-empty. Case-insensitive substring. |
+| `conversationId` | string | Search only this conversation. |
+| `limit` | integer | Fewer hits than `maxResults`. |
+
+## See also
+
+- [`dreamer`](/api/python/persona/dreamer/) — the built-in agent that verifies memory with this tool.
+- [Dreaming guide](/toolnexus/dreaming/) — why transcripts are the ground truth for memory.
+- [`memoryTool`](/api/python/persona/memory-tool/) — what the transcripts are checked against.

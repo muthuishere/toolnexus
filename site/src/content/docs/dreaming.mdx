@@ -1,0 +1,270 @@
+---
+title: Dreaming
+description: A built-in agent that checks a persona's memory against its past conversations on a schedule, fixes what is wrong, and logs every change. One option on fromDir, in all eight languages.
+---
+
+import { Aside, Tabs, TabItem } from '@astrojs/starlight/components';
+
+**Your agent's memory gets better while it sleeps, not worse.**
+
+<Tabs syncKey="lang">
+<TabItem label="JavaScript">
+```ts
+const ava = agents.fromDir("./personas/ava", { dream: { everyMs: 24 * 60 * 60_000, store } })
+```
+</TabItem>
+<TabItem label="Python">
+```python
+ava = agent_from_dir("./personas/ava", dream={"every_ms": 24 * 60 * 60_000, "store": store})
+```
+</TabItem>
+<TabItem label="Go">
+```go
+ava := agents.FromDir("./personas/ava", agents.FromDirOptions{Dream: &agents.DreamOptions{EveryMs: 24 * 60 * 60 * 1000, Store: store}})
+```
+</TabItem>
+<TabItem label="Java">
+```java
+Agents.Agent ava = Agents.agentFromDir(Path.of("personas/ava"), new Agents.AgentSpec().dream(new Agents.Dream(24L * 60 * 60_000, store)));
+```
+</TabItem>
+<TabItem label="C#">
+```csharp
+var ava = Home.FromDir("./personas/ava", new Home.FromDirOptions { Dream = new Home.DreamOptions { EveryMs = 24 * 60 * 60_000, Store = store } });
+```
+</TabItem>
+<TabItem label="Elixir">
+```elixir
+ava = Home.from_dir("./personas/ava", dream: %{every_ms: 24 * 60 * 60_000, store: store})
+```
+</TabItem>
+<TabItem label="Clojure">
+```clojure
+(def ava (home/from-dir "./personas/ava" {:dream {:every-ms (* 24 60 60000) :store store}}))
+```
+</TabItem>
+<TabItem label="Rust">
+```rust
+let ava = agents::from_dir("./personas/ava", FromDirOptions { dream: Some(DreamOptions { every_ms: 24 * 60 * 60_000, store, instructions: String::new() }), ..Default::default() });
+```
+</TabItem>
+</Tabs>
+
+`store` is the [conversation store](/toolnexus/memory/) your client already saves transcripts
+to (it must support `list()`). Start the persona with
+[`startAgent`](/toolnexus/persona-agents/#the-heartbeat--startagent) as usual. The dreamer then
+runs on the **same runtime**, on its own clock, every `everyMs`. Stopping the persona stops the
+dreamer too. Without the `dream` option nothing changes.
+
+## Why
+
+A [persona](/toolnexus/persona-agents/) writes its own memory, and model-written memory goes
+wrong in predictable ways:
+
+- **A wrong fact gets written once and then read in every session.** The model misheard,
+  guessed, or the fact changed later. Nothing ever corrects it, because the memory is the only
+  thing the model checks.
+- **The index grows.** `MEMORY.md` goes into every prompt. Detail piles up in it until it costs
+  tokens on every turn and hides the lines that matter.
+- **Notes drift apart.** Two notes say the same thing in different words, or say opposite
+  things, and links point at notes that no longer exist.
+
+The transcripts do not have these problems. They record what was actually said. Dreaming is an
+offline pass, run while nobody is talking to the agent, that checks memory **against the
+transcripts** and fixes it. It is the same idea as Anthropic's "dreaming" in
+[The components of agent memory](https://www.anthropic.com/research/components-of-agent-memory):
+memory is useful only if it is verified, and verifying it is a separate job from using it.
+
+## The memory layout
+
+Dreaming works on a three-tier layout. It follows Andrej Karpathy's **LLM wiki** pattern: a
+short index, linked pages, and a log, kept by the model and built from raw sources. Here the raw
+sources are the transcripts.
+
+| Layer | File | Goes into the prompt? | Written by |
+|---|---|---|---|
+| Index | `MEMORY.md`, one line per topic | yes, every session (capped by `memoryIndexCap`) | the session and the dreamer |
+| Notes | `memory/<slug>.md`, linked from the index as `[[slug]]` | no, read on demand (`memory` action `read`) | the session and the dreamer |
+| Log | `memory/log.md`, append-only | no | the dreamer |
+| Ground truth | the transcripts, via [`transcript_search`](/api/javascript/persona/transcript-search-tool/) | no, searched on demand | nobody (read-only) |
+
+```text
+personas/ava/
+├── SOUL.md
+├── MEMORY.md            # - travel prefs: see [[travel]]
+├── DREAM.md             # optional: what this persona's dreams should focus on
+└── memory/
+    ├── travel.md        # - prefers aisle seats
+    ├── projects.md
+    └── log.md           # dream: fixed [[travel]] (window -> aisle, conv-42#3); merged ...
+```
+
+Turn the layout on with `notes: true` and `memoryIndexCap: true` on `fromDir` (see
+[Persona agents](/toolnexus/persona-agents/#durable-memory--the-memory-builtin)). The dreamer
+always has the notes tier on, whatever the persona uses.
+
+## What one pass does
+
+Each pass follows `DREAM_PROMPT`, a fixed text that is the same in every port:
+
+1. **Verify.** Read `MEMORY.md` and the notes it points to, and check each claim against the
+   transcripts. Fix or remove a claim only when the transcripts contradict it. A claim
+   they do not mention stays: transcripts get pruned, and silence is not evidence.
+2. **Demote.** Move detail out of `MEMORY.md` into a note and leave a one-line `[[slug]]`
+   pointer, so the index stays short.
+3. **Merge.** Fold duplicate or conflicting notes into one.
+4. **Repair links.** Point every `[[slug]]` at a note that exists, or create it. Give every note
+   an index line.
+5. **Log.** If anything changed, append one `dream: …` entry to `memory/log.md` naming every
+   change and why.
+
+If nothing needs changing, the dreamer writes nothing and replies `HEARTBEAT_OK`, which the
+heartbeat keeps silent. Changes land on disk and the persona sees them from its **next session**.
+The live session's prompt never changes mid-conversation, so the prompt cache stays warm.
+
+The shared `examples/dreaming/` fixture pins this: a home with one wrong note and a transcript
+that contradicts it goes through one pass. Afterwards the note is fixed, `log.md` names it, and
+the next session answers differently. The fixture passes in all eight ports.
+
+## Safety
+
+- **The dreamer has two tools and no others:** `memory` (over the persona's home) and
+  `transcript_search` (read-only). It cannot run shell commands, touch other files, or call the
+  persona's own tools.
+- **`memory/log.md` is the audit trail, and the dreamer can only append to it.** Every pass
+  that changes something says what it changed and why. The dreamer's `memory` tool refuses
+  `replace`/`remove` on `note:log`, so a dream cannot rewrite its own record.
+- **`USER.md` is off-limits to the dreamer.** Every action on target `user` returns an error;
+  the user model only changes in a live session.
+- **Put the home dir in git.** The log tells you what changed; git lets you undo it. A nightly
+  commit after the dream gives you a diff of every pass.
+- Memory writes are atomic and serialised per file in one process (clojure: in place, not
+  atomic, and serialised in-process only). Two **processes** writing the
+  same home dir: the last write wins. Run one dreamer per home.
+
+## When to use it, and when to skip it
+
+| Situation | Dream? | Why |
+|---|---|---|
+| Long-lived persona that writes its own memory across many sessions | **Yes** | This is the case dreaming is built for: model-written memory drifts. |
+| Memory gets corrected by the user in conversation ("no, it's aisle, not window") | **Yes** | The correction lives in a transcript. The dreamer moves it into memory. |
+| `MEMORY.md` keeps growing past the cap | **Yes** | The demote step keeps the index short. |
+| One-shot workers and sub-agents | Skip | They have no memory that lasts between runs. |
+| Memory curated by hand, or read-only personas | Skip | Nobody makes the mistakes dreaming fixes; a dreamer would only add noise. |
+| No conversation store, or transcripts you are not allowed to keep | Skip | With nothing to check against, the dreamer can only guess. |
+| A handful of sessions so far | Not yet | There is little to verify. Turn it on once memory has built up. |
+
+## How often
+
+- **Nightly** (`everyMs: 24 * 60 * 60_000`) is the right default for a personal assistant.
+- **Every few hours** for a busy support persona where many sessions write memory each day.
+- **Weekly** for a persona that is rarely used.
+
+A pass that finds nothing costs one short model turn and writes nothing. The dreamer uses the
+runtime's model by default (`model: "inherit"`). Pass a cheaper model for it if you want; this
+job does not need your best one.
+
+## Customising
+
+**`DREAM.md`.** Put a `DREAM.md` in the home dir and it is appended after `DREAM_PROMPT`. Use it
+for what this persona's dreams should focus on ("keep travel and dietary preferences exact; drop
+small talk"). Write what memory is *for*, not a list of rules about what to record.
+
+**`instructions`.** The same thing, from code, appended after `DREAM.md`. Use it when the focus
+depends on the host.
+
+**Your own schedule.** `dreamer(dir, { store })` returns a plain agent. Start it with
+`startAgent` on any interval you like, or run one pass on demand with the heartbeat prompt (from
+cron, a CI job, a button, or a test):
+
+<Tabs syncKey="lang">
+<TabItem label="JavaScript">
+```ts
+const d = agents.dreamer("./personas/ava", { store, instructions: "Keep travel preferences exact." })
+agents.startAgent(d, { llm }, { everyMs: 6 * 60 * 60_000 })   // your own schedule
+const r = await d.run(agents.HEARTBEAT_PROMPT, { llm })       // or: one pass now
+```
+</TabItem>
+<TabItem label="Python">
+```python
+d = dreamer("./personas/ava", store=store, instructions="Keep travel preferences exact.")
+start_agent(d, llm=llm, every_ms=6 * 60 * 60_000)   # your own schedule
+r = await d.run(HEARTBEAT_PROMPT, llm=llm)         # or: one pass now
+```
+</TabItem>
+<TabItem label="Go">
+```go
+d, _ := agents.Dreamer("./personas/ava", agents.DreamerOptions{Store: store, Instructions: "Keep travel preferences exact."})
+agents.StartAgent(d, agents.StartOptions{Options: agents.Options{LLM: llm}, EveryMs: 6 * 60 * 60 * 1000}) // your own schedule
+r, _ := d.Run(agents.Options{LLM: llm}, agents.HeartbeatPrompt)                                          // or: one pass now
+```
+</TabItem>
+<TabItem label="Java">
+```java
+Agents.Agent d = Agents.dreamer(Path.of("personas/ava"), store, "Keep travel preferences exact.", null, null);
+Agents.startAgent(d, rtOpts, 6L * 60 * 60_000, null);    // your own schedule
+TaskResult r = d.run(rtOpts, Agents.HEARTBEAT_PROMPT);    // or: one pass now
+```
+</TabItem>
+<TabItem label="C#">
+```csharp
+var d = Home.Dreamer("./personas/ava", new Home.DreamerOptions { Store = store, Instructions = "Keep travel preferences exact." });
+Home.StartAgent(d, rtOpts, everyMs: 6 * 60 * 60_000);    // your own schedule
+var r = await d.RunAsync(rtOpts, Home.HeartbeatPrompt);  // or: one pass now
+```
+</TabItem>
+<TabItem label="Elixir">
+```elixir
+d = Home.dreamer("./personas/ava", store: store, instructions: "Keep travel preferences exact.")
+Home.start_agent(d, rt_opts, every_ms: 6 * 60 * 60_000)           # your own schedule
+r = Toolnexus.Agents.run(d, rt_opts, Home.heartbeat_prompt())     # or: one pass now
+```
+</TabItem>
+<TabItem label="Clojure">
+```clojure
+(def d (home/dreamer "./personas/ava" {:store store :instructions "Keep travel preferences exact."}))
+(home/start-agent d {:llm llm} {:every-ms (* 6 60 60000)})                  ; your own schedule
+(rt/run-agent (rt/create-runtime {:registry {(:name d) d} :llm llm})
+              (:name d) home/heartbeat-prompt)                               ; or: one pass now
+```
+</TabItem>
+<TabItem label="Rust">
+```rust
+let d = agents::dreamer("./personas/ava", DreamerOptions { store: Some(store), instructions: "Keep travel preferences exact.".into(), ..Default::default() })?;
+agents::start_agent(&d, StartOptions { options: opts.clone(), every_ms: 6 * 60 * 60_000, on_beat: None })?; // your own schedule
+let (r, _rt) = d.run(opts, agents::HEARTBEAT_PROMPT).await;                                                 // or: one pass now
+```
+</TabItem>
+</Tabs>
+
+<Aside type="note" title="Still not a new runtime">
+The dreamer is an ordinary agent on the ordinary heartbeat: `startAgent` posts a tick, the
+agent wakes, `HEARTBEAT_OK` stays silent. There is no `dreamOnce` or `startDreaming`. The
+`dream` option on `fromDir` only builds the dreamer and starts it next to the persona.
+</Aside>
+
+API reference: `dreamer` ([JS](/api/javascript/persona/dreamer/) ·
+[Python](/api/python/persona/dreamer/) · [Go](/api/go/persona/dreamer/) ·
+[Java](/api/java/persona/dreamer/) · [C#](/api/csharp/persona/dreamer/) ·
+[Elixir](/api/elixir/persona/dreamer/) · [Clojure](/api/clojure/persona/dreamer/) ·
+[Rust](/api/rust/persona/dreamer/)) and `transcriptSearchTool`
+([JS](/api/javascript/persona/transcript-search-tool/) ·
+[Python](/api/python/persona/transcript-search-tool/) ·
+[Go](/api/go/persona/transcript-search-tool/) ·
+[Java](/api/java/persona/transcript-search-tool/) ·
+[C#](/api/csharp/persona/transcript-search-tool/) ·
+[Elixir](/api/elixir/persona/transcript-search-tool/) ·
+[Clojure](/api/clojure/persona/transcript-search-tool/) ·
+[Rust](/api/rust/persona/transcript-search-tool/)).
+
+## Further reading
+
+- Anthropic, [The components of agent memory](https://www.anthropic.com/research/components-of-agent-memory)
+  (2026-11-06). Where the "dreaming" idea and the Mt. Moon example come from: memory has to be
+  checked against what happened, and that check is its own job.
+- Andrej Karpathy, the **LLM wiki** pattern: a short index, linked pages and a log, maintained
+  by the model from raw sources. The memory layout above is that pattern, with transcripts as
+  the sources.
+- [Persona agents](/toolnexus/persona-agents/): `fromDir`, the `memory` tool and `startAgent`.
+- [A self-improving agent](/toolnexus/scenarios/self-improving-agent/): the hand-written
+  consolidator that dreaming replaces.

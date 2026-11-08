@@ -18,6 +18,21 @@ type FromDirOptions struct {
 	Model  string    // model id (default "inherit")
 	Tools  []tn.Tool // extra tools beyond the memory builtin
 	Memory *bool     // nil ⇒ enabled; point at false to omit the memory tool
+
+	MemoryIndexCap *IndexCap     // nil ⇒ off; &IndexCap{} ⇒ the preset (200 lines / 25600 bytes)
+	Notes          bool          // notes tier of the memory tool (note:<slug>, read, list)
+	Dream          *DreamOptions // nil ⇒ off
+}
+
+type IndexCap struct {
+	MaxLines int // 0 ⇒ the preset's 200
+	MaxBytes int // 0 ⇒ the preset's 25600
+}
+
+type DreamOptions struct {
+	EveryMs      int64                // dream interval; must be > 0
+	Store        tn.ConversationStore // transcripts to check memory against; must implement List
+	Instructions string               // host prose appended after DreamPrompt
 }
 
 func FromDir(dir string, opts FromDirOptions) *Agent
@@ -266,6 +281,32 @@ func indexOfSub(s, sub string) int {
 | `Model` | `string` | `"inherit"` | The model id passed to `agents.Spec.Model`. |
 | `Tools` | `[]tn.Tool` | none | Extra tools beyond the memory builtin. |
 | `Memory` | `*bool` | `nil` (enabled) | Point at `false` to omit `MemoryTool(dir)` — a read-only persona. |
+| `MemoryIndexCap` | `*IndexCap` | `nil` (off) | Cap the injected `MEMORY.md`. A zero field takes `MemoryIndexCapPreset`'s value, so `&IndexCap{}` is the preset; a negative field panics. |
+| `Notes` | `bool` | `false` | Wire `MemoryToolWith(dir, MemoryToolOptions{Notes: true})` — the notes tier. |
+| `Dream` | `*DreamOptions` | `nil` (off) | Dream every `EveryMs` over `Store` once started with `StartAgent`. `EveryMs <= 0` panics. |
+
+## Memory hierarchy and dreaming (opt-in)
+
+Three more options, all off by default — absent, the soul, the `memory` tool and the files on
+disk are byte-identical to the plain call (SPEC §7E "Memory hierarchy" and "Dreaming").
+
+- **`MemoryIndexCap`** caps the `MEMORY.md` *index* injected into the soul at whole lines (`&IndexCap{}` ⇒ 200 lines / 25600 bytes, or set `MaxLines` / `MaxBytes`).
+  Over the cap, the kept lines are followed by a one-line notice telling the persona to keep the
+  index short; the file on disk is never touched, and `USER.md` is not capped.
+- **`Notes: true`** turns on the notes tier of the wired memory tool: target `note:<slug>` writes
+  `memory/<slug>.md`, plus `read` and `list` actions. Notes are never injected — the persona
+  reads them on demand and points to them from the index.
+- **`Dream: &DreamOptions{EveryMs, Store, Instructions}`** schedules a [dreamer](/api/go/persona/dreamer/) over the same directory. Only
+  when the persona is started with `StartAgent` does a `<name>-dreamer` agent get registered on
+  the same runtime with its own heartbeat; stopping the persona stops both. `Run`/`AsTool` never
+  dream. `Store` holds the transcripts the dreamer checks memory against; `Instructions` is host prose appended after `DreamPrompt`. An interval `<= 0` throws `fromDir: dream.everyMs must be > 0`.
+
+<Aside type="note" title="Go spells an absent cap field as zero">
+`IndexCap` holds plain `int`s, so Go cannot tell "missing" from `0`. A zero field therefore means
+"use the preset's value" and only a negative field is rejected — every other port rejects `0`.
+SPEC §7E names this as a permitted per-port difference. Invalid configuration is a programmer
+error here, so `FromDir` panics rather than returning an error.
+</Aside>
 
 ## See also
 

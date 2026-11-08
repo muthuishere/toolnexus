@@ -187,6 +187,36 @@ around. The tool's own description states this to the model ("loads at the START
 session"), so it never expects its write to be visible mid-turn.
 </Aside>
 
+`replace` and `remove` change only the **first** occurrence of the text. The **2 MB cap** only
+limits what goes into the prompt: a write always reads and rewrites the whole file, so a
+`MEMORY.md` over 2 MB is never cut short on disk. Writes are atomic, and writes to one file in one
+process are serialised.
+
+### A short index, with notes — `notes` and `memoryIndexCap`
+
+`MEMORY.md` goes into every prompt, so it should be a short **index**, not the whole memory.
+Two `fromDir` options (both off by default; leaving them out changes nothing) set that up:
+
+- **`notes: true`** gives the `memory` tool a second tier. `target: "note:<slug>"` writes
+  `memory/<slug>.md` with the same `add`/`replace`/`remove`. Notes are **never** injected; the
+  model reads them on demand with two new actions: `read` (`target` required: `self`, `user` or a
+  note) and `list` (one `<slug>\t<bytes>` line per note, sorted; `(no notes)` when empty). A slug
+  matches `^[a-z0-9][a-z0-9._-]{0,63}$` without `..`; anything else is an error and touches no file.
+- **`memoryIndexCap`** caps the injected `MEMORY.md` to whole lines. `true` means 200 lines /
+  25600 bytes; you can pass your own `maxLines` / `maxBytes`. It applies after the 2 MB cap, never
+  splits a character, and on truncation appends a notice telling the model to keep the index
+  short (and, with notes on, to move detail into `note:<slug>`).
+
+Port spellings: `memoryIndexCap` (JS, Java, C# `MemoryIndexCap`), `memory_index_cap` (Python,
+Elixir, Rust), `MemoryIndexCap: &agents.IndexCap{}` (Go), `:memory-index-cap` (Clojure).
+
+<Aside type="tip" title="Keep it true while it sleeps — Dreaming">
+A model-written index drifts: wrong facts stay, detail piles up, notes contradict each other.
+[Dreaming](/toolnexus/dreaming/) adds one more `fromDir` option, `dream: { everyMs, store }`, that
+runs a built-in dreamer on a schedule to check memory against the transcripts, fix it, and log
+each change to `memory/log.md`.
+</Aside>
+
 You rarely construct `memoryTool` directly (that's what `fromDir` does), but it is public — add
 it to any agent's `uses.tools` to give a non-persona agent a scratchpad:
 
@@ -833,6 +863,11 @@ the library ships the seams.
 
 ### 1. Dream / consolidation — a persona that tidies its own memory
 
+<Aside type="note" title="Built in now">
+For memory checked against the transcripts, use [Dreaming](/toolnexus/dreaming/) (`fromDir(dir, { dream })`)
+instead of this hand-written recipe.
+</Aside>
+
 Give the persona a `HEARTBEAT.md` that tells it to fold duplicate notes into `MEMORY.md`, then
 run it on a slow heartbeat (nightly). Each beat, it reads its own memory through the frozen
 snapshot and rewrites it with the `memory` tool — the write lands on disk and the *next* beat
@@ -913,6 +948,7 @@ The key is read from the environment by name and never printed.
 
 ## See also
 
+- [Dreaming](/toolnexus/dreaming/) — a built-in dreamer that keeps a persona's memory true against its transcripts.
 - [Sub-agents & teams](/toolnexus/subagents/) — the worker archetype and the six host verbs the heartbeat rides on.
 - [Suspension & the human loop](/toolnexus/suspension/) — how a persona parks on a human-in-the-loop request.
 - [SPEC.md §7E](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md#7e-agent-home--personas-source-agent-persona-surface) — the full cross-language contract (bootstrap order, memory semantics, heartbeat).

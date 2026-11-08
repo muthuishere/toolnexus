@@ -156,6 +156,7 @@ export default defineConfig({
 										{ label: 'Media generation', slug: 'media' },
 										{ label: 'Sub-agents & teams', slug: 'subagents' },
 										{ label: 'Persona agents', slug: 'persona-agents' },
+										{ label: 'Dreaming', slug: 'dreaming' },
 										{ label: 'Suspension & the human loop', slug: 'suspension' },
 									],
 								},

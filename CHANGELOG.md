@@ -27,6 +27,72 @@ Tracked in `openspec/changes/add-classifier-openai-decisions`. Shared fixture
 `examples/judge/backends/openai-decisions.json`. Docs: an "OpenAI (Decisions API)" section on the judge
 backends page and an openai recipe (yes/no, pick-one, score) in the judge cookbook, in all eight languages.
 
+### Memory hierarchy and dreaming
+
+A persona's memory can now stay small and stay true. **Everything is opt-in; a persona built
+without the new options is byte-identical to before.**
+
+- **`memoryIndexCap`** on `fromDir`: injects at most 200 lines / 25600 bytes of `MEMORY.md`
+  (whole lines, a fixed notice when cut) so a diligent persona no longer pays for an ever-growing
+  index on every turn. Disk is untouched.
+- **`notes: true`**: the `memory` tool gains `note:<slug>` targets (`memory/<slug>.md`, never
+  injected), `read` and a sorted `list`. Bad slugs (`../SOUL`, uppercase) are refused with no I/O.
+- **`transcriptSearchTool(store)`**: a read-only tool that searches stored conversations
+  (case-insensitive substring), so an agent can check what it believes against what happened.
+- **`dreamer(dir, { store })`** and **`fromDir(dir, { dream: { everyMs, store } })`**: a built-in
+  dream pass that verifies `MEMORY.md` against the transcripts, fixes or prunes claims, and
+  records every change in `memory/log.md`. No `HEARTBEAT.md` to write.
+- **A dream cannot delete correct memory without a trace.** The prompt removes a claim only when
+  the transcripts contradict it; a claim they merely do not mention stays, because transcripts get
+  pruned and silence is not evidence. The dreamer's `memory` tool refuses every action on
+  `USER.md` (`dreamer: USER.md is off-limits`) and `replace`/`remove` on `note:log`
+  (`dreamer: memory/log.md is append-only`), so a dream never edits the user model and can only
+  add to its own audit trail. Not done: no snapshot is taken before a pass — keep the home in git.
+- Transcript search folds case for ASCII letters only, now pinned by a fixture case: `É` in a
+  message is not found by `é`. A port using Unicode lowercasing fails it.
+- Memory writes are fsynced and serialised per file within a runtime, so concurrent agents no
+  longer lose each other's entries.
+- **`replace`/`remove` now change only the first match in every port.** python and java used to
+  change every occurrence; a `remove "x"` there deleted every "x" in the file.
+- The notes-off `memory` tool's description and schema are now identical in all eight ports.
+  python, go, rust, csharp and elixir had drifted ("next session" vs "NEXT session", a missing
+  `(with)`, no `target` description), so the text their models see changes slightly.
+- **`replace` inserts `with` literally everywhere.** js expanded `$&`, `$1`, `$$` in the
+  replacement (so a model writing "costs $&" got the matched text pasted in); all eight ports now
+  insert the text exactly, pinned by a fixture case.
+- Hardening from review, all eight ports: a slug with a trailing newline (`note:abc\n`) is
+  refused (elixir and csharp accepted it); `list` skips symlinks and directories and no longer
+  throws on a dangling symlink (js threw; most ports listed links); the write lock keys on the real
+  path, so a home reached through a symlink shares one lock with its real path; `limit: null`
+  is an error, not "no limit"; `tool_use` input keeps U+2028/U+2029 as-is (go and csharp escaped
+  them); `startAgent` throws `startAgent: dreamer name collision: <name>-dreamer is already
+  registered` instead of letting one agent silently shadow the other, and never leaves the
+  persona's heartbeat running when the dreamer fails to start.
+
+All eight ports; fixtures `examples/memory-hierarchy/` and `examples/dreaming/` (the "Mt. Moon"
+case: a dream pass fixes a wrong note and the next session answers differently). Docs: new
+"Dreaming" page. Not done: no cross-process write locking; no semantic search; clojure writes
+are not atomic (koine has no rename) and its lock is in-process only — SPEC §7E now lists this as a
+permitted per-port difference; clojure's note `list` uses a
+real-path check instead of lstat (koine has none), so a FIFO or socket named `x.md` would be listed; on
+a case-insensitive filesystem two spellings of one path may get two locks; a go `IndexCap` field of 0
+means "use the preset" rather than an error; rust custom conversation stores must override
+`supports_list()` to be searchable. Change: `openspec/changes/add-memory-hierarchy`.
+
+**Fix: the persona `memory` tool no longer truncates a `MEMORY.md` / `USER.md` larger than 2 MB.**
+The tool read the file through the same 2 MB cap used to build the system prompt, then wrote that
+capped text back. So once the file went over 2 MB, a single `add`, `replace` or `remove` cut it down
+to 2 MB on disk and wrote the truncation notice into it, silently losing everything after the cap.
+SPEC §7E always said the cap leaves the on-disk file untouched. Affected: **js, java and clojure**;
+the other five already edited the full file. Those three now do too, and seven ports (all but
+clojure) now write atomically (temp file + rename), so a crash mid-write cannot leave a half-written
+file; an existing file keeps its permission bits, a new one gets the usual `0666 & ~umask`. The cap still applies only when building the system prompt. Pinned by fixture key
+`H3_memoryWriteOver2MBPreservesDisk` in `examples/persona-agent/fixture.json`. Not done here:
+a `MEMORY.md` that is a symlink is now replaced by a regular file on the first write (the rename
+replaces the link), so point the home dir at the real directory rather than linking the file;
+clojure's write is not atomic yet (koine has no rename/move, so it needs adding to koine first);
+concurrent writers are addressed by the memory hierarchy entry above.
+
 **A mock model server: run any toolnexus client, classifier or media job with no key and no cost.**
 `tools/mock-llm/mock_llm.py` is one stdlib-only Python file (`python3 tools/mock-llm/mock_llm.py
 --port 8787`, base URL `http://127.0.0.1:8787/v1`, any key). It answers OpenAI chat and Anthropic

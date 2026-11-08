@@ -143,6 +143,34 @@ async def test_h3_memory_tool_persists_to_disk(tmp_path):
     assert not user_write.is_error and "Speaks Tamil" in (tmp_path / "USER.md").read_text(encoding="utf-8")
 
 
+async def test_memory_write_keeps_existing_file_mode(tmp_path):
+    import os
+
+    import pytest
+
+    if os.name != "posix":
+        pytest.skip("POSIX permission bits only")
+    dir = _write_dir(tmp_path, {"MEMORY.md": "- a\n"})
+    os.chmod(tmp_path / "MEMORY.md", 0o640)
+    r = await _exec(memory_tool(dir), {"action": "add", "text": "b"})
+    assert not r.is_error, r.output
+    assert os.stat(tmp_path / "MEMORY.md").st_mode & 0o777 == 0o640
+
+
+async def test_h3_memory_write_over_2mb_preserves_disk(tmp_path):
+    assert FIXTURE["expect"]["H3_memoryWriteOver2MBPreservesDisk"] is True
+    original = "x" * (2097152 + 100000)
+    dir = _write_dir(tmp_path, {"MEMORY.md": original})
+    r = await _exec(memory_tool(dir), {"action": "add", "text": "x"})
+    assert not r.is_error, r.output
+    disk = (tmp_path / "MEMORY.md").read_bytes()
+    entry = b"\n- x\n"
+    assert len(disk) == len(original) + len(entry)
+    assert disk.startswith(original.encode())
+    assert b"[truncated" not in disk
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["MEMORY.md"]  # no temp file left
+
+
 # --------------------------------------------------------------------------- #
 # H4 — frozen-snapshot: a mid-session write does NOT change the live prompt,
 # but the NEXT session's snapshot carries it (2 checks)

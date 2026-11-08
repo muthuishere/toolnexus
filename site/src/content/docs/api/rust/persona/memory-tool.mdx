@@ -147,7 +147,52 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 | `replace` | Swaps the first occurrence of `text` with `with`. `is_error` if `text` is absent. | same |
 | `remove` | Deletes the first occurrence of `text`. `is_error` if `text` is absent. | same |
 
+## The notes tier — `notes`
+
+```rust
+pub fn memory_tool_with(dir: impl AsRef<Path>, opts: MemoryToolOptions) -> Tool   // MemoryToolOptions { notes: true }
+from_dir(dir, FromDirOptions { notes: true, memory_index_cap: Some(MemoryIndexCap::default()), ..Default::default() })
+```
+
+Turn on `notes` (off by default) and the same `memory` tool grows a second tier. `MEMORY.md`
+stays a **short index** loaded every session; the detail lives in **notes** at
+`<dir>/memory/<slug>.md`, which are **never** injected into the prompt and are read only on
+demand. With `notes` off, the tool's schema, description and behaviour are exactly as above.
+
+| Addition | What it does |
+|---|---|
+| `target: "note:<slug>"` | `add` / `replace` / `remove` on `memory/<slug>.md`. `add` to a missing note creates it (and `memory/`). |
+| `action: "read"` | Returns a file's content (`target` required: `self`, `user`, or a note). A missing note is an error. |
+| `action: "list"` | One line per note, `<slug>\t<bytes>`, sorted by slug; `(no notes)` when empty. |
+
+A slug matches `^[a-z0-9][a-z0-9._-]{0,63}$` and may not contain `..`; anything else is an
+error before any file is touched. `replace` and `remove` change only the **first** occurrence of
+the text, in every target. Writes are atomic (temp file, then rename), and writes to the same
+file in one process are serialised, so parallel `add`s never lose an entry. Two processes
+writing the same file: the last write wins.
+
+```rust
+use serde_json::json;
+use toolnexus::agents::{MemoryToolOptions, memory_tool_with};
+
+let mem = memory_tool_with("./personas/ava", MemoryToolOptions { notes: true });
+
+mem.call(json!({"action": "add", "target": "note:travel", "text": "prefers aisle seats"}), Default::default()).await;
+mem.call(json!({"action": "add", "text": "travel prefs: see [[travel]]"}), Default::default()).await; // the index line
+
+println!("{}", mem.call(json!({"action": "list"}), Default::default()).await.output); // travel\t22
+println!("{}", mem.call(json!({"action": "read", "target": "note:travel"}), Default::default()).await.output); // - prefers aisle seats
+```
+
+The **2 MB cap** only limits what goes into the prompt. Writes always read and rewrite the
+whole file, so a `MEMORY.md` over 2 MB is never cut short on disk. The separate
+`memoryIndexCap` option on [`fromDir`](/api/rust/persona/from-dir/) caps the injected index
+to whole lines (`true` = 200 lines / 25600 bytes) and adds a notice telling the model to move
+detail into notes.
+
 ## See also
 
 - [`compose_soul`](/api/rust/persona/compose-soul/) — Build a persona's system prompt from its home directory: identity, memory, skills.
 - [`from_dir`](/api/rust/persona/from-dir/) — Point at an agent home directory and get a configured agent back — wires this tool for you.
+- [`dreamer`](/api/rust/persona/dreamer/) — The built-in agent that keeps notes true against the transcripts.
+- [`transcriptSearchTool`](/api/rust/persona/transcript-search-tool/) — Read-only search over past conversations.

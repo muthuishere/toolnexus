@@ -19,6 +19,9 @@ def agent_from_dir(
     does: str | None = None,
     memory: bool = True,
     tools: list[Tool] | None = None,
+    memory_index_cap: bool | dict | None = None,   # True ⇒ 200 lines / 25600 bytes
+    notes: bool = False,
+    dream: dict | None = None,   # {"every_ms": ..., "store": ..., "instructions": ...}
     **opts: Any,          # forwarded to Agent(...): team, budget, model, wait_for, ...
 ) -> Agent
 ```
@@ -224,7 +227,29 @@ asyncio.run(main())
 | `does` | `str \| None` | Defaults to `f"persona agent from {dir}"`. |
 | `memory` | `bool` | Default `True` — wires [`memory_tool(dir)`](/api/python/persona/memory-tool/) into `uses["tools"]`. |
 | `tools` | `list[Tool] \| None` | Extra tools appended alongside the memory tool (and any `uses["tools"]` in `**opts`). |
+| `memory_index_cap` | `bool \| dict \| None` | Cap the injected `MEMORY.md`: `True` ⇒ `MEMORY_INDEX_CAP_PRESET` (200 lines / 25600 bytes); a dict `{"max_lines": ..., "max_bytes": ...}` (camelCase keys also accepted) takes the preset for a missing key; `< 1` or non-integer raises `ValueError`. Default `None` (off). |
+| `notes` | `bool` | Default `False` — `True` wires `memory_tool(dir, notes=True)` (the notes tier). |
+| `dream` | `dict \| None` | `{"every_ms": ..., "store": ..., "instructions": ...}` (`everyMs` also accepted) — dream on a schedule once started with `start_agent`. Default `None` (off). |
 | `**opts` | — | Forwarded verbatim to `Agent(...)`: `team`, `budget`, `model`, `wait_for`, `on_spawn`, `on_close`, `hooks`, `on_metric`. |
+
+## Memory hierarchy and dreaming (opt-in)
+
+Three more options, all off by default — absent, the soul, the `memory` tool and the files on
+disk are byte-identical to the plain call (SPEC §7E "Memory hierarchy" and "Dreaming").
+
+- **`memory_index_cap`** caps the `MEMORY.md` *index* injected into the soul at whole lines (`True` ⇒ 200 lines / 25600 bytes, or `{"max_lines": ..., "max_bytes": ...}`).
+  Over the cap, the kept lines are followed by a one-line notice telling the persona to keep the
+  index short; the file on disk is never touched, and `USER.md` is not capped.
+- **`notes=True`** turns on the notes tier of the wired memory tool: target `note:<slug>` writes
+  `memory/<slug>.md`, plus `read` and `list` actions. Notes are never injected — the persona
+  reads them on demand and points to them from the index.
+- **`dream={"every_ms": ..., "store": ..., "instructions": ...}`** schedules a [dreamer](/api/python/persona/dreamer/) over the same directory. Only
+  when the persona is started with `start_agent` does a `<name>-dreamer` agent get registered on
+  the same runtime with its own heartbeat; stopping the persona stops both. `run`/`as_tool` never
+  dream. `store` is the conversation store whose transcripts the dreamer checks memory against; `instructions` is host prose appended after `DREAM_PROMPT`. An interval `<= 0` throws `fromDir: dream.everyMs must be > 0`.
+
+The Python function is `start_agent` (the SPEC's `startAgent`); the error text keeps the SPEC's
+camelCase spelling, so it is byte-identical across ports.
 
 ## See also
 

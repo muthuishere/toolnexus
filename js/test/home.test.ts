@@ -193,6 +193,29 @@ test("H3: memory add/replace/remove persist; missing substring is a loud error; 
   assert.ok(!userWrite.isError && read("USER.md").includes("Speaks Tamil"))
 })
 
+test("memory write keeps an existing file's permission bits", { skip: process.platform === "win32" }, async () => {
+  const dir = mkdir({ "MEMORY.md": "- a\n" })
+  const file = path.join(dir, "MEMORY.md")
+  fs.chmodSync(file, 0o640)
+  const r = await memoryTool(dir).execute({ action: "add", text: "b" })
+  assert.ok(!r.isError, r.output)
+  assert.equal(fs.statSync(file).mode & 0o777, 0o640)
+})
+
+test("H3: memory write over the 2 MB cap preserves the on-disk file (cap is read-side only)", async () => {
+  assert.equal(FIXTURE.expect.H3_memoryWriteOver2MBPreservesDisk, true)
+  const original = "x".repeat(2097152 + 100000)
+  const dir = mkdir({ "MEMORY.md": original })
+  const r = await memoryTool(dir).execute({ action: "add", text: "x" })
+  assert.ok(!r.isError, r.output)
+  const disk = fs.readFileSync(path.join(dir, "MEMORY.md"), "utf8")
+  const entry = "\n- x\n"
+  assert.equal(Buffer.byteLength(disk), Buffer.byteLength(original) + Buffer.byteLength(entry))
+  assert.ok(disk.startsWith(original))
+  assert.ok(!disk.includes("[truncated"))
+  assert.deepEqual(fs.readdirSync(dir), ["MEMORY.md"]) // atomic write leaves no temp file
+})
+
 // ===========================================================================
 // H4 — frozen-snapshot: a mid-session write hits disk, not the live prompt
 // ===========================================================================
