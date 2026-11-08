@@ -2032,8 +2032,8 @@ wired (`fromDir`, or `memoryTool(dir)` added to `uses.tools`). One tool, three a
 | action | effect |
 |--------|--------|
 | `add` | append an entry |
-| `replace` | swap an existing substring (`with`) |
-| `remove` | delete an existing substring |
+| `replace` | swap the **first** occurrence of an existing substring (`with`) |
+| `remove` | delete the **first** occurrence of an existing substring |
 
 `target` = `self` (`MEMORY.md`, default) or `user` (`USER.md`). **All actions write to disk.**
 A `replace`/`remove` whose substring is absent ⇒ loud `isError`. The tool **does not** mutate
@@ -2052,11 +2052,142 @@ runtime's **injectable clock** (fixtures run on a virtual clock). Inbound **chan
 host's job**: deliver external events by calling `post`/`wake` — the library owns the
 trigger→turn seam, not a scheduler or gateway.
 
+### Memory hierarchy (opt-in; fixture `examples/memory-hierarchy/`)
+
+Three tiers on existing seams. **Every option below is opt-in; absent, the soul, the `memory`
+tool (schema, description, behavior) and the files on disk are byte-identical to the above.**
+
+| tier | file(s) | injected? | written by | read by |
+|------|---------|-----------|------------|---------|
+| index | `MEMORY.md` (+ `USER.md`) | yes, at session start | `memory` target `self`/`user` | the soul |
+| notes | `<home>/memory/<slug>.md` | **never** | `memory` target `note:<slug>` | `memory` `read`/`list` |
+| ground truth | a `ConversationStore` | never | the client loop | `transcriptSearchTool` |
+
+**Index cap — `fromDir(dir, { memoryIndexCap })`** (also `composeSoul(dir, { memoryIndexCap, notes })`).
+Value `true` ⇒ preset `{maxLines: 200, maxBytes: 25600}`; an object's missing field takes the
+preset's; a value `< 1` or non-integer ⇒ construction error. Applies to `MEMORY.md` only,
+**after** the 2 MB read cap and **before** the section `trim`. Algorithm (exact):
+1. `lines` = content split on `"\n"`; if content ends with `"\n"`, drop the final empty element.
+2. If `len(lines) <= maxLines` and UTF-8 length of `join(lines, "\n") <= maxBytes` ⇒ content unchanged.
+3. Else `kept` = first `maxLines` lines; while `len(kept) > 1` and UTF-8 length of
+   `join(kept, "\n") > maxBytes`, drop the last; if the lone remaining line still exceeds
+   `maxBytes`, cut it at the last whole code point whose UTF-8 end is `<= maxBytes`.
+4. Result = `join(kept, "\n")` + notice, where the notice is exactly (`<N>`/`<B>` = the cap
+   values, not the kept counts):
+   - notes on: `\n\n[MEMORY.md index truncated at <N> lines / <B> bytes. Keep MEMORY.md a short index; move detail into notes (memory target "note:<slug>").]`
+   - notes off: `\n\n[MEMORY.md index truncated at <N> lines / <B> bytes. Keep MEMORY.md a short index (keep entries short).]`
+
+Disk is never touched. `USER.md` is not capped.
+
+**Notes tier — `fromDir(dir, { notes: true })` / `memoryTool(dir, { notes: true })`.**
+Notes off ⇒ the tool is exactly the one above (an unrecognised `target` still means `self`;
+`read`/`list` ⇒ `unknown action: <action>`). Notes on, the tool becomes:
+
+- description (exact): `Persist durable memory. MEMORY.md is a short index loaded at the start of every session; put detail in notes (target note:<slug>, stored in memory/<slug>.md, never loaded automatically) and point to them from the index. Record what will change a future decision. action=add appends an entry; replace swaps the first occurrence of an existing substring (with); remove deletes it; read returns a file; list lists the notes. target=self (MEMORY.md, default), user (USER.md) or note:<slug> (slug: lowercase letters, digits, '.', '_', '-'). Writes persist to disk and load at the START of your NEXT session — they do NOT change your current context.`
+- schema: `action` enum `["add","replace","remove","read","list"]`; `target` a plain string (no enum)
+  described `self=MEMORY.md (default), user=USER.md, note:<slug>=memory/<slug>.md`; `text`/`with`
+  as above; `required: ["action"]` (property order as listed; fixture-pinned).
+- `target` resolution: absent ⇒ `self`; `self`/`user` as above; `note:<slug>` ⇒
+  `<home>/memory/<slug>.md` when slug matches `^[a-z0-9][a-z0-9._-]{0,63}$` **and** does not
+  contain `..`, else `isError` `invalid note slug: <slug>` with **no I/O**; anything else ⇒
+  `isError` `unknown target: <target>`.
+- `add`/`replace`/`remove`: same semantics as `self`; `text` not a string ⇒ `isError`
+  `text is required`. `add` to a missing note creates it (and `memory/`). Success:
+  notes ⇒ `ok (<action> → memory/<slug>.md)`; `self`/`user` ⇒ unchanged
+  (`ok (<action> → MEMORY.md); loads next session`).
+- `read`: the file's content with the 2 MB byte cap + bootstrap truncation notice (never
+  written back); missing file ⇒ `isError` `not found: <target>` (`<target>` as given, `self`
+  when absent).
+- `list` (ignores `target`): one line `<slug>\t<bytes>` per regular file `memory/<slug>.md` whose
+  slug is valid, sorted by slug ascending **by explicit sort** (code-point order — never rely on
+  directory order), joined by `"\n"`, no trailing newline; none ⇒ `(no notes)`. `log.md` is listed.
+- Notes are **never** injected into the soul.
+
+**Write safety (always on).** Every `memory` write is atomic: a temp file in the same
+directory, flushed (fsync), renamed over the target; an existing file's permission bits are kept.
+Read-modify-write (`add`/`replace`/`remove`) reads the **full** file (never the capped view) and
+is serialized per **resolved absolute path** within one runtime/process (two tools over one home
+in one runtime lose nothing). Across processes the last rename wins (not fixed).
+
+**`transcriptSearchTool(store, { maxResults? = 20, snippetChars? = 200, name? = "transcript_search" })`** —
+a read-only `Tool` over a `ConversationStore`. Construction throws
+`transcriptSearchTool: the store must implement list()` when the store has no `list()`; a
+`maxResults`/`snippetChars` `< 1` throws. Description (exact): `Search past conversation transcripts — the ground truth of what actually happened. Case-insensitive substring match over message text. Returns one line per matching message: <conversationId>#<index> <role>: <snippet>. Read-only.`
+Schema: `query` (string, `Text to find (case-insensitive substring).`), `conversationId`
+(string, `Search only this conversation.`), `limit` (integer, `Most hits to return (default and max <maxResults>).`); `required: ["query"]`.
+
+- **Message text** = pieces joined by `"\n"`: string `content`; for array content, each part in
+  order — `text` parts' `text`, `tool_use` parts' `input` as compact JSON (no spaces, keys in
+  stored order), `tool_result` parts' content (recursively, same rules); other parts (images…)
+  contribute nothing; then each OpenAI `tool_calls[].function.arguments` string verbatim. The
+  text is then **normalized**: every run of ASCII whitespace (space, `\t \n \r \f \v`) ⇒ one
+  space, leading/trailing space trimmed.
+- **Query** is normalized the same way; empty ⇒ `isError` `query is required` **before** the
+  store is read. `limit` present and not an integer `>= 1` ⇒ `isError` `limit must be an integer >= 1`;
+  else effective limit = `min(limit, maxResults)` (absent ⇒ `maxResults`).
+- **Match** = substring after **ASCII-only** case folding (`A–Z` ⇒ `a–z`; no Unicode
+  lowercasing). One hit per message, at its first match. Positions and lengths are in **code
+  points**.
+- **Order**: conversations in `list()` order (newest first) — or only `conversationId`
+  (`get` it; absent ⇒ no hits) — messages ascending by 0-based index.
+- **Line** per hit: `<conversationId>#<index> <role>: <snippet>` (`role` = the message's `role`,
+  `unknown` if not a string). Snippet: whole text if it is `<= snippetChars` code points; else a
+  window of `snippetChars` code points starting at
+  `clamp(matchStart + floor(queryLen/2) - floor(snippetChars/2), 0, len - snippetChars)`,
+  prefixed `…` if it does not start at 0 and suffixed `…` if it does not reach the end
+  (the `…` are not counted).
+- **Output**: hit lines joined by `"\n"`; when total hits exceed the limit, a final line
+  `(+<k> more)` (`k` = hits not shown); no hits ⇒ `no matches`. Never writes.
+
+### Dreaming (fixture `examples/dreaming/`; build gate: Mt. Moon)
+
+A dream is a heartbeat pass in which a persona checks its memory against the transcripts and
+tidies it. One preset, one option — no new verb or loop (ADR 0016/0017 stand).
+
+**`DREAM_PROMPT`** — byte-identical in every port (lines joined by `"\n"`, no trailing newline):
+
+```
+You are dreaming: an offline pass over your own memory. Memory exists so that a future session decides better. MEMORY.md is a short index loaded at the start of every session; notes (memory target "note:<slug>") hold the detail; the transcripts (transcript_search) are the ground truth of what actually happened.
+Work in this order:
+1. Verify: read MEMORY.md and the notes it points to (memory read, memory list) and check each claim against the transcripts. Fix a claim the transcripts contradict; remove one they no longer support.
+2. Demote: move detail out of MEMORY.md into a note and leave a one-line [[slug]] pointer, so the index stays short.
+3. Merge: fold duplicate or conflicting notes into one.
+4. Repair links: point every [[slug]] at an existing note or create it; give every note an index line.
+5. Log: if you changed anything, append exactly one entry with memory add, target "note:log", text starting "dream: " and naming every change and why.
+If nothing needs changing, write nothing and reply HEARTBEAT_OK.
+```
+
+**`dreamer(dir, { store, instructions?, name?, model? })`** returns a plain agent:
+- tools **exactly** `[memory (notes on, over dir), transcript_search (over store)]`, in that
+  order — never the persona's own tools;
+- soul = `## HEARTBEAT.md\n\n` + parts joined by `"\n\n"`, parts = `DREAM_PROMPT`, then
+  `<dir>/DREAM.md` (2 MB cap, trimmed, only if non-empty), then `instructions` (trimmed, only if
+  non-empty). Because the prompt sits in a `HEARTBEAT.md` section, the ordinary
+  `HEARTBEAT_PROMPT` wake drives a pass and `HEARTBEAT_OK` keeps an idle pass silent;
+- `name` default `<basename(dir)>-dreamer`; `model` default `"inherit"` (the persona's client —
+  docs recommend a cheap model); `does` = `dreams over the memory in <dir>`;
+- `store` missing ⇒ throws `dreamer: store is required`; a store without `list()` ⇒ the
+  `transcriptSearchTool` error. Schedule it with `startAgent(d, …, { everyMs })` or run one
+  pass with `d.run(HEARTBEAT_PROMPT, …)`.
+
+**`fromDir(dir, { dream: { everyMs, store, instructions? } })`** — opt-in sugar. `everyMs <= 0`
+⇒ throws. When the returned persona is started with `startAgent`, a
+`dreamer(dir, { store, instructions, name: "<persona name>-dreamer" })` is registered on the
+**same runtime**, spawned under its root, and given its own heartbeat at `everyMs` (same tick/
+coalesce/wake rules as above); `stop()` stops both. Dreamer replies never reach `onBeat` /
+`beats`. `run()`/`asTool()` of the persona never dream. Absent `dream` ⇒ only the persona is
+registered and spawned (byte-identical).
+
+**`memory/log.md`** — the audit/revert trail. A pass that changes anything appends exactly one
+entry through the memory tool (`add`, target `note:log`, text beginning `dream: `), so the on-disk
+entry is `- dream: <every change and why>\n`. A pass that changes nothing writes nothing. The
+library does not enforce the log or the `[[slug]]` link syntax — `DREAM_PROMPT` asks for them.
+
 ### Composition, not API
 
-Higher patterns are recipes over the above, no new surface: **dream / consolidation** = a
-`startAgent` whose `HEARTBEAT.md` says "fold notes into `MEMORY.md` via the memory tool"; a
-**channel assistant** = the host's inbound handler calling `post`/`wake`.
+Higher patterns are recipes over the above: **dream / consolidation** ships as the one preset,
+`dreamer()` (above) — a plain agent over the `memory` tool and `transcriptSearchTool`, not a new
+verb or loop; a **channel assistant** = the host's inbound handler calling `post`/`wake`.
 
 ---
 
