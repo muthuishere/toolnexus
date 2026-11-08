@@ -414,6 +414,37 @@ public class MemoryHierarchyTests
         => new() { Handler = h, ApiKey = "test", Clock = clock };
 
     [Fact]
+    public async Task D7_DreamGuard_UserUntouched_LogAppendOnly()
+    {
+        var e = DR["expect"]!["D7_dreamGuard"]!;
+        var home = MkHome(Files(e["files"]));
+        try
+        {
+            var mem = Home.Dreamer(home, new Home.DreamerOptions { Store = DrStore() }).Spec.Uses![0];
+            foreach (var c in e["cases"]!.AsArray())
+            {
+                var r = await mem.ExecuteAsync(Args(c!["args"]!));
+                Assert.Equal((c["output"]!.GetValue<string>(), c["isError"]!.GetValue<bool>()), (r.Output, r.IsError));
+            }
+            var snap = Snapshot(home);
+            Assert.Equal(Files(e["files"]).Keys.OrderBy(k => k, StringComparer.Ordinal), snap.Keys.OrderBy(k => k, StringComparer.Ordinal));
+            foreach (var (k, v) in Files(e["filesAfter"])) Assert.Equal(v, snap[k]);
+            var p = e["plainToolStillWrites"]!;
+            var pr = await Home.MemoryTool(home, notes: true).ExecuteAsync(Args(p["args"]!));
+            Assert.Equal((p["output"]!.GetValue<string>(), p["isError"]!.GetValue<bool>()), (pr.Output, pr.IsError));
+        }
+        finally { Directory.Delete(home, true); }
+    }
+
+    [Fact]
+    public void D8_DreamPromptRemovesOnlyContradicted()
+    {
+        var e = DR["expect"]!["D8_promptKeepsUnmentionedClaims"]!;
+        Assert.Contains(e["dreamPromptContains"]!.GetValue<string>(), Home.DreamPrompt);
+        Assert.DoesNotContain(e["dreamPromptNotContains"]!.GetValue<string>(), Home.DreamPrompt);
+    }
+
+    [Fact]
     public void D0_DreamPromptIsFixtureText()
         => Assert.Equal(DR["dreamPrompt"]!.GetValue<string>(), Home.DreamPrompt);
 
