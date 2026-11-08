@@ -3,9 +3,9 @@
 ### Requirement: Default LLM transport reuses connections
 
 When the host supplies no HTTP transport, the default transport SHALL reuse a persistent connection
-to the same scheme, host and port across LLM requests, and SHALL retry a request once on a fresh
-connection when a reused idle connection turns out to have been closed by the server. A connection
-that fails on its first use SHALL surface the error without retrying. HTTP error statuses SHALL be
+to the same scheme, host and port across LLM requests. A reused connection the server closed while
+idle SHALL be replaced before the request is sent. A request that fails after it was sent SHALL NOT
+be re-sent. HTTP error statuses SHALL be
 reported with the same status, body and raw `Retry-After` value as before. When a proxy applies
 from the environment, the previous transport SHALL be used unchanged.
 
@@ -28,3 +28,8 @@ from the environment, the previous transport SHALL be used unchanged.
 
 - **WHEN** the host passes its own transport or fetch
 - **THEN** the default keep-alive transport is not used
+
+#### Scenario: Drop after the request was sent
+
+- **WHEN** the server reads a request on a reused connection and closes it without answering
+- **THEN** the error surfaces and the request is not sent again

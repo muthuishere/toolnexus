@@ -38,8 +38,10 @@ per request, before → after, interleaved with a clean HEAD build on one machin
 js 3.28 → ~0.55 ms, java 2.89 → 2.54 ms (0.88 ms once the JIT is warm) with init 358 → 180 ms, csharp
 init 93 → 62 ms. These numbers are from a busy machine; the standing page changes only after a quiet re-run.
 
-- **python, js:** the default LLM transport keeps the connection open and retries once if the server
-  dropped it while idle. It steps aside, exactly as before, when a proxy env var applies or you pass
+- **python, js:** the default LLM transport keeps the connection open. A connection the server dropped
+  while idle is replaced before use; a request that failed after it was sent is never re-sent, so a
+  model call cannot be billed twice. js follows redirects from the target and leaves a host-installed
+  undici dispatcher in charge. It steps aside, exactly as before, when a proxy env var applies or you pass
   your own transport/`fetch`. js uses it on Node only; Bun, Deno and browsers keep the platform `fetch`.
 - **python, csharp behaviour change:** the proxy decision is cached per scheme and host, so a system
   proxy changed while the process runs is not picked up. Python's `urllib` already read it once per process.
