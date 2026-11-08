@@ -1,74 +1,129 @@
 ---
-title: "fromDir — load a persona from disk"
+title: "toolnexus.agents.home/from-dir"
 description: "Point at an agent home directory and get a configured agent back. — Clojure."
 sidebar:
-  label: "persona / from-dir"
+  label: "toolnexus.agents.home/from-dir"
 ---
 
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Clojure (JVM) + cljgo</strong> · package <code>net.clojars.muthuishere/toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7E</a>
+<strong>Clojure (JVM) + cljgo</strong> · package <code>net.clojars.muthuishere/toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7E</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/clojure/src/toolnexus/agents/home.cljc">clojure/src/toolnexus/agents/home.cljc</a>
 </p>
 
-<Aside type="caution" title="Not available in Clojure">
-There is no agent home in this port, so there is nothing to load one from. What it does read off disk
-is a **skills** directory — `toolnexus.skill/load-skills` globs `**/SKILL.md` — and that is the whole
-filesystem-to-capability path here.
-</Aside>
-
-Point at an agent home directory and get a configured agent back.
-
-`fromDir` is the one-call form of §7E: a path in, a fully configured agent out — prompt, skills,
-memory and model all resolved from the directory's layout. It exists so an operator can add a persona
-by creating a folder, with no deploy.
-
-## What to use instead
-
-Skills already work exactly that way, and they are the part of a persona that actually needs
-discovery. A directory of `SKILL.md` files becomes a catalog with no code change:
-
 ```clojure
-(require '[toolnexus.core :as core]
-         '[toolnexus.client :as client]
-         '[koine.fs :as fs]
-         '[koine.json :as json])
-
-(defn load-persona
-  "Everything this port can resolve from a directory: skills by discovery,
-   the prompt by convention, the model from your own config."
-  [home]
-  (let [tk  (core/build {:skills (str home "/skills")})
-        cfg (if (fs/exists? (str home "/agent.json"))
-              (json/read-str (fs/read-file (str home "/agent.json")))
-              {})]
-    {:toolkit tk
-     :client  (client/create-client
-                {:base-url      (or (:base-url cfg) "https://api.anthropic.com")
-                 :style         (or (:style cfg) "anthropic")
-                 :model         (or (:model cfg) "claude-sonnet-4-6")
-                 :max-turns     (or (:max-turns cfg) 10)
-                 :system-prompt (when (fs/exists? (str home "/IDENTITY.md"))
-                                  (fs/read-file (str home "/IDENTITY.md")))})}))
-
-(let [{:keys [client toolkit]} (load-persona "agents/researcher")]
-  (client/run client "what changed this week?" {:toolkit toolkit}))
+(home/from-dir dir)
+(home/from-dir dir {:name             "…"     ; default: the directory's last segment
+                    :does             "…"     ; default "persona agent from <dir>"
+                    :model            "…"     ; default "inherit"
+                    :tools            [...]   ; extra tools, placed BEFORE the memory tool
+                    :memory           false   ; omit the memory tool (read-only persona)
+                    :memory-index-cap true    ; or {:max-lines n :max-bytes n}; off by default
+                    :notes            true    ; notes tier of the memory tool; off by default
+                    :dream            {:every-ms ms :store store :instructions "…"}})
+;; => an AgentDef map
 ```
 
-Three things make this less than `fromDir`. There is no agreed directory layout, so `IDENTITY.md`
-and `agent.json` are your conventions and will not match another port's. There is no memory the agent
-writes back to. And a missing skills root is only a warning — `load-skills` contributes nothing and
-carries on, so a typo in the path yields a persona with no capabilities rather than an error.
+The directory **is** the agent. `from-dir` runs [`compose-soul`](/api/clojure/persona/compose-soul/)
+over `dir` once, so the soul is a frozen snapshot for the whole run, and wires a
+[`memory-tool`](/api/clojure/persona/memory-tool/) over the same directory unless `:memory false`.
+The return value is a plain AgentDef map — this port's spelling of a §7D agent. Put it in a
+runtime's `:registry` and `rt/run-agent` / `rt/agent-tool` work on it unchanged, or hand it to
+`home/start-agent` for a heartbeat.
 
-If the discovery you want is *skills* rather than a whole persona, the port has more than a directory
-glob: [`toolnexus.core/build`](/api/clojure/toolkit/create/) takes `:skill-defs` for skills supplied
-as data, `:skill-provider` for a function that produces them at build time, and `:skills-filter` to
-narrow the catalog per agent. A persona registry backed by a database rather than a filesystem is a
-`:skill-provider`, not a directory walk.
+## When to use it
+
+Whenever a persona's identity lives in files — `SOUL.md`, `AGENTS.md`, `USER.md`, `MEMORY.md` and
+the rest of the bootstrap set — and you want one call that turns that folder into a runnable
+agent with durable memory already wired. An operator adds a persona by creating a folder; no
+code change.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Build the AgentDef yourself when the soul is not on disk">
+`from-dir` is a convenience over writing `{:name … :soul … :tools […]}` by hand for the specific
+case where soul and memory share one directory. When the soul comes from a database row or a
+template, or you need AgentDef keys `from-dir` does not take (`:team`, `:budget`), call
+`compose-soul` and `memory-tool` yourself and assemble the map.
+</Aside>
+
+## Examples
+
+### 1. The smallest useful call — a directory becomes an agent
+
+```clojure
+(require '[toolnexus.agents.home :as home])
+
+(def ava (home/from-dir "./personas/ava"))
+
+(:name ava)                     ;; => "ava"
+(:model ava)                    ;; => "inherit"
+(mapv :name (:tools ava))       ;; => ["memory"]
+```
+
+### 2. The realistic case — run it on a runtime
+
+```clojure
+(require '[toolnexus.agents.home :as home]
+         '[toolnexus.agents.runtime :as rt])
+
+(def support (home/from-dir "./personas/support"
+                            {:name "support" :does "answers support questions"}))
+
+(def runtime (rt/create-runtime {:registry {"support" support} :llm llm}))
+(println (:text (rt/run-agent runtime "support" "hello there")))
+```
+
+### 3. The full surface — capped index, notes, and nightly dreaming
+
+```clojure
+(require '[toolnexus.agents.home :as home]
+         '[toolnexus.client :as client])
+
+(def store (client/file-store "./data/conversations"))
+
+(def ava (home/from-dir "./personas/ava"
+                        {:memory-index-cap {:max-lines 120}         ; :max-bytes takes the preset's 25600
+                         :notes            true
+                         :dream            {:every-ms (* 24 60 60000) :store store}}))
+
+(def started (home/start-agent ava {:llm llm} {:every-ms (* 30 60000)}))
+;; ... "ava-dreamer" runs on the same runtime; ((:stop started)) stops both
+```
+
+## Options
+
+| Option | Default | What it does |
+|---|---|---|
+| `:name` | the directory's last segment | Agent name. |
+| `:does` | `"persona agent from <dir>"` | Routing description a delegating model sees. |
+| `:model` | `"inherit"` | Model id; `"inherit"` uses the runtime's `:llm` model. |
+| `:tools` | `[]` | Extra tools, placed before the memory tool. |
+| `:memory` | on | `false` omits the memory tool — a read-only persona. |
+| `:memory-index-cap` | off | Cap the injected `MEMORY.md`: `true` ⇒ `memory-index-cap-preset` (200 lines / 25600 bytes); a map `{:max-lines :max-bytes}` takes the preset for a missing key; a value `< 1` or non-integer throws. |
+| `:notes` | off | `true` wires `(memory-tool dir {:notes true})` — the notes tier. |
+| `:dream` | off | `{:every-ms :store :instructions}` — dream on a schedule once started with `start-agent`. |
+
+## Memory hierarchy and dreaming (opt-in)
+
+Three options, all off by default — absent, the soul, the `memory` tool and the files on disk are
+byte-identical to the plain call (SPEC §7E "Memory hierarchy" and "Dreaming").
+
+- **`:memory-index-cap`** caps the `MEMORY.md` *index* injected into the soul at whole lines.
+  Over the cap, the kept lines are followed by a one-line notice telling the persona to keep the
+  index short; the file on disk is never touched, and `USER.md` is not capped.
+- **`:notes true`** turns on the notes tier of the wired memory tool: target `note:<slug>` writes
+  `memory/<slug>.md`, plus `read` and `list` actions. Notes are never injected — the persona
+  reads them on demand and points to them from the index.
+- **`:dream`** schedules a [dreamer](/api/clojure/persona/dreamer/) over the same directory. Only
+  when the persona is started with `start-agent` does a `<name>-dreamer` agent get registered on
+  the same runtime with its own heartbeat; stopping the persona stops both. `rt/run-agent` /
+  `rt/agent-tool` never dream. `:store` is the conversation store whose transcripts the dreamer
+  checks memory against; `:instructions` is host prose appended after `dream-prompt`. A
+  `:every-ms` `<= 0` throws `fromDir: dream.everyMs must be > 0`.
 
 ## See also
 
-- [`toolnexus.skill/load-skills`](/api/clojure/skills/load/) — the directory discovery that does ship
-- [`skills / load-with`](/api/clojure/skills/load-with/) — skills as data, a provider fn, and per-agent filters
-- [`toolnexus.client/create-client`](/api/clojure/client/create/) — the model and prompt half
-- [`persona / compose-soul`](/api/clojure/persona/compose-soul/) — the prompt assembly this would perform
+- [`compose-soul`](/api/clojure/persona/compose-soul/) — Build a persona's system prompt from its home directory: identity, memory, skills.
+- [`memory-tool`](/api/clojure/persona/memory-tool/) — The opt-in built-in that lets a persona write durable notes to its own home.
+- [`dreamer`](/api/clojure/persona/dreamer/) — The preset `:dream` builds.

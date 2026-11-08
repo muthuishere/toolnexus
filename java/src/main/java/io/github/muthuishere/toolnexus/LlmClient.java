@@ -304,8 +304,18 @@ public final class LlmClient {
         void save(String id, List<Object> messages);
     }
 
+    /**
+     * A {@link ConversationStore} that can enumerate its conversations — what
+     * {@link TranscriptSearch#transcriptSearchTool} requires (SPEC §7E). Both shipped stores
+     * implement it.
+     */
+    public interface ListableConversationStore extends ConversationStore {
+        /** Every stored conversation, newest first (ties by id ascending). */
+        List<ConversationInfo> list();
+    }
+
     /** Default conversation provider — keeps transcripts in memory for the client's lifetime. */
-    public static final class InMemoryConversationStore implements ConversationStore {
+    public static final class InMemoryConversationStore implements ListableConversationStore {
         private final Map<String, List<Object>> map = new ConcurrentHashMap<>();
         private final Map<String, java.time.Instant> updated = new ConcurrentHashMap<>();
 
@@ -322,6 +332,7 @@ public final class LlmClient {
         }
 
         /** Every stored conversation, newest first (ties by id ascending). */
+        @Override
         public synchronized List<ConversationInfo> list() {
             List<ConversationInfo> out = new ArrayList<>();
             for (Map.Entry<String, java.time.Instant> e : updated.entrySet()) {
@@ -354,7 +365,7 @@ public final class LlmClient {
      * OS allows). Same-id saves are serialized in-process; across processes the last rename wins.
      * Ids must match {@code ^[A-Za-z0-9._-]{1,128}$} and not be {@code .}/{@code ..}.
      */
-    public static final class FileConversationStore implements ConversationStore {
+    public static final class FileConversationStore implements ListableConversationStore {
         private static final java.util.regex.Pattern ID = java.util.regex.Pattern.compile("^[A-Za-z0-9._-]{1,128}$");
         private final java.nio.file.Path root;
         private final Sync sync;
@@ -497,6 +508,7 @@ public final class LlmClient {
         }
 
         /** Every {@code <id>.json} with a valid id, newest mtime first (ties by id). Bodies are not parsed. */
+        @Override
         public List<ConversationInfo> list() {
             List<ConversationInfo> out = new ArrayList<>();
             if (!java.nio.file.Files.isDirectory(root)) return out;

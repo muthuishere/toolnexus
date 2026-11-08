@@ -199,7 +199,50 @@ public class Example {
 | `text` | `String` | Required. The entry (`add`) or the existing substring (`replace`/`remove`). |
 | `with` | `String` | The replacement, for `action=replace`. |
 
+## The notes tier — `notes`
+
+```java
+public static Tool memoryTool(Path dir, boolean notes)
+new AgentSpec().notes(true).memoryIndexCap(new Agents.MemoryIndexCap(200, 25600))   // or MemoryIndexCap.preset()
+```
+
+Turn on `notes` (off by default) and the same `memory` tool grows a second tier. `MEMORY.md`
+stays a **short index** loaded every session; the detail lives in **notes** at
+`<dir>/memory/<slug>.md`, which are **never** injected into the prompt and are read only on
+demand. With `notes` off, the tool's schema, description and behaviour are exactly as above.
+
+| Addition | What it does |
+|---|---|
+| `target: "note:<slug>"` | `add` / `replace` / `remove` on `memory/<slug>.md`. `add` to a missing note creates it (and `memory/`). |
+| `action: "read"` | Returns a file's content (`target` required: `self`, `user`, or a note). A missing note is an error. |
+| `action: "list"` | One line per note, `<slug>\t<bytes>`, sorted by slug; `(no notes)` when empty. |
+
+A slug matches `^[a-z0-9][a-z0-9._-]{0,63}$` and may not contain `..`; anything else is an
+error before any file is touched. `replace` and `remove` change only the **first** occurrence of
+the text, in every target. Writes are atomic (temp file, then rename), and writes to the same
+file in one process are serialised, so parallel `add`s never lose an entry. Two processes
+writing the same file: the last write wins.
+
+```java
+Tool memory = Agents.memoryTool(Path.of("personas/ava"), true);
+ToolContext ctx = new ToolContext();
+
+memory.execute(Map.of("action", "add", "target", "note:travel", "text", "prefers aisle seats"), ctx);
+memory.execute(Map.of("action", "add", "text", "travel prefs: see [[travel]]"), ctx);   // the index line
+
+System.out.println(memory.execute(Map.of("action", "list"), ctx).output());                         // travel\t22
+System.out.println(memory.execute(Map.of("action", "read", "target", "note:travel"), ctx).output());  // - prefers aisle seats
+```
+
+The **2 MB cap** only limits what goes into the prompt. Writes always read and rewrite the
+whole file, so a `MEMORY.md` over 2 MB is never cut short on disk. The separate
+`memoryIndexCap` option on [`fromDir`](/api/java/persona/from-dir/) caps the injected index
+to whole lines (`true` = 200 lines / 25600 bytes) and adds a notice telling the model to move
+detail into notes.
+
 ## See also
 
 - [`Agents.composeSoul`](/api/java/persona/compose-soul/) — Build a persona's system prompt from its home directory: identity, memory, skills.
 - [`Agents.agentFromDir`](/api/java/persona/from-dir/) — Point at an agent home directory and get a configured agent back — wires this tool in automatically.
+- [`dreamer`](/api/java/persona/dreamer/) — The built-in agent that keeps notes true against the transcripts.
+- [`transcriptSearchTool`](/api/java/persona/transcript-search-tool/) — Read-only search over past conversations.

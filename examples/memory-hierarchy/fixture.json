@@ -1,0 +1,1099 @@
+{
+  "$schema": "toolnexus-memory-hierarchy-fixture/v1",
+  "description": "SPEC §7E 'Memory hierarchy' — G1 MEMORY.md index cap, G2 notes tier of the memory tool, G3 transcriptSearchTool, G4 write safety. Every expected value is byte-exact; every port must reproduce it.",
+  "indexCap": {
+    "preset": {
+      "maxLines": 200,
+      "maxBytes": 25600
+    },
+    "howToBuild": "Write `files` plus MEMORY.md into a fresh home dir. MEMORY.md is `memory` verbatim, or `generate`: `count` lines, line i (1-based) = `line` with '<i>' replaced by i, each line followed by '\\n'. Compose the soul with `options` (memoryIndexCap true = the preset). Assert sha256(soul as UTF-8) and byte length, that the soul ends with memorySectionTail, equalsUncappedSoul (soul == composeSoul without options) and that MEMORY.md on disk is unchanged.",
+    "cases": [
+      {
+        "name": "lines-cap-preset-notes-off",
+        "generate": {
+          "line": "- fact <i>",
+          "count": 500
+        },
+        "files": {
+          "SOUL.md": "You are Ava."
+        },
+        "options": {
+          "memoryIndexCap": true
+        },
+        "expect": {
+          "soulSha256": "0db3dc3d63c3f18f4d4dfde5acfc4e73fefe5e4c97a0ed39db8c893cb3604e05",
+          "soulBytes": 2239,
+          "equalsUncappedSoul": false,
+          "memorySectionTail": "fact 196\n- fact 197\n- fact 198\n- fact 199\n- fact 200\n\n[MEMORY.md index truncated at 200 lines / 25600 bytes. Keep MEMORY.md a short index (keep entries short).]",
+          "diskUnchanged": true
+        }
+      },
+      {
+        "name": "bytes-cap-preset-notes-on",
+        "generate": {
+          "line": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+          "count": 150
+        },
+        "files": {},
+        "options": {
+          "memoryIndexCap": true,
+          "notes": true
+        },
+        "expect": {
+          "soulSha256": "50afe01181b67d0d49b6a1c5d4fa50b20b09419cf6778bade94d91d4d796ba44",
+          "soulBytes": 25754,
+          "equalsUncappedSoul": false,
+          "memorySectionTail": "xxxxxxxxxxxxxxxxxxx\n\n[MEMORY.md index truncated at 200 lines / 25600 bytes. Keep MEMORY.md a short index; move detail into notes (memory target \"note:<slug>\").]",
+          "diskUnchanged": true
+        }
+      },
+      {
+        "name": "single-long-multibyte-line",
+        "memory": "ééééééé\nsecond\n",
+        "files": {},
+        "options": {
+          "memoryIndexCap": {
+            "maxLines": 5,
+            "maxBytes": 10
+          }
+        },
+        "expect": {
+          "soulSha256": "89aa012af278628da8b2310aa3701ce56773409e85c3e77ffbed12632d24a2dc",
+          "soulBytes": 127,
+          "equalsUncappedSoul": false,
+          "memorySectionTail": "## MEMORY.md\n\nééééé\n\n[MEMORY.md index truncated at 5 lines / 10 bytes. Keep MEMORY.md a short index (keep entries short).]",
+          "diskUnchanged": true
+        }
+      },
+      {
+        "name": "within-cap-unchanged",
+        "memory": "- a\n- b\n",
+        "files": {
+          "SOUL.md": "S"
+        },
+        "options": {
+          "memoryIndexCap": true
+        },
+        "expect": {
+          "soulSha256": "b38e1d45239d6c881db2db5823e2955a48117ff758db27fe24c1b3dde88f3c23",
+          "soulBytes": 36,
+          "equalsUncappedSoul": true,
+          "memorySectionTail": "## SOUL.md\n\nS\n\n## MEMORY.md\n\n- a\n- b",
+          "diskUnchanged": true
+        }
+      },
+      {
+        "name": "absent-option-40KB",
+        "generate": {
+          "line": "- yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy",
+          "count": 512
+        },
+        "files": {},
+        "options": {},
+        "expect": {
+          "soulSha256": "3a4bb22171689b1e92f25c59b8880077ef3227e6bec10cd8c83ed8c11423f075",
+          "soulBytes": 41485,
+          "equalsUncappedSoul": true,
+          "memorySectionTail": " yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy\n- yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy",
+          "diskUnchanged": true
+        }
+      },
+      {
+        "name": "exactly-at-max-lines",
+        "memory": "a\nb\nc",
+        "files": {},
+        "options": {
+          "memoryIndexCap": {
+            "maxLines": 3,
+            "maxBytes": 100
+          }
+        },
+        "expect": {
+          "soulSha256": "8df86c7a46df55b6d1e57ab00652f66954516fb1b00e237a2f030e9c619b7b17",
+          "soulBytes": 19,
+          "equalsUncappedSoul": true,
+          "memorySectionTail": "## MEMORY.md\n\na\nb\nc",
+          "diskUnchanged": true
+        }
+      },
+      {
+        "name": "one-over-max-lines",
+        "memory": "a\nb\nc\nd",
+        "files": {},
+        "options": {
+          "memoryIndexCap": {
+            "maxLines": 3,
+            "maxBytes": 100
+          }
+        },
+        "expect": {
+          "soulSha256": "32e6e16ae2f3648bd9837f353967591764345150873ec33f199dd61433d9ddf1",
+          "soulBytes": 123,
+          "equalsUncappedSoul": false,
+          "memorySectionTail": "## MEMORY.md\n\na\nb\nc\n\n[MEMORY.md index truncated at 3 lines / 100 bytes. Keep MEMORY.md a short index (keep entries short).]",
+          "diskUnchanged": true
+        }
+      },
+      {
+        "name": "exactly-at-max-bytes",
+        "memory": "abc\nde",
+        "files": {},
+        "options": {
+          "memoryIndexCap": {
+            "maxLines": 10,
+            "maxBytes": 6
+          }
+        },
+        "expect": {
+          "soulSha256": "7c377e45c5838cfbc5ee2004a7d78870c8190e3d4760be914f263e5cde3b4e75",
+          "soulBytes": 20,
+          "equalsUncappedSoul": true,
+          "memorySectionTail": "## MEMORY.md\n\nabc\nde",
+          "diskUnchanged": true
+        }
+      },
+      {
+        "name": "one-over-max-bytes",
+        "memory": "abc\ndef",
+        "files": {},
+        "options": {
+          "memoryIndexCap": {
+            "maxLines": 10,
+            "maxBytes": 6
+          }
+        },
+        "expect": {
+          "soulSha256": "a748538672af36931a9f1e75dc8265a1a60b7aed245aee2af228e3d793130fa9",
+          "soulBytes": 120,
+          "equalsUncappedSoul": false,
+          "memorySectionTail": "## MEMORY.md\n\nabc\n\n[MEMORY.md index truncated at 10 lines / 6 bytes. Keep MEMORY.md a short index (keep entries short).]",
+          "diskUnchanged": true
+        }
+      },
+      {
+        "name": "trailing-newline-at-cap",
+        "memory": "a\nb\nc\n",
+        "files": {},
+        "options": {
+          "memoryIndexCap": {
+            "maxLines": 3,
+            "maxBytes": 5
+          }
+        },
+        "expect": {
+          "soulSha256": "8df86c7a46df55b6d1e57ab00652f66954516fb1b00e237a2f030e9c619b7b17",
+          "soulBytes": 19,
+          "equalsUncappedSoul": true,
+          "memorySectionTail": "## MEMORY.md\n\na\nb\nc",
+          "diskUnchanged": true
+        }
+      }
+    ]
+  },
+  "memoryTool": {
+    "notesOff": {
+      "description": "Persist durable memory. action=add appends an entry; replace swaps an existing substring (with); remove deletes one. target=self (MEMORY.md, default) or user (USER.md). Writes persist to disk and load at the START of your NEXT session — they do NOT change your current context.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "add",
+              "replace",
+              "remove"
+            ]
+          },
+          "target": {
+            "type": "string",
+            "enum": [
+              "self",
+              "user"
+            ],
+            "description": "self=MEMORY.md (default), user=USER.md"
+          },
+          "text": {
+            "type": "string",
+            "description": "For add: the entry. For replace/remove: the existing text."
+          },
+          "with": {
+            "type": "string",
+            "description": "For replace: the replacement text."
+          }
+        },
+        "required": [
+          "action",
+          "text"
+        ]
+      }
+    },
+    "notesOn": {
+      "description": "Persist durable memory. MEMORY.md is a short index loaded at the start of every session; put detail in notes (target note:<slug>, stored in memory/<slug>.md, never loaded automatically) and point to them from the index. Record what will change a future decision. action=add appends an entry; replace swaps the first occurrence of an existing substring (with); remove deletes it; read returns a file; list lists the notes. target=self (MEMORY.md, default), user (USER.md) or note:<slug> (slug: lowercase letters, digits, '.', '_', '-'). Writes persist to disk and load at the START of your NEXT session — they do NOT change your current context.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "add",
+              "replace",
+              "remove",
+              "read",
+              "list"
+            ]
+          },
+          "target": {
+            "type": "string",
+            "description": "self=MEMORY.md (default), user=USER.md, note:<slug>=memory/<slug>.md"
+          },
+          "text": {
+            "type": "string",
+            "description": "For add: the entry. For replace/remove: the existing text."
+          },
+          "with": {
+            "type": "string",
+            "description": "For replace: the replacement text."
+          }
+        },
+        "required": [
+          "action"
+        ]
+      }
+    },
+    "howToRun": "Seed a fresh home dir with `seed`, build memoryTool(dir, {notes}), execute each op's args in order and assert {output,isError} exactly. Then assert the dir holds exactly expectFiles (path relative to the home, '/' separators, UTF-8 content). If soulMustNotContain is set, composeSoul(dir, {notes:true}) must not contain it.",
+    "cases": [
+      {
+        "name": "note-written-not-injected",
+        "notes": true,
+        "seed": {
+          "MEMORY.md": "- index\n"
+        },
+        "ops": [
+          {
+            "args": {
+              "action": "add",
+              "target": "note:route-plan",
+              "text": "Take the north exit"
+            },
+            "expect": {
+              "output": "ok (add → memory/route-plan.md)",
+              "isError": false
+            }
+          }
+        ],
+        "soulMustNotContain": "Take the north exit",
+        "expectFiles": {
+          "MEMORY.md": "- index\n",
+          "memory/route-plan.md": "- Take the north exit\n"
+        }
+      },
+      {
+        "name": "path-traversal-and-bad-slugs-rejected",
+        "notes": true,
+        "seed": {
+          "SOUL.md": "S"
+        },
+        "ops": [
+          {
+            "args": {
+              "action": "add",
+              "target": "note:../SOUL",
+              "text": "x"
+            },
+            "expect": {
+              "output": "invalid note slug: ../SOUL",
+              "isError": true
+            }
+          },
+          {
+            "args": {
+              "action": "add",
+              "target": "note:Upper",
+              "text": "x"
+            },
+            "expect": {
+              "output": "invalid note slug: Upper",
+              "isError": true
+            }
+          },
+          {
+            "args": {
+              "action": "add",
+              "target": "note:a..b",
+              "text": "x"
+            },
+            "expect": {
+              "output": "invalid note slug: a..b",
+              "isError": true
+            }
+          },
+          {
+            "args": {
+              "action": "add",
+              "target": "note:",
+              "text": "x"
+            },
+            "expect": {
+              "output": "invalid note slug: ",
+              "isError": true
+            }
+          },
+          {
+            "args": {
+              "action": "add",
+              "target": "note:a/b",
+              "text": "x"
+            },
+            "expect": {
+              "output": "invalid note slug: a/b",
+              "isError": true
+            }
+          },
+          {
+            "args": {
+              "action": "read",
+              "target": "note:.hidden"
+            },
+            "expect": {
+              "output": "invalid note slug: .hidden",
+              "isError": true
+            }
+          },
+          {
+            "args": {
+              "action": "add",
+              "target": "foo",
+              "text": "x"
+            },
+            "expect": {
+              "output": "unknown target: foo",
+              "isError": true
+            }
+          }
+        ],
+        "expectFiles": {
+          "SOUL.md": "S"
+        }
+      },
+      {
+        "name": "list-sorted-and-read",
+        "notes": true,
+        "seed": {},
+        "ops": [
+          {
+            "args": {
+              "action": "list"
+            },
+            "expect": {
+              "output": "(no notes)",
+              "isError": false
+            }
+          },
+          {
+            "args": {
+              "action": "add",
+              "target": "note:b",
+              "text": "bee"
+            },
+            "expect": {
+              "output": "ok (add → memory/b.md)",
+              "isError": false
+            }
+          },
+          {
+            "args": {
+              "action": "add",
+              "target": "note:a",
+              "text": "ay"
+            },
+            "expect": {
+              "output": "ok (add → memory/a.md)",
+              "isError": false
+            }
+          },
+          {
+            "args": {
+              "action": "add",
+              "target": "note:c",
+              "text": "sea level"
+            },
+            "expect": {
+              "output": "ok (add → memory/c.md)",
+              "isError": false
+            }
+          },
+          {
+            "args": {
+              "action": "list"
+            },
+            "expect": {
+              "output": "a\t5\nb\t6\nc\t12",
+              "isError": false
+            }
+          },
+          {
+            "args": {
+              "action": "read",
+              "target": "note:a"
+            },
+            "expect": {
+              "output": "- ay\n",
+              "isError": false
+            }
+          },
+          {
+            "args": {
+              "action": "read",
+              "target": "note:missing"
+            },
+            "expect": {
+              "output": "not found: note:missing",
+              "isError": true
+            }
+          },
+          {
+            "args": {
+              "action": "read"
+            },
+            "expect": {
+              "output": "not found: self",
+              "isError": true
+            }
+          },
+          {
+            "args": {
+              "action": "add",
+              "text": "idx"
+            },
+            "expect": {
+              "output": "ok (add → MEMORY.md); loads next session",
+              "isError": false
+            }
+          },
+          {
+            "args": {
+              "action": "read",
+              "target": "self"
+            },
+            "expect": {
+              "output": "- idx\n",
+              "isError": false
+            }
+          },
+          {
+            "args": {
+              "action": "replace",
+              "target": "note:c",
+              "text": "sea",
+              "with": "ocean"
+            },
+            "expect": {
+              "output": "ok (replace → memory/c.md)",
+              "isError": false
+            }
+          },
+          {
+            "args": {
+              "action": "add",
+              "target": "note:a"
+            },
+            "expect": {
+              "output": "text is required",
+              "isError": true
+            }
+          }
+        ],
+        "expectFiles": {
+          "MEMORY.md": "- idx\n",
+          "memory/a.md": "- ay\n",
+          "memory/b.md": "- bee\n",
+          "memory/c.md": "- ocean level\n"
+        }
+      },
+      {
+        "name": "replace-first-occurrence-only",
+        "notes": false,
+        "seed": {
+          "MEMORY.md": "- tea\n- tea\n"
+        },
+        "ops": [
+          {
+            "args": {
+              "action": "replace",
+              "text": "tea",
+              "with": "coffee"
+            },
+            "expect": {
+              "output": "ok (replace → MEMORY.md); loads next session",
+              "isError": false
+            }
+          }
+        ],
+        "expectFiles": {
+          "MEMORY.md": "- coffee\n- tea\n"
+        }
+      },
+      {
+        "name": "remove-first-occurrence-only",
+        "notes": false,
+        "seed": {
+          "MEMORY.md": "- tea\n- tea\n"
+        },
+        "ops": [
+          {
+            "args": {
+              "action": "remove",
+              "text": "- tea\n"
+            },
+            "expect": {
+              "output": "ok (remove → MEMORY.md); loads next session",
+              "isError": false
+            }
+          }
+        ],
+        "expectFiles": {
+          "MEMORY.md": "- tea\n"
+        }
+      },
+      {
+        "name": "notes-off-rejects-read-list",
+        "notes": false,
+        "seed": {},
+        "ops": [
+          {
+            "args": {
+              "action": "read",
+              "target": "self"
+            },
+            "expect": {
+              "output": "unknown action: read",
+              "isError": true
+            }
+          },
+          {
+            "args": {
+              "action": "list"
+            },
+            "expect": {
+              "output": "unknown action: list",
+              "isError": true
+            }
+          }
+        ],
+        "expectFiles": {}
+      },
+      {
+        "name": "replace-inserts-with-literally",
+        "notes": true,
+        "seed": {
+          "MEMORY.md": "- tea\n- milk\n"
+        },
+        "ops": [
+          {
+            "args": {
+              "action": "replace",
+              "text": "tea",
+              "with": "$&$&"
+            },
+            "expect": {
+              "output": "ok (replace → MEMORY.md); loads next session",
+              "isError": false
+            }
+          },
+          {
+            "args": {
+              "action": "replace",
+              "text": "milk",
+              "with": "$1 $$"
+            },
+            "expect": {
+              "output": "ok (replace → MEMORY.md); loads next session",
+              "isError": false
+            }
+          },
+          {
+            "args": {
+              "action": "add",
+              "target": "note:n",
+              "text": "x"
+            },
+            "expect": {
+              "output": "ok (add → memory/n.md)",
+              "isError": false
+            }
+          },
+          {
+            "args": {
+              "action": "replace",
+              "target": "note:n",
+              "text": "x",
+              "with": "$&$& $1 $$ $0 $` $' \\1 \\0 \\g<0> ${1}"
+            },
+            "expect": {
+              "output": "ok (replace → memory/n.md)",
+              "isError": false
+            }
+          }
+        ],
+        "expectFiles": {
+          "MEMORY.md": "- $&$&\n- $1 $$\n",
+          "memory/n.md": "- $&$& $1 $$ $0 $` $' \\1 \\0 \\g<0> ${1}\n"
+        }
+      },
+      {
+        "name": "slug-anchors-and-length",
+        "notes": true,
+        "seed": {},
+        "ops": [
+          {
+            "args": {
+              "action": "add",
+              "target": "note:abc\n",
+              "text": "x"
+            },
+            "expect": {
+              "output": "invalid note slug: abc\n",
+              "isError": true
+            }
+          },
+          {
+            "args": {
+              "action": "read",
+              "target": "note:abc\n"
+            },
+            "expect": {
+              "output": "invalid note slug: abc\n",
+              "isError": true
+            }
+          },
+          {
+            "args": {
+              "action": "add",
+              "target": "note:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "text": "x"
+            },
+            "expect": {
+              "output": "invalid note slug: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "isError": true
+            }
+          },
+          {
+            "args": {
+              "action": "add",
+              "target": "note:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "text": "x"
+            },
+            "expect": {
+              "output": "ok (add → memory/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.md)",
+              "isError": false
+            }
+          },
+          {
+            "args": {
+              "action": "list"
+            },
+            "expect": {
+              "output": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\t4",
+              "isError": false
+            }
+          }
+        ],
+        "expectFiles": {
+          "memory/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.md": "- x\n"
+        }
+      }
+    ],
+    "listSkipsNonRegular": {
+      "note": "Create these at test time (skip on a platform without symlinks). memory/real.md is a regular file; memory/link.md is a symlink to it; memory/dangling.md is a symlink to a missing file; memory/dir.md is a directory. `list` must not error and lists only the regular file.",
+      "regular": {
+        "memory/real.md": "- r\n"
+      },
+      "symlinks": {
+        "memory/link.md": "real.md",
+        "memory/dangling.md": "missing.md"
+      },
+      "dirs": [
+        "memory/dir.md"
+      ],
+      "expectList": "real\t4"
+    }
+  },
+  "transcriptSearch": {
+    "description": "Search past conversation transcripts — the ground truth of what actually happened. Case-insensitive substring match over message text. Returns one line per matching message: <conversationId>#<index> <role>: <snippet>. Read-only.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "query": {
+          "type": "string",
+          "description": "Text to find (case-insensitive substring)."
+        },
+        "conversationId": {
+          "type": "string",
+          "description": "Search only this conversation."
+        },
+        "limit": {
+          "type": "integer",
+          "description": "Most hits to return (default and max 20)."
+        }
+      },
+      "required": [
+        "query"
+      ]
+    },
+    "defaults": {
+      "name": "transcript_search",
+      "maxResults": 20,
+      "snippetChars": 200
+    },
+    "store": {
+      "note": "A stub store: list() returns these ids in THIS order (newest first), get(id) returns the messages, save() is never called. Construct the tool with each case's `options` (defaults when absent). A case with emptyStore: true runs instead against a store whose list() returns [] (and get() nothing).",
+      "conversations": [
+        {
+          "id": "s2",
+          "messages": [
+            {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Remind me: MT. MOON\nhas Zubats"
+                },
+                {
+                  "type": "image",
+                  "source": {
+                    "type": "url",
+                    "url": "https://example.invalid/moon.png"
+                  }
+                }
+              ]
+            },
+            {
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Checking."
+                },
+                {
+                  "type": "tool_use",
+                  "id": "t1",
+                  "name": "lookup",
+                  "input": {
+                    "q": "zubat",
+                    "n": 2
+                  }
+                }
+              ]
+            },
+            {
+              "role": "user",
+              "content": [
+                {
+                  "type": "tool_result",
+                  "tool_use_id": "t1",
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "Zubat count: 12"
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "role": "assistant",
+              "content": "Long log. Route 3 first, then the Pokemon Center, then heal up and buy Repels before going in; the cave is dark and full of wild encounters. Inside mt. moon take the ladder down twice, grab the Moon Stone on the west side, avoid the Rocket grunts near the fossils, pick the Dome Fossil, and then climb out toward Route 4 and Cerulean City beyond the hills."
+            },
+            {
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "tool_use",
+                  "id": "t2",
+                  "name": "catalog",
+                  "input": {
+                    "z": "pikachu",
+                    "y": [
+                      {
+                        "b": 1,
+                        "a": 2
+                      }
+                    ],
+                    "x": {
+                      "d": true,
+                      "c": null
+                    },
+                    "w": "é",
+                    "v": 1,
+                    "u": 2,
+                    "t": 3,
+                    "s": 4,
+                    "r": 5,
+                    "B": 6
+                  }
+                }
+              ]
+            },
+            {
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "tool_use",
+                  "id": "t3",
+                  "name": "note",
+                  "input": {
+                    "q": "ünï code ☃  end <&>"
+                  }
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "s1",
+          "messages": [
+            {
+              "role": "user",
+              "content": "Where is the exit of Mt. Moon?"
+            },
+            {
+              "role": "assistant",
+              "content": null,
+              "tool_calls": [
+                {
+                  "id": "c1",
+                  "type": "function",
+                  "function": {
+                    "name": "map",
+                    "arguments": "{\"query\":\"Mt. Moon map\"}"
+                  }
+                }
+              ]
+            },
+            {
+              "role": "tool",
+              "tool_call_id": "c1",
+              "content": "Map: the Mt. Moon exit is on the north wall."
+            },
+            {
+              "role": "user",
+              "content": "ok go"
+            },
+            {
+              "role": "assistant",
+              "content": "Took the north passage. Mt. Moon exit is north."
+            },
+            {
+              "role": "user",
+              "content": "Badge case: ÉLITE FOUR pass"
+            }
+          ]
+        }
+      ]
+    },
+    "cases": [
+      {
+        "name": "finds-with-location",
+        "args": {
+          "query": "mt. moon"
+        },
+        "expect": {
+          "output": "s2#0 user: Remind me: MT. MOON has Zubats\ns2#3 assistant: …en heal up and buy Repels before going in; the cave is dark and full of wild encounters. Inside mt. moon take the ladder down twice, grab the Moon Stone on the west side, avoid the Rocket grunts near …\ns1#0 user: Where is the exit of Mt. Moon?\ns1#1 assistant: {\"query\":\"Mt. Moon map\"}\ns1#2 tool: Map: the Mt. Moon exit is on the north wall.\ns1#4 assistant: Took the north passage. Mt. Moon exit is north.",
+          "isError": false
+        }
+      },
+      {
+        "name": "limit-and-more",
+        "args": {
+          "query": "MT. MOON",
+          "limit": 3
+        },
+        "expect": {
+          "output": "s2#0 user: Remind me: MT. MOON has Zubats\ns2#3 assistant: …en heal up and buy Repels before going in; the cave is dark and full of wild encounters. Inside mt. moon take the ladder down twice, grab the Moon Stone on the west side, avoid the Rocket grunts near …\ns1#0 user: Where is the exit of Mt. Moon?\n(+3 more)",
+          "isError": false
+        }
+      },
+      {
+        "name": "dialect-parts",
+        "args": {
+          "query": "zubat"
+        },
+        "expect": {
+          "output": "s2#0 user: Remind me: MT. MOON has Zubats\ns2#1 assistant: Checking. {\"n\":2,\"q\":\"zubat\"}\ns2#2 user: Zubat count: 12",
+          "isError": false
+        }
+      },
+      {
+        "name": "tool-use-input-sorted-keys",
+        "args": {
+          "query": "pikachu"
+        },
+        "expect": {
+          "output": "s2#4 assistant: {\"B\":6,\"r\":5,\"s\":4,\"t\":3,\"u\":2,\"v\":1,\"w\":\"é\",\"x\":{\"c\":null,\"d\":true},\"y\":[{\"a\":2,\"b\":1}],\"z\":\"pikachu\"}",
+          "isError": false
+        }
+      },
+      {
+        "name": "one-conversation",
+        "args": {
+          "query": "north",
+          "conversationId": "s1"
+        },
+        "expect": {
+          "output": "s1#2 tool: Map: the Mt. Moon exit is on the north wall.\ns1#4 assistant: Took the north passage. Mt. Moon exit is north.",
+          "isError": false
+        }
+      },
+      {
+        "name": "whitespace-normalized",
+        "args": {
+          "query": "  mt.\n moon\thas "
+        },
+        "expect": {
+          "output": "s2#0 user: Remind me: MT. MOON has Zubats",
+          "isError": false
+        }
+      },
+      {
+        "name": "no-matches",
+        "args": {
+          "query": "nothing-here"
+        },
+        "expect": {
+          "output": "no matches",
+          "isError": false
+        }
+      },
+      {
+        "name": "unknown-conversation",
+        "args": {
+          "query": "moon",
+          "conversationId": "nope"
+        },
+        "expect": {
+          "output": "no matches",
+          "isError": false
+        }
+      },
+      {
+        "name": "ascii-only-folding-non-ascii-not-folded",
+        "note": "SPEC §7E: ASCII-only case folding. 'É' in the text never folds to 'é', so a Unicode toLowerCase() fails this case.",
+        "args": {
+          "query": "élite"
+        },
+        "expect": {
+          "output": "no matches",
+          "isError": false
+        }
+      },
+      {
+        "name": "ascii-only-folding-ascii-still-folded",
+        "args": {
+          "query": "Élite four"
+        },
+        "expect": {
+          "output": "s1#5 user: Badge case: ÉLITE FOUR pass",
+          "isError": false
+        }
+      },
+      {
+        "name": "empty-query",
+        "args": {
+          "query": "   "
+        },
+        "expect": {
+          "output": "query is required",
+          "isError": true
+        }
+      },
+      {
+        "name": "bad-limit",
+        "args": {
+          "query": "moon",
+          "limit": 0
+        },
+        "expect": {
+          "output": "limit must be an integer >= 1",
+          "isError": true
+        }
+      },
+      {
+        "name": "short-snippets-max2",
+        "options": {
+          "snippetChars": 24,
+          "maxResults": 2
+        },
+        "args": {
+          "query": "moon",
+          "limit": 50
+        },
+        "expect": {
+          "output": "s2#0 user: …d me: MT. MOON has Zubat…\ns2#3 assistant: …nside mt. moon take the …\n(+4 more)",
+          "isError": false
+        }
+      },
+      {
+        "name": "tool-use-input-non-ascii-and-line-separators-as-is",
+        "args": {
+          "query": "ünï"
+        },
+        "expect": {
+          "output": "s2#5 assistant: {\"q\":\"ünï code ☃  end <&>\"}",
+          "isError": false
+        }
+      },
+      {
+        "name": "null-limit",
+        "args": {
+          "query": "moon",
+          "limit": null
+        },
+        "expect": {
+          "output": "limit must be an integer >= 1",
+          "isError": true
+        }
+      },
+      {
+        "name": "empty-store",
+        "emptyStore": true,
+        "args": {
+          "query": "moon"
+        },
+        "expect": {
+          "output": "no matches",
+          "isError": false
+        }
+      }
+    ],
+    "storeWithoutList": {
+      "construct": "a store with only get/save",
+      "error": "transcriptSearchTool: the store must implement list()"
+    },
+    "emptyQueryDoesNotReadStore": true
+  },
+  "writeSafety": {
+    "concurrentAdds": {
+      "writers": 2,
+      "addsEach": 20,
+      "file": "MEMORY.md",
+      "text": "w<writer>-<n>",
+      "expectEntries": 40,
+      "note": "Two memoryTool instances over ONE home dir in one runtime, all 40 adds started concurrently; every '- w<writer>-<n>' line must be on disk exactly once."
+    },
+    "largeFileAdd": {
+      "bytes": 3145728,
+      "fill": "x",
+      "addText": "x",
+      "expectDisk": "original bytes + '\\n- x\\n'",
+      "noTempFileLeft": true
+    },
+    "concurrentAddsViaSymlink": {
+      "note": "Like concurrentAdds, but writer 1's memoryTool is built over a symlink to the home dir and writer 2's over the real path. The per-path lock key is the resolved real path, so all 40 entries land. Skip where symlinks are unavailable.",
+      "writers": 2,
+      "addsEach": 20,
+      "file": "MEMORY.md",
+      "text": "w<writer>-<n>",
+      "expectEntries": 40
+    }
+  }
+}

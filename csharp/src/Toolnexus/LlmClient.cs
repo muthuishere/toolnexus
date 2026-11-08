@@ -19,8 +19,16 @@ public interface IConversationStore
     Task SaveAsync(string id, List<object?> messages);
 }
 
+/// <summary>A conversation store that can enumerate its conversations, newest first — what
+/// <see cref="TranscriptSearch.Tool"/> requires (SPEC §7E "Memory hierarchy").</summary>
+public interface IListableConversationStore : IConversationStore
+{
+    /// <summary>Every stored conversation, newest first.</summary>
+    Task<List<ConversationInfo>> ListAsync();
+}
+
 /// <summary>Default conversation provider — keeps transcripts in memory for the client's lifetime.</summary>
-public sealed class InMemoryConversationStore : IConversationStore
+public sealed class InMemoryConversationStore : IListableConversationStore
 {
     private readonly ConcurrentDictionary<string, (List<object?> Messages, DateTimeOffset UpdatedAt, long Seq)> _map = new();
     private long _seq;

@@ -30,8 +30,11 @@ pub use compaction::{
     estimate_tokens,
 };
 pub use home::{
-    BOOTSTRAP_ORDER, FromDirOptions, HEARTBEAT_OK, OnBeatFn, StartOptions, StartedAgent,
-    compose_soul, from_dir, memory_tool, start_agent,
+    BOOTSTRAP_ORDER, ComposeSoulOptions, DREAM_PROMPT, DreamOptions, DreamerOptions,
+    FromDirOptions, HEARTBEAT_OK, HEARTBEAT_PROMPT, MEMORY_INDEX_CAP_PRESET,
+    MEMORY_NOTES_DESCRIPTION, MemoryIndexCap, MemoryToolOptions, OnBeatFn, StartOptions,
+    StartedAgent, apply_index_cap, compose_soul, compose_soul_with, dreamer, from_dir,
+    memory_index_notice, memory_tool, memory_tool_with, start_agent,
 };
 pub use runtime::{
     Budget, CloseOptions, Def, Handle, HandleView, InboxItem, LlmOptions, OnCloseFn, OnSpawnFn,

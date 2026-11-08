@@ -70,6 +70,9 @@ type Completion struct {
 type Agent struct {
 	Name string
 	Spec Spec
+
+	// dream is set by FromDir(…, Dream) and read by StartAgent (SPEC §7E "Dreaming").
+	dream *dreamConfig
 }
 
 // New builds an Agent.

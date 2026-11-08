@@ -17,6 +17,12 @@ pub trait ConversationStore: Send + Sync {
     fn list(&self) -> Result<Vec<ConversationInfo>, String> {
         Ok(Vec::new())
     }
+    /// Whether this store really implements [`list`](Self::list) (the default
+    /// does not). A custom store that overrides `list` returns `true` here; the
+    /// transcript search tool (SPEC §7E) requires it.
+    fn supports_list(&self) -> bool {
+        false
+    }
     fn delete(&self, _id: &str) -> Result<(), String> {
         Ok(())
     }
@@ -58,6 +64,9 @@ impl ConversationStore for InMemoryConversationStore {
         let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         g.insert(id.to_owned(), (messages.to_vec(), SystemTime::now()));
         Ok(())
+    }
+    fn supports_list(&self) -> bool {
+        true
     }
     fn list(&self) -> Result<Vec<ConversationInfo>, String> {
         let g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
@@ -162,6 +171,9 @@ fn rand_hex() -> String {
 }
 
 impl ConversationStore for FileConversationStore {
+    fn supports_list(&self) -> bool {
+        true
+    }
     fn get(&self, id: &str) -> Result<Option<Vec<Value>>, String> {
         let p = self.path(id)?;
         let data = match std::fs::read(&p) {
