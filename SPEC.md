@@ -2600,6 +2600,8 @@ the thread's transcript is loaded as history before the stream, and saved back t
 - `{ type: "tool_call", id, name, args }` — a tool about to run
 - `{ type: "tool_result", id, name, output, isError }` — after it ran
 - `{ type: "usage", usage }` — token usage
+- `{ type: "retry", attempt, max, delayMs, status?, reason }` — the LLM request failed retryably and
+  the loop is about to wait `delayMs` and try again (§ Resilience, "Retry event")
 - `{ type: "done", result }` — the final `RunResult`
 
 OpenAI: `stream:true` + `stream_options.include_usage`, SSE deltas (assemble `tool_calls` by
@@ -2699,6 +2701,26 @@ skipping remaining retries. **Absent `onError` ⇒ the default classifier `retry
 is not a user action, so it never becomes a §10 `Pending`; suspension stays a user-action pause
 (§10). A `"fail"` result never carries `status:"pending"`. Aborts (timeout/cancel) bypass `onError`
 and are never retried.
+
+**`x-should-retry` override.** A non-ok LLM response carrying the header `x-should-retry`
+(name case-insensitive) whose trimmed value is `true` or `false` (value case-insensitive) sets
+`retryable` to that value **before** `onError` runs — it overrides the default status
+classification in both directions (a `400` with `x-should-retry: true` is retried; a `503` with
+`x-should-retry: false` is terminal). Any other value, or no header, leaves the default
+classification unchanged. `onError` still has the final say, and `retries` still bounds every
+retry. Applies to `run`/`ask` and `stream` alike. It is never consulted on a network error.
+
+**Retry event (streaming only).** When `stream()` is about to retry the LLM request — the
+classifier said `"retry"` and the budget is not spent — it emits, **before** waiting,
+`{ type: "retry", attempt, max, delayMs, status?, reason }`:
+`attempt` is the 1-based number of the retry about to happen (the zero-based failed attempt + 1),
+`max` is the configured `retries`, `delayMs` is the exact wait the loop is about to sleep (an
+honoured `Retry-After` in milliseconds, otherwise the backoff-with-jitter value actually drawn),
+`status` is the HTTP status (absent on a network error), and `reason` is `"HTTP <status>"` or
+`"network"`. A host renders it as "Retrying in Ns · attempt A/M". No event is emitted for a
+failure that is not retried (terminal, `"fail"`, or budget spent), for aborts, or by
+`run`/`ask` (non-streaming output is unchanged). Field spelling is per-port idiom
+(`delay_ms` / `DelayMs` / `:delay-ms`). An in-process client has no wire and emits none.
 
 **Cancellation** beyond `timeoutMs`/abort: the per-port cancellation contract used by the
 agent runtime's `interrupt` is tabled in §7D — ports differ only in abort latency, never in
