@@ -311,7 +311,7 @@ assert.equal(fs.readFileSync(r.files[0].path!, "utf8"), "toolnexus mock image")
 ```go
 style, _ := toolnexus.LoadMediaStyle(toolnexus.MediaStyleXaiGrokCliMock,
 	toolnexus.MediaConfig{Gather: toolnexus.MediaGather{Dir: dir}})
-tk, _ := toolnexus.CreateToolkit(ctx, toolnexus.Options{Media: toolnexus.MustCreateMedia(style)})
+tk, _ := toolnexus.CreateToolkit(ctx, toolnexus.Options{Builtins: false, Media: toolnexus.MustCreateMedia(style)})
 client := toolnexus.CreateClient(toolnexus.ClientOptions{BaseURL: "http://127.0.0.1:8787/v1",
 	Style: toolnexus.StyleOpenAI, Model: "mock-model", APIKey: "mock-key"})
 res, _ := client.Run(ctx, "Draw a red apple.", tk)
