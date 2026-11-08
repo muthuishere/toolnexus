@@ -27,6 +27,34 @@ Tracked in `openspec/changes/add-classifier-openai-decisions`. Shared fixture
 `examples/judge/backends/openai-decisions.json`. Docs: an "OpenAI (Decisions API)" section on the judge
 backends page and an openai recipe (yes/no, pick-one, score) in the judge cookbook, in all eight languages.
 
+### Reactive compaction on context overflow (issue #194)
+
+A long agent run no longer dies the first time the provider says the prompt is too long. Set
+the new client option **`compactOnOverflow`** (a `beforeLLM`-shaped hook — usually a
+`compactor(...)` with a tighter budget than your proactive one) and the loop answers an
+overflow by compacting the transcript and re-sending the same turn. **Without the option a run
+is byte-identical to before**: the overflow still surfaces as the typed `LlmHttpError`.
+
+Why: the proactive compactor works from an estimate (`ceil(chars/4)`); only the provider knows
+whether a prompt fits, and one huge tool result can push a turn over between estimates. Karya
+(go-agent-cli) asked for this, with a breaker.
+
+- **Detection is pinned and exported** as `isContextOverflow(status, body)`: status `400` or
+  `413` **and** one of `context_length_exceeded`, `maximum context length`,
+  `prompt is too long`, `prompt_too_long`, `request_too_large`, `context window` in the
+  lowercased body. Covers OpenAI, Anthropic and OpenAI-compatible gateways; a bare 413 or a
+  429 that mentions context length is not an overflow.
+- **The breaker**: an overflow within fewer than two successful LLM calls of the last reactive
+  compaction is a *rapid refill*; after three compactions in a rapid chain the run fails with the
+  typed **`ContextOverflowError`** (`compactions`, `status`, `body`; message
+  `context overflow: <n> reactive compaction(s) did not make the prompt fit`). Overflows spaced
+  further apart reset the chain. A hook that returns nothing, or a transcript that is not
+  shorter, fails at once (`compactions` 0) instead of looping.
+- The retry does not run `beforeLLM` again and does not consume a turn. Applies to `run` and
+  `stream`, both styles, and the resume paths. SPEC §7F.1; fixture
+  `conformance/reactive_compaction/cases.json`; change `openspec/changes/add-reactive-compaction`.
+- Not done: no per-agent (`AgentDef`) option; a §7D agent run uses its client's option.
+
 ### Memory hierarchy and dreaming
 
 A persona's memory can now stay small and stay true. **Everything is opt-in; a persona built
