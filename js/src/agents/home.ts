@@ -220,11 +220,13 @@ function rmw(file: string, action: unknown, text: string, withText: unknown): { 
       break
     case "replace":
       if (!current.includes(text)) return { output: `not found: ${text}`, isError: true }
-      next = current.replace(text, String(withText ?? "")) // first occurrence only (§7E)
+      // First occurrence only, inserted LITERALLY (§7E): a function replacement, because a
+      // string one would expand `$&`, `$1`, `$$` … in the model's text.
+      next = current.replace(text, () => String(withText ?? ""))
       break
     case "remove":
       if (!current.includes(text)) return { output: `not found: ${text}`, isError: true }
-      next = current.replace(text, "") // first occurrence only (§7E)
+      next = current.replace(text, () => "") // first occurrence only (§7E)
       break
     default:
       return { output: `unknown action: ${String(action)}`, isError: true }
@@ -340,7 +342,13 @@ function listNotes(notesDir: string): string {
     if (!name.endsWith(".md")) continue
     const slug = name.slice(0, -3)
     if (!NOTE_SLUG_RE.test(slug) || slug.includes("..")) continue
-    const st = fs.statSync(path.join(notesDir, name))
+    // lstat: a symlink (dangling or not) is not a regular file and is skipped (§7E).
+    let st: fs.Stats
+    try {
+      st = fs.lstatSync(path.join(notesDir, name))
+    } catch {
+      continue
+    }
     if (st.isFile()) rows.push([slug, st.size])
   }
   rows.sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))
@@ -480,6 +488,9 @@ export interface StartedAgent {
  */
 export function startAgent(a: Agent, run: AgentRunOptions, hb: HeartbeatOptions): StartedAgent {
   const dream = DREAMS.get(a)
+  if (dream && Object.prototype.hasOwnProperty.call(a.registry(), dream.dreamer.name)) {
+    throw new Error(`startAgent: dreamer name collision: ${dream.dreamer.name} is already registered`)
+  }
   const runtime = dream
     ? new AgentRuntime({ ...run, registry: { ...dream.dreamer.registry(), ...a.registry() } })
     : a.createRuntime(run)
@@ -499,7 +510,13 @@ export function startAgent(a: Agent, run: AgentRunOptions, hb: HeartbeatOptions)
     // fromDir(…, {dream}): the dreamer runs on the SAME runtime on its own interval. Its
     // replies are housekeeping — they never reach onBeat; what it did is in memory/log.md.
     const dh = runtime.spawn(runtime.root, dream.dreamer.name)
-    if (isVerbError(dh)) throw new Error(dh.error)
+    if (isVerbError(dh)) {
+      // Never leak the persona's heartbeat when the dreamer cannot start.
+      stopped = true
+      for (const c of cancels) c()
+      void runtime.close(runtime.root)
+      throw new Error(dh.error)
+    }
     cancels.push(heartbeat(runtime, dh, dream.everyMs, () => stopped, () => {}))
   }
 

@@ -129,6 +129,20 @@ for (const c of MH.memoryTool.cases) {
   })
 }
 
+test("G2: list skips symlinks (dangling or not) and directories — regular files only", async (t) => {
+  const f = MH.memoryTool.listSkipsNonRegular
+  const dir = mkHome(f.regular)
+  try {
+    for (const [link, target] of Object.entries(f.symlinks)) fs.symlinkSync(target as string, path.join(dir, link))
+  } catch {
+    t.skip("symlinks unavailable")
+    return
+  }
+  for (const d of f.dirs) fs.mkdirSync(path.join(dir, d))
+  const r = await memoryTool(dir, { notes: true }).execute({ action: "list" })
+  assert.deepEqual({ output: r.output, isError: r.isError }, { output: f.expectList, isError: false })
+})
+
 test("G2: fromDir notes:true wires the notes-on tool", () => {
   const dir = mkHome({ "SOUL.md": "S" })
   const mem = fromDir(dir, { notes: true }).spec.uses!.tools!.find((t: Tool) => t.name === "memory")!
@@ -148,7 +162,8 @@ test("G3: transcript search schema/description pinned", () => {
 
 for (const c of MH.transcriptSearch.cases) {
   test(`G3 transcript search: ${c.name}`, async () => {
-    const t = transcriptSearchTool(stubStore(MH.transcriptSearch.store.conversations), c.options ?? {})
+    const convos = c.emptyStore ? [] : MH.transcriptSearch.store.conversations
+    const t = transcriptSearchTool(stubStore(convos), c.options ?? {})
     const r = await t.execute(c.args)
     assert.deepEqual({ output: r.output, isError: r.isError }, c.expect)
   })
@@ -185,6 +200,25 @@ test("G4: concurrent adds from two tools over one home keep every entry", async 
   const lines = fs.readFileSync(path.join(dir, "MEMORY.md"), "utf8").trimEnd().split("\n")
   assert.equal(lines.length, expectEntries)
   assert.equal(new Set(lines).size, expectEntries)
+})
+
+test("G4: concurrent adds via a symlinked home and the real path keep every entry", async (t) => {
+  const { addsEach, expectEntries } = MH.writeSafety.concurrentAddsViaSymlink
+  const dir = mkHome({})
+  const link = dir + "-link"
+  try {
+    fs.symlinkSync(dir, link)
+  } catch {
+    t.skip("symlinks unavailable")
+    return
+  }
+  const tools = [memoryTool(link), memoryTool(dir)]
+  await Promise.all(
+    tools.flatMap((tool, w) => Array.from({ length: addsEach }, (_, n) => tool.execute({ action: "add", text: `w${w}-${n}` }))),
+  )
+  const lines = fs.readFileSync(path.join(dir, "MEMORY.md"), "utf8").trimEnd().split("\n")
+  assert.equal(new Set(lines).size, expectEntries)
+  assert.equal(lines.length, expectEntries)
 })
 
 test("G4: a 3 MB MEMORY.md + add grows on disk, nothing truncated, no temp file", async () => {
@@ -350,6 +384,15 @@ test("D4: fromDir(…, {dream}) runs the dreamer on the persona's runtime; its r
   await started.stop()
   assert.deepEqual(onBeat, [])
   assert.deepEqual(started.beats, [])
+})
+
+test("D6: a dreamer name already in the persona's tree makes startAgent throw", () => {
+  const e = DR.expect.D6_dreamerNameCollision
+  const home = mkHome(DR.home)
+  const persona = fromDir(home, { name: e.personaName, model: "m-quiet", dream: { everyMs: 50, store: store() } })
+  ;(persona as any).spec.team = [agents.agent(`${e.personaName}-dreamer`, { does: "squatter", soul: "x" })]
+  const clock = new VirtualClock()
+  assert.throws(() => startAgent(persona, { fetch: mockFetch, clock }, { everyMs: 50 }), { message: e.error })
 })
 
 test("D5: absent dream option — no dreamer, nothing written", async () => {
