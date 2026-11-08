@@ -628,9 +628,75 @@ def _safe_json(s: Any) -> dict[str, Any]:
     if isinstance(s, dict):
         return s
     try:
-        return json.loads(s or "{}")
+        v = json.loads(s or "{}")
     except Exception:
         return {}
+    # Arguments that are not a JSON object (an array, a scalar) become {} (SPEC §8).
+    return v if isinstance(v, dict) else {}
+
+
+# §8 stop-reason recovery: the three pinned user messages (byte-exact, SPEC §8).
+RECOVERY_NUDGE = "Your previous response contained no answer. Continue and give your answer."
+RECOVERY_CONTINUE = (
+    "Your previous response was cut off at the output token limit. "
+    "Continue exactly where it stopped, without repeating anything."
+)
+RECOVERY_CORRECTIVE = (
+    "Your previous tool call could not be used: its arguments were not a valid JSON object. "
+    "Call the tool again with arguments that are a single valid JSON object matching its input schema."
+)
+
+
+def _malformed_json_args(raw: Any) -> bool:
+    """A raw argument string that is non-empty after trimming and does not parse to a
+    JSON object. Empty/absent ⇒ ``{}`` ⇒ not malformed; an already-decoded dict is fine."""
+    if raw is None or isinstance(raw, dict):
+        return False
+    if not isinstance(raw, str):
+        return True
+    if not raw.strip():
+        return False
+    try:
+        return not isinstance(json.loads(raw), dict)
+    except Exception:
+        return True
+
+
+class _Recovery:
+    """Per-run recovery budgets (SPEC §8 stop-reason recovery). ``decide`` returns the
+    pinned message to append (spending its budget), or None to proceed as without it."""
+
+    def __init__(self, enabled: bool, max_turns: int) -> None:
+        self.enabled = enabled
+        self.max_turns = max_turns
+        self.corrective = 1
+        self.cont = 3
+        self.nudge = 1
+        self.carry = ""
+
+    def decide(self, turn: int, has_calls: bool, malformed: bool, truncated: bool, text: str) -> Optional[str]:
+        if not self.enabled or turn >= self.max_turns - 1:
+            return None
+        if has_calls:
+            if malformed and self.corrective > 0:
+                self.corrective -= 1
+                return RECOVERY_CORRECTIVE
+            return None
+        if truncated:
+            if self.cont > 0:
+                self.cont -= 1
+                return RECOVERY_CONTINUE
+            return None
+        if not text.strip() and self.nudge > 0:
+            self.nudge -= 1
+            return RECOVERY_NUDGE
+        return None
+
+
+def _object_input(v: Any) -> dict[str, Any]:
+    """An Anthropic ``tool_use.input`` that is not an object (a raw string a provider
+    could not parse, an array) runs as ``{}`` (SPEC §8)."""
+    return v if isinstance(v, dict) else {}
 
 
 def _last_text(messages: list[dict[str, Any]]) -> str:
@@ -1041,8 +1107,13 @@ class Client:
         prompt_cache: Optional[PromptCacheOptions] = None,
         tool_tiers: Optional[ToolTierOptions] = None,
         max_tool_concurrency: Optional[int] = None,
+        stop_recovery: bool = False,
     ) -> None:
         self.base_url = base_url
+        # §8 stop-reason recovery: answer a malformed tool call, a truncated response and
+        # an empty answer with one pinned user message and another turn. False ⇒ the loop
+        # is byte-identical to before.
+        self.stop_recovery = stop_recovery
         # §8 tool scheduling: cap on concurrency-safe calls of one response running at once.
         # None ⇒ env TOOLNEXUS_MAX_TOOL_CONCURRENCY when a positive integer, else 10. Unsafe
         # calls (anything not read-only) always run alone.
@@ -2240,6 +2311,7 @@ class Client:
         turns = 0
         run_start = _now()
         last_model = self.model
+        rec = _Recovery(self.stop_recovery, self.max_turns)
 
         try:
             for turn in range(self.max_turns):
@@ -2280,10 +2352,25 @@ class Client:
                 msg = data["choices"][0]["message"]
                 messages.append(msg)
                 calls = msg.get("tool_calls") or []
+                fix = rec.decide(
+                    turn,
+                    bool(calls),
+                    any(_malformed_json_args((c.get("function") or {}).get("arguments")) for c in calls),
+                    data["choices"][0].get("finish_reason") == "length",
+                    msg.get("content") or "",
+                )
+                if fix is not None:
+                    if fix == RECOVERY_CONTINUE:
+                        rec.carry += msg.get("content") or ""
+                    else:
+                        messages.pop()
+                    messages.append({"role": "user", "content": fix})
+                    continue
                 if not calls:
                     return self._end_run(
-                        run_start, msg.get("content") or "", messages, tool_calls, turns, usage, model=last_model
+                        run_start, rec.carry + (msg.get("content") or ""), messages, tool_calls, turns, usage, model=last_model
                     )
+                rec.carry = ""
 
                 # Parse the tool calls in order, then execute them concurrently (true
                 # parallel tool calling). Each result is mapped back to its originating
@@ -2355,6 +2442,7 @@ class Client:
         turns = 0
         run_start = _now()
         last_model = self.model
+        rec = _Recovery(self.stop_recovery, self.max_turns)
 
         try:
             for turn in range(self.max_turns):
@@ -2395,9 +2483,24 @@ class Client:
                 content = data.get("content") or []
                 messages.append({"role": "assistant", "content": content})
                 uses = [b for b in content if b.get("type") == "tool_use"]
+                text = "".join(b.get("text", "") for b in content if b.get("type") == "text")
+                fix = rec.decide(
+                    turn,
+                    bool(uses),
+                    any("input" in u and not isinstance(u["input"], dict) for u in uses),
+                    data.get("stop_reason") == "max_tokens",
+                    text,
+                )
+                if fix is not None:
+                    if fix == RECOVERY_CONTINUE:
+                        rec.carry += text
+                    else:
+                        messages.pop()
+                    messages.append({"role": "user", "content": fix})
+                    continue
                 if not uses:
-                    text = "".join(b.get("text", "") for b in content if b.get("type") == "text")
-                    return self._end_run(run_start, text, messages, tool_calls, turns, usage, model=last_model)
+                    return self._end_run(run_start, rec.carry + text, messages, tool_calls, turns, usage, model=last_model)
+                rec.carry = ""
 
                 # Execute the tool_use blocks concurrently (true parallel tool calling).
                 # Each result is mapped back to its originating block by index so
@@ -2405,9 +2508,9 @@ class Client:
                 # AFTER execute so it carries output/is_error/metadata.
                 outputs = await self._schedule(
                     toolkit,
-                    [(use["name"], use.get("input") or {}) for use in uses],
+                    [(use["name"], _object_input(use.get("input"))) for use in uses],
                     lambda i: self._run_tool(
-                        toolkit, uses[i]["name"], uses[i].get("input") or {}, uses[i].get("id"), turn, log, cancel
+                        toolkit, uses[i]["name"], _object_input(uses[i].get("input")), uses[i].get("id"), turn, log, cancel
                     ),
                 )
                 # Record in tool-call order; on the FIRST durable halt, include that tool_result
@@ -2465,6 +2568,7 @@ class Client:
         turns = 0
         run_start = _now()
         last_model = self.model
+        rec = _Recovery(self.stop_recovery, self.max_turns)
 
         try:
             for turn in range(self.max_turns):
@@ -2502,6 +2606,7 @@ class Client:
                 t0 = _now()
                 before_p, before_c = usage["prompt_tokens"], usage["completion_tokens"]
                 content = ""
+                finish = ""
                 acc: dict[int, dict[str, str]] = {}
                 try:
                     async for line in self._sse_lines(url, req_headers, payload, deadline, cancel):
@@ -2521,6 +2626,7 @@ class Client:
                         choices = j.get("choices") or []
                         if not choices:
                             continue
+                        finish = choices[0].get("finish_reason") or finish
                         d = choices[0].get("delta") or {}
                         if d.get("content"):
                             content += d["content"]
@@ -2551,11 +2657,21 @@ class Client:
                     )
 
                 calls = [acc[i] for i in sorted(acc)]
+                fix = rec.decide(
+                    turn, bool(calls), any(_malformed_json_args(c["args"]) for c in calls), finish == "length", content
+                )
+                if fix is not None:
+                    if fix == RECOVERY_CONTINUE:
+                        messages.append({"role": "assistant", "content": content})
+                        rec.carry += content
+                    messages.append({"role": "user", "content": fix})
+                    continue
                 if not calls:
                     messages.append({"role": "assistant", "content": content})
                     yield {"type": "usage", "usage": usage}
-                    yield {"type": "done", "result": self._end_run(run_start, content, messages, tool_calls, turns, usage, model=last_model)}
+                    yield {"type": "done", "result": self._end_run(run_start, rec.carry + content, messages, tool_calls, turns, usage, model=last_model)}
                     return
+                rec.carry = ""
 
                 messages.append(
                     {
@@ -2634,6 +2750,7 @@ class Client:
         turns = 0
         run_start = _now()
         last_model = self.model
+        rec = _Recovery(self.stop_recovery, self.max_turns)
 
         try:
             for turn in range(self.max_turns):
@@ -2727,11 +2844,26 @@ class Client:
                 ]
                 messages.append({"role": "assistant", "content": content})
                 uses = [b for b in content if b["type"] == "tool_use"]
+                text = "".join(b["text"] for b in content if b["type"] == "text")
+                fix = rec.decide(
+                    turn,
+                    bool(uses),
+                    any(_malformed_json_args(b["json"]) for b in blocks.values() if b["type"] == "tool_use"),
+                    stop_reason == "max_tokens",
+                    text,
+                )
+                if fix is not None:
+                    if fix == RECOVERY_CONTINUE:
+                        rec.carry += text
+                    else:
+                        messages.pop()
+                    messages.append({"role": "user", "content": fix})
+                    continue
                 if stop_reason != "tool_use" or not uses:
-                    text = "".join(b["text"] for b in content if b["type"] == "text")
                     yield {"type": "usage", "usage": usage}
-                    yield {"type": "done", "result": self._end_run(run_start, text, messages, tool_calls, turns, usage, model=last_model)}
+                    yield {"type": "done", "result": self._end_run(run_start, rec.carry + text, messages, tool_calls, turns, usage, model=last_model)}
                     return
+                rec.carry = ""
 
                 for u in uses:
                     yield self._call_event(u["id"], u["name"], u["input"])
@@ -2921,9 +3053,11 @@ def create_client(
     prompt_cache: Optional[PromptCacheOptions] = None,
     tool_tiers: Optional[ToolTierOptions] = None,
     max_tool_concurrency: Optional[int] = None,
+    stop_recovery: bool = False,
 ) -> Client:
     return Client(
         max_tool_concurrency=max_tool_concurrency,
+        stop_recovery=stop_recovery,
         api_key_env=api_key_env,
         wait_for_ctx=wait_for_ctx,
         prompt_cache=prompt_cache,
