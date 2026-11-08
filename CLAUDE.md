@@ -166,6 +166,8 @@ the point of use.
    registry in a clean directory and run something. ADR-0012 exists because NuGet and Maven
    publishes have **reported success without landing**, so a green CI job is not evidence that a
    package is installable.
+6. **Marketing** — run the `marketing` skill (`.claude/skills/marketing/`) for the version. It
+   writes drafts only, in `~/.marketing/toolnexus/<version>/`; the owner posts.
 
 ### Do not
 
