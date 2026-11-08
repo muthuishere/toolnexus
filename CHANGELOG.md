@@ -8,6 +8,8 @@ GitHub Releases `vX.Y.Z` via `release.yml` (see `PUBLISHING.md`).
 
 ## Unreleased
 
+- **Docs site: a Toolnexus logo, favicon and a calmer home page.** The site has its own mark (three tool connectors converging on one hub that points forward: many tools, one framework) in the header, and as the favicon (SVG that follows light/dark, plus PNG/ICO fallbacks and an apple-touch icon) in place of Starlight's default. The home tab now reads "Toolnexus" instead of "toolnexus | toolnexus". The home page plays one short, CSS-only load sequence: the title and tagline rise in, the mark's connectors draw in, and faint lines draw from one point to the eight languages. With reduced motion turned on there is none, and nothing waits on scrolling to appear.
+
 - **Docs site: new "Reference" theme and the Toolnexus name.** The docs at muthuishere.github.io/toolnexus now use Source Serif 4 for headings and the hero, Source Sans 3 for text and JetBrains Mono for code, with a deep-green accent and matched light and dark themes (body text ≥ 11:1 contrast in both). Fonts are self-hosted, so the static site makes no third-party font calls. Code blocks, section rules, small-caps labels and a linked eight-language strip on the home page follow the same reference-book style. The product is written "Toolnexus" in titles and prose; package names, imports, commands and URLs stay lowercase `toolnexus`. Generated API reference pages are unchanged.
 
 **Benchmarks: one Java result (docs only).** The JVM rows were re-run on released 0.28.0 (with the in-house
