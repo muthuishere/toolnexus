@@ -2,7 +2,7 @@
 
 ## Spec
 
-- [ ] Owner resolves D1–D8 (design.md)
+- [ ] Owner resolves D1–D10 (design.md)
 - [ ] Spec deltas `specs/agent-home/spec.md`, `specs/conversation-store/spec.md`
 - [ ] `openspec validate add-memory-hierarchy --strict`
 - [ ] `SPEC.md §7E` — add "Memory hierarchy" (index cap + exact notice, notes tier + slug rule,
@@ -10,6 +10,14 @@
       "Composition, not API" dream line to point at the recipe
 - [ ] Shared fixtures under `examples/` (one persona home with an oversized `MEMORY.md`, a notes
       dir, a canned transcript store) — changed once, used by every port
+
+## G5 dreaming
+
+- [ ] SPEC §7E: `DREAM_PROMPT` constant (exact text), `dreamOnce` / `startDreaming` signatures,
+      `DreamReport` shape, `memory/log.md` entry format; amend "Composition, not API"
+- [ ] Fixture `examples/dreaming/` (home with one contradicted line + a transcript store + a
+      scripted model) asserting the four "Built-in dreaming" scenarios in all 8 ports
+- [ ] `conformance/options_manifest.json` — `dreamOnce`, `startDreaming`
 
 ## Per-language parity checklist
 
@@ -36,7 +44,7 @@ byte-identity test with all options absent.
 
 ## Docs
 
-- [ ] Cookbook recipe "Dreaming" (per language), per design.md "Dreaming": Karpathy-style layout
+- [ ] Docs page "Dreaming" (per language) — leads with `startDreaming`, then customisation (`instructions`, `DREAM.md`), per design.md "Dreaming": Karpathy-style layout
       (`MEMORY.md` index / `memory/<slug>.md` pages with `[[links]]` / `memory/log.md`), shipped
       `HEARTBEAT.md` doing verify → demote → merge → repair links → log, the "when worth running"
       table, cadence guidance, and a "Further reading" link to Anthropic's "The components of agent

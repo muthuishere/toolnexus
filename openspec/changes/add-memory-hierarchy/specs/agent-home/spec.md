@@ -45,3 +45,27 @@ injection view.
 #### Scenario: Large file not truncated by a write
 - **WHEN** `MEMORY.md` is 3 MB and the agent calls `memory add`
 - **THEN** the file on disk is the original 3 MB plus the new entry
+
+### Requirement: Built-in dreaming
+The library SHALL provide `dreamOnce(dir, opts)` (one dream pass, returns a `DreamReport`) and
+`startDreaming(dir, opts)` (the same pass on a §7E heartbeat via `startAgent`, `everyMs`
+required). Both SHALL build the dreamer from a library-owned prompt that is byte-identical in
+every port, with only the `memory` tool (notes enabled) and `transcriptSearchTool(opts.store)`,
+and SHALL require no `HEARTBEAT.md` or other file from the user. Every pass SHALL append one
+entry to `memory/log.md` when it changed anything.
+
+#### Scenario: One pass with no user-written files
+- **WHEN** `dreamOnce(dir, { client, store })` runs on a home holding only `MEMORY.md`, and the scripted model fixes one contradicted line
+- **THEN** `MEMORY.md` holds the corrected line, `memory/log.md` gains one entry naming the change, and the report lists that change
+
+#### Scenario: Nothing to do is silent
+- **WHEN** the scripted model replies `HEARTBEAT_OK`
+- **THEN** no file is written, `memory/log.md` is unchanged, and the report has no changes
+
+#### Scenario: Dreamer cannot reach other tools
+- **WHEN** a dream pass runs on a persona whose own agent has shell and file tools
+- **THEN** the dreamer's tool list is exactly `memory` and `transcript_search`
+
+#### Scenario: Scheduled dreaming coalesces
+- **WHEN** `startDreaming` runs on a virtual clock and three intervals elapse while one pass is still running
+- **THEN** exactly one further pass runs after it, never three

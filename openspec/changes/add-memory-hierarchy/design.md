@@ -92,7 +92,37 @@ Contract:
 - The article's "one page per writer" result is a **recipe** concern: give each writer its own
   note slug. No per-agent namespacing is added.
 
-## Dreaming — the recipe this change exists to make good
+## G5 — dreaming as a feature (owner, 2026-11-08)
+
+Owner: dreaming must not need hand-written `HEARTBEAT.md` + `startAgent` wiring. So the recipe
+below becomes a library-owned preset:
+
+```ts
+// one pass — for cron, CI, a button, or tests
+const report = await agents.dreamOnce("./personas/ava", { client, store, model?, budget? })
+// report: { changes: [{ file, kind: "fixed"|"removed"|"demoted"|"merged"|"linked", summary }], tokens }
+
+// on a clock — sugar over startAgent({ everyMs })
+const dreaming = agents.startDreaming("./personas/ava", { client, store, everyMs: 24 * 3600_000 })
+dreaming.stop()
+```
+
+- The **dream prompt is a SPEC constant** (byte-identical across ports, like `HEARTBEAT_PROMPT`):
+  it states what memory is *for* and the pass order below — not rigid write rules.
+- The dreamer is a **separate, scoped agent**: tools are exactly `memory` (notes on) and
+  `transcript_search`. It never inherits the persona's shell/file tools (blast radius).
+- `opts.instructions` (optional) appends host prose to the prompt — the escape hatch for
+  goal-focused dreaming (the article's contract-terms case). A `DREAM.md` in the home dir, if
+  present, is appended the same way.
+- Overlap: a pass already running ⇒ ticks coalesce (§7E inbox rule), never parallel passes.
+- `DreamReport` is parsed from `memory/log.md`'s new entry — the log is the single record.
+
+ADR 0016/0017 tension: this IS new surface (two functions). Justified because the user-facing
+need is "turn on dreaming", the wiring is identical every time, and the prompt must be parity-
+tested to be trustworthy — a recipe each host copies drifts. It adds no loop: it is `agent()` +
+`startAgent` + two tools. SPEC §7E's "Composition, not API" dream line is amended accordingly.
+
+## Dreaming — what each pass does
 
 Dreaming is not API. It is a §7E heartbeat persona (`startAgent(…, { everyMs })`) whose
 `HEARTBEAT.md` says what to do. G1–G4 exist so that a dream pass can do its job well; the
@@ -135,6 +165,12 @@ Cadence: start nightly (`everyMs: 24h`) on a cheap model with a hard budget; dre
 only when `log.md` shows most passes changing something, less when most are `HEARTBEAT_OK`.
 
 ## Open decisions (owner)
+
+- **D9** Dreaming as library API (`dreamOnce` / `startDreaming`) vs recipe only. [API — owner
+  asked 2026-11-08; this supersedes "Composition, not API" for dreaming only.]
+- **D10** Dreamer model default: same client as the persona, or required explicit `model`?
+  [same client; recommend a cheap model in docs]
+
 
 - **D1 — G1 default.** Default-on would change the soul for any `MEMORY.md` > 25 KB or > 200 lines
   — a silent behavior change and a §0 byte-identity break. **Recommend: opt-in**, preset values as
