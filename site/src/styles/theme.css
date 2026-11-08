@@ -227,6 +227,26 @@ starlight-tabs [role='tab'][aria-selected='true'] {
 .tn-langs a:hover .tn-lang {
 	color: var(--sl-color-text-accent);
 }
+.tn-langs .tn-reglink {
+	display: inline-flex;
+	align-items: center;
+	gap: 0.35rem;
+	margin-top: 0.15rem;
+}
+.tn-langs .tn-ico {
+	width: 0.85rem;
+	height: 0.85rem;
+	flex: none;
+	background: currentColor;
+	color: var(--sl-color-gray-3);
+	-webkit-mask: var(--ico) center / contain no-repeat;
+	mask: var(--ico) center / contain no-repeat;
+	transition: color 200ms ease-out;
+}
+.tn-langs .tn-reglink:hover .tn-ico,
+.tn-langs .tn-reglink:hover .tn-reg {
+	color: var(--sl-color-text-accent);
+}
 @media (max-width: 50rem) {
 	.tn-langs {
 		grid-template-columns: repeat(4, minmax(0, 1fr));

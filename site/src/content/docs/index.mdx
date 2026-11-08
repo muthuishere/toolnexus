@@ -24,14 +24,14 @@ import { Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
 
 <svg class="tn-converge not-content" viewBox="0 0 800 48" preserveAspectRatio="none" aria-hidden="true"><path pathLength="1" d="M400 2L50 46"/><path pathLength="1" d="M400 2L150 46"/><path pathLength="1" d="M400 2L250 46"/><path pathLength="1" d="M400 2L350 46"/><path pathLength="1" d="M400 2L450 46"/><path pathLength="1" d="M400 2L550 46"/><path pathLength="1" d="M400 2L650 46"/><path pathLength="1" d="M400 2L750 46"/><circle cx="400" cy="2" r="2"/></svg>
 <ul class="tn-langs not-content" aria-label="Eight languages, one contract">
-	<li><a href="/toolnexus/api/javascript/"><span class="tn-lang">JavaScript</span><span class="tn-reg">npm</span></a></li>
-	<li><a href="/toolnexus/api/python/"><span class="tn-lang">Python</span><span class="tn-reg">PyPI</span></a></li>
-	<li><a href="/toolnexus/api/go/"><span class="tn-lang">Go</span><span class="tn-reg">Go modules</span></a></li>
-	<li><a href="/toolnexus/api/java/"><span class="tn-lang">Java</span><span class="tn-reg">Maven</span></a></li>
-	<li><a href="/toolnexus/api/csharp/"><span class="tn-lang">C#</span><span class="tn-reg">NuGet</span></a></li>
-	<li><a href="/toolnexus/api/elixir/"><span class="tn-lang">Elixir</span><span class="tn-reg">Hex</span></a></li>
-	<li><a href="/toolnexus/api/clojure/"><span class="tn-lang">Clojure</span><span class="tn-reg">Clojars</span></a></li>
-	<li><a href="/toolnexus/api/rust/"><span class="tn-lang">Rust</span><span class="tn-reg">crates.io</span></a></li>
+	<li><a class="tn-langlink" href="/toolnexus/api/javascript/"><span class="tn-lang">JavaScript</span></a><a class="tn-reglink" href="https://www.npmjs.com/package/toolnexus" target="_blank" rel="noopener" title="Toolnexus on npm"><span class="tn-ico" style="--ico:url(/toolnexus/registry/npm.svg)" aria-hidden="true"></span><span class="tn-reg">npm</span></a></li>
+	<li><a class="tn-langlink" href="/toolnexus/api/python/"><span class="tn-lang">Python</span></a><a class="tn-reglink" href="https://pypi.org/project/toolnexus/" target="_blank" rel="noopener" title="Toolnexus on PyPI"><span class="tn-ico" style="--ico:url(/toolnexus/registry/pypi.svg)" aria-hidden="true"></span><span class="tn-reg">PyPI</span></a></li>
+	<li><a class="tn-langlink" href="/toolnexus/api/go/"><span class="tn-lang">Go</span></a><a class="tn-reglink" href="https://pkg.go.dev/github.com/muthuishere/toolnexus/golang" target="_blank" rel="noopener" title="Toolnexus on Go modules"><span class="tn-ico" style="--ico:url(/toolnexus/registry/go.svg)" aria-hidden="true"></span><span class="tn-reg">Go modules</span></a></li>
+	<li><a class="tn-langlink" href="/toolnexus/api/java/"><span class="tn-lang">Java</span></a><a class="tn-reglink" href="https://central.sonatype.com/artifact/io.github.muthuishere/toolnexus" target="_blank" rel="noopener" title="Toolnexus on Maven"><span class="tn-ico" style="--ico:url(/toolnexus/registry/apachemaven.svg)" aria-hidden="true"></span><span class="tn-reg">Maven</span></a></li>
+	<li><a class="tn-langlink" href="/toolnexus/api/csharp/"><span class="tn-lang">C#</span></a><a class="tn-reglink" href="https://www.nuget.org/packages/Toolnexus" target="_blank" rel="noopener" title="Toolnexus on NuGet"><span class="tn-ico" style="--ico:url(/toolnexus/registry/nuget.svg)" aria-hidden="true"></span><span class="tn-reg">NuGet</span></a></li>
+	<li><a class="tn-langlink" href="/toolnexus/api/elixir/"><span class="tn-lang">Elixir</span></a><a class="tn-reglink" href="https://hex.pm/packages/toolnexus" target="_blank" rel="noopener" title="Toolnexus on Hex"><span class="tn-ico" style="--ico:url(/toolnexus/registry/elixir.svg)" aria-hidden="true"></span><span class="tn-reg">Hex</span></a></li>
+	<li><a class="tn-langlink" href="/toolnexus/api/clojure/"><span class="tn-lang">Clojure</span></a><a class="tn-reglink" href="https://clojars.org/net.clojars.muthuishere/toolnexus" target="_blank" rel="noopener" title="Toolnexus on Clojars"><span class="tn-ico" style="--ico:url(/toolnexus/registry/clojure.svg)" aria-hidden="true"></span><span class="tn-reg">Clojars</span></a></li>
+	<li><a class="tn-langlink" href="/toolnexus/api/rust/"><span class="tn-lang">Rust</span></a><a class="tn-reglink" href="https://crates.io/crates/toolnexus" target="_blank" rel="noopener" title="Toolnexus on crates.io"><span class="tn-ico" style="--ico:url(/toolnexus/registry/rust.svg)" aria-hidden="true"></span><span class="tn-reg">crates.io</span></a></li>
 </ul>
 
 <video
