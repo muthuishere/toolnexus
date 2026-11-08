@@ -368,3 +368,34 @@ func TestMockLLMMedia(t *testing.T) {
 		t.Errorf("failing job err = %v, want it to contain the mock's message", err)
 	}
 }
+
+// TestMockLLMMediaOffline is the fully offline end-to-end path (docs: "Test the
+// whole agent offline"): the mock model calls generate_image, the tool runs the
+// xai-grok-cli-mock preset (no CLI, no key, no network), and the produced file
+// lands in RunResult.Files.
+func TestMockLLMMediaOffline(t *testing.T) {
+	base := mockLLM(t)
+	style, err := LoadMediaStyle(MediaStyleXaiGrokCliMock, MediaConfig{Gather: MediaGather{Dir: t.TempDir()}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tk, err := CreateToolkit(context.Background(), Options{Builtins: false, Media: MustCreateMedia(style)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tk.Close()
+	res, err := mockLLMClient(base, StyleOpenAI).Run(context.Background(), "Draw a red apple.", tk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.ToolCalls) != 1 || res.ToolCalls[0].Name != "generate_image" || res.ToolCalls[0].IsError {
+		t.Fatalf("tool calls = %+v", res.ToolCalls)
+	}
+	if len(res.Files) != 1 || res.Files[0].MimeType != "image/png" {
+		t.Fatalf("files = %+v", res.Files)
+	}
+	b, err := os.ReadFile(res.Files[0].Path)
+	if err != nil || string(b) != "toolnexus mock image" {
+		t.Fatalf("file %q = %q, %v", res.Files[0].Path, b, err)
+	}
+}

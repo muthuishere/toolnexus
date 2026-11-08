@@ -286,3 +286,41 @@ await assert.rejects(createMedia(loadMediaStyle(MediaStyle.OpenAICodexCliMock)).
 
 `available()` on a mock is `{installed: true, loggedIn: true}`; set
 `TOOLNEXUS_MEDIA_MOCK_AVAILABLE=0` to test your "not installed" path.
+
+## Test the whole agent offline
+
+The mock model from the [mock kit](/toolnexus/cookbook/mock-server/) (`tools/mock-llm/mock_llm.py`)
+calls the first tool it is offered, with arguments built from its schema. Give it a toolkit whose
+only tool is a mock preset's `generate_image`, and the full path runs with no model, no CLI, no
+key and no network: client loop → `generate_image` call → mock CLI file → `RunResult.files`.
+
+Start the mock first: `python3 tools/mock-llm/mock_llm.py --port 8787` (it prints its base URL).
+
+<Tabs syncKey="lang">
+<TabItem label="TypeScript">
+```ts
+const media = createMedia(loadMediaStyle(MediaStyle.XaiGrokCliMock, { gather: { dir } }))
+const toolkit = await createToolkit({ builtins: false, media })
+const client = createClient({ baseUrl: "http://127.0.0.1:8787/v1", style: "openai", model: "mock-model", apiKey: "mock-key" })
+const r = await client.run("Draw a red apple.", { toolkit })
+assert.equal(r.toolCalls[0].name, "generate_image")
+assert.equal(fs.readFileSync(r.files[0].path!, "utf8"), "toolnexus mock image")
+```
+</TabItem>
+<TabItem label="Go">
+```go
+style, _ := toolnexus.LoadMediaStyle(toolnexus.MediaStyleXaiGrokCliMock,
+	toolnexus.MediaConfig{Gather: toolnexus.MediaGather{Dir: dir}})
+tk, _ := toolnexus.CreateToolkit(ctx, toolnexus.Options{Media: toolnexus.MustCreateMedia(style)})
+client := toolnexus.CreateClient(toolnexus.ClientOptions{BaseURL: "http://127.0.0.1:8787/v1",
+	Style: toolnexus.StyleOpenAI, Model: "mock-model", APIKey: "mock-key"})
+res, _ := client.Run(ctx, "Draw a red apple.", tk)
+// res.ToolCalls[0].Name == "generate_image"; os.ReadFile(res.Files[0].Path) == "toolnexus mock image"
+```
+</TabItem>
+</Tabs>
+
+These two are runnable tests in the repo (`js/test/mock-llm.test.ts`,
+`golang/mock_llm_test.go` → `TestMockLLMMediaOffline`). The other ports have the same pieces
+(the mock preset, `createToolkit({ media })` and a client pointed at the mock); their offline
+end-to-end test is not written yet.
