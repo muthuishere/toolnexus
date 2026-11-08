@@ -15,7 +15,7 @@
 
 - [x] SPEC §7E: `DREAM_PROMPT` constant (exact text), `dreamer()` + `fromDir` `dream` option,
       `memory/log.md` entry format; amend "Composition, not API"
-- [ ] Fixture `examples/dreaming/` — written + passing in js; other 7 ports pending (home with one contradicted line + a transcript store + a
+- [x] Fixture `examples/dreaming/` — written + passing in all 8 ports (home with one contradicted line + a transcript store + a
       scripted model) asserting the four "Built-in dreamer preset" scenarios (Mt. Moon = build gate) in all 8 ports
 - [x] `conformance/options_manifest.json` — `dreamer`, `fromDir.dream`
 
@@ -37,7 +37,7 @@ byte-identity test with all options absent.
 ## Conformance
 
 - [x] `conformance/options_manifest.json` — `memoryIndexCap`, `notes`, `transcriptSearchTool`
-- [ ] Cross-port fixture: identical composed soul, `list` output and search output in all 8 ports
+- [x] Cross-port fixture: identical composed soul, `list` output and search output in all 8 ports
 - [x] Concurrency test: N parallel `memory add` on one file in one runtime ⇒ N entries
 - [x] > 2 MB `MEMORY.md` + `add` ⇒ on-disk file grows, nothing truncated (regression for the
       separate atomic-write bug fix)
@@ -60,5 +60,5 @@ byte-identity test with all options absent.
 
 ## Found while fixing the over-2MB truncation bug (2026-11-08)
 
-- [ ] Parity drift (SPEC §7E pinned + fixture cases `replace-first-occurrence-only` / `remove-first-occurrence-only` added; python + java fixes still pending): `replace`/`remove` swap EVERY occurrence in python (`str.replace`) and java (`String.replace`), but only the FIRST in js/golang/rust/elixir/csharp/clojure. Pin "first occurrence" in SPEC §7E + a fixture case (text appearing twice), fix python + java.
-- [ ] clojure: atomic memory write (needs a rename/move in koine.fs first; the port forbids interop/reader conditionals).
+- [x] Parity drift — python + java fixed (SPEC §7E pinned + fixture cases `replace-first-occurrence-only` / `remove-first-occurrence-only` added; python + java fixes still pending): `replace`/`remove` swap EVERY occurrence in python (`str.replace`) and java (`String.replace`), but only the FIRST in js/golang/rust/elixir/csharp/clojure. Pin "first occurrence" in SPEC §7E + a fixture case (text appearing twice), fix python + java.
+- [ ] (deferred, named in CHANGELOG) clojure: atomic memory write (needs a rename/move in koine.fs first; the port forbids interop/reader conditionals).
