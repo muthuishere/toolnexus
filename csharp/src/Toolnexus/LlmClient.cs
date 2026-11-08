@@ -227,6 +227,11 @@ public sealed partial class LlmClient
         public IDictionary<string, string>? Headers { get; set; }
         public string? SystemPrompt { get; set; }
         public int? MaxTurns { get; set; }             // default 10
+        /// <summary>(SPEC §8 "Stop-reason recovery", default false) Answers a malformed tool call with a
+        /// corrective message (once), a truncated reply (length/max_tokens) with a continue message (up
+        /// to 3 times, text joined) and an empty answer (e.g. thinking-only) with a nudge (once). Off ⇒
+        /// the loop is unchanged.</summary>
+        public bool StopRecovery { get; set; }
         /// <summary>(SPEC §8 "Tool scheduling") Cap on concurrency-safe tool calls of one response
         /// running at once. <c>null</c> ⇒ env <c>TOOLNEXUS_MAX_TOOL_CONCURRENCY</c> when a positive
         /// integer, else 10. Unsafe calls (anything not read-only) always run alone.</summary>
@@ -365,6 +370,7 @@ public sealed partial class LlmClient
         public Options WithHeaders(IDictionary<string, string> v) { Headers = v; return this; }
         public Options WithSystemPrompt(string v) { SystemPrompt = v; return this; }
         public Options WithMaxTurns(int v) { MaxTurns = v; return this; }
+        public Options WithStopRecovery(bool v = true) { StopRecovery = v; return this; }
         public Options WithMaxToolConcurrency(int v) { MaxToolConcurrency = v; return this; }
         public Options WithHooks(Hooks v) { Hooks = v; return this; }
         public Options WithRetries(int v) { Retries = v; return this; }
@@ -1325,6 +1331,7 @@ public sealed partial class LlmClient
         var turns = 0;
         var runStart = NowMs();
         var lastModel = _opts.Model; // §8: the model of the last call this run made
+        var rec = new StopRecoveryState(_opts.StopRecovery);
         var finished = new ConcurrentDictionary<string, ToolResult>(); // finished tool results, for an interrupted save
         var relocated = new Relocated(); // §8A adapter artifact — never enters `messages`
 
@@ -1357,11 +1364,24 @@ public sealed partial class LlmClient
                 var message = (IDictionary<string, object?>)((IDictionary<string, object?>)choices[0]!)["message"]!;
                 messages.Add(message);
                 var calls = message.Get("tool_calls") as List<object?>;
+                var malformed = false;
+                foreach (var c in calls ?? new List<object?>())
+                    if (c is IDictionary<string, object?> cd && cd.Get("function") is IDictionary<string, object?> cf)
+                        malformed = malformed || StopRecoveryState.MalformedArgs(cf.Get("arguments")?.ToString());
+                var (nudge, drop) = rec.Decide(turn == MaxTurns() - 1, calls is { Count: > 0 }, malformed,
+                    ((IDictionary<string, object?>)choices[0]!).Get("finish_reason") as string == "length", message.Get("content")?.ToString() ?? "");
+                if (nudge != null)
+                {
+                    if (drop) messages.RemoveAt(messages.Count - 1);
+                    messages.Add(Msg("user", nudge));
+                    continue;
+                }
                 if (calls == null || calls.Count == 0)
                 {
                     var content = message.Get("content");
-                    return EndRun(runStart, content?.ToString() ?? "", messages, toolCalls, turns, usage, lastModel);
+                    return EndRun(runStart, rec.Final(content?.ToString() ?? ""), messages, toolCalls, turns, usage, lastModel);
                 }
+                rec.Carry = "";
 
                 // Execute all tool calls in this turn concurrently.
                 var n = calls.Count;
@@ -1441,6 +1461,7 @@ public sealed partial class LlmClient
         var turns = 0;
         var runStart = NowMs();
         var lastModel = _opts.Model; // §8: the model of the last call this run made
+        var rec = new StopRecoveryState(_opts.StopRecovery);
         var finished = new ConcurrentDictionary<string, ToolResult>(); // finished tool results, for an interrupted save
 
         try
@@ -1471,13 +1492,23 @@ public sealed partial class LlmClient
 
                 var uses = content.OfType<IDictionary<string, object?>>()
                     .Where(b => (b.Get("type") as string) == "tool_use").ToList();
-                if (uses.Count == 0)
                 {
                     var text = new StringBuilder();
                     foreach (var b in content.OfType<IDictionary<string, object?>>())
                         if ((b.Get("type") as string) == "text")
                             text.Append(b.Get("text"));
-                    return EndRun(runStart, text.ToString(), messages, toolCalls, turns, usage, lastModel);
+                    var (nudge, drop) = rec.Decide(turn == MaxTurns() - 1, uses.Count > 0,
+                        uses.Any(u => StopRecoveryState.MalformedInput(u.Get("input"))),
+                        data.Get("stop_reason") as string == "max_tokens", text.ToString());
+                    if (nudge != null)
+                    {
+                        if (drop) messages.RemoveAt(messages.Count - 1);
+                        messages.Add(Msg("user", nudge));
+                        continue;
+                    }
+                    if (uses.Count == 0)
+                        return EndRun(runStart, rec.Final(text.ToString()), messages, toolCalls, turns, usage, lastModel);
+                    rec.Carry = "";
                 }
 
                 var n = uses.Count;
@@ -1581,6 +1612,7 @@ public sealed partial class LlmClient
         var turns = 0;
         var runStart = NowMs();
         var lastModel = _opts.Model; // §8: the model of the last call this run made
+        var rec = new StopRecoveryState(_opts.StopRecovery);
         var finished = new ConcurrentDictionary<string, ToolResult>(); // finished tool results, for an interrupted save
         var relocated = new Relocated(); // §8A adapter artifact — never enters `messages`
 
@@ -1610,6 +1642,7 @@ public sealed partial class LlmClient
                 var content = new StringBuilder();
                 var acc = new Dictionary<int, string[]>(); // index -> [id, name, args]
                 var order = new List<int>();
+                var finish = "";
 
                 var t0 = NowMs();
                 var beforeP = usage.PromptTokens;
@@ -1624,6 +1657,7 @@ public sealed partial class LlmClient
                         if (Json.ParseLoose(payload) is not IDictionary<string, object?> j) continue;
                         AddUsage(usage, j.Get("usage") as IDictionary<string, object?>, "openai");
                         if (j.Get("choices") is not List<object?> { Count: > 0 } choices) continue;
+                        if (((IDictionary<string, object?>)choices[0]!).Get("finish_reason") is string { Length: > 0 } fr) finish = fr;
                         if (((IDictionary<string, object?>)choices[0]!).Get("delta") is not IDictionary<string, object?> delta) continue;
                         if (delta.Get("content") is string ds && ds.Length > 0)
                         {
@@ -1655,15 +1689,24 @@ public sealed partial class LlmClient
                 Emit(MetricEvent.Llm(turnModel, "ok", NowMs() - t0, usage.PromptTokens - beforeP, usage.CompletionTokens - beforeC));
                 _opts.Hooks?.AfterLLM?.Invoke(new AfterLLMEvent(new Dictionary<string, object?> { ["streamed"] = true }, turnModel, turn));
 
+                var (nudgeS, dropS) = rec.Decide(turn == MaxTurns() - 1, order.Count > 0,
+                    order.Any(i => StopRecoveryState.MalformedArgs(acc[i][2])), finish == "length", content.ToString());
+                if (nudgeS != null)
+                {
+                    if (!dropS) messages.Add(Msg("assistant", content.ToString())); // only a truncated text reply is kept
+                    messages.Add(Msg("user", nudgeS));
+                    continue;
+                }
                 if (order.Count == 0)
                 {
                     messages.Add(Msg("assistant", content.ToString()));
                     onEvent(StreamEvent.UsageEvent(usage.Copy()));
-                    var done0 = EndRun(runStart, content.ToString(), messages, toolCalls, turns, usage, lastModel);
+                    var done0 = EndRun(runStart, rec.Final(content.ToString()), messages, toolCalls, turns, usage, lastModel);
                     onEvent(StreamEvent.DoneEvent(done0));
                     return done0;
                 }
 
+                rec.Carry = "";
                 var assembledCalls = new List<object?>();
                 foreach (var index in order)
                 {
@@ -1760,6 +1803,7 @@ public sealed partial class LlmClient
         var turns = 0;
         var runStart = NowMs();
         var lastModel = _opts.Model; // §8: the model of the last call this run made
+        var rec = new StopRecoveryState(_opts.StopRecovery);
         var finished = new ConcurrentDictionary<string, ToolResult>(); // finished tool results, for an interrupted save
 
         try
@@ -1849,12 +1893,14 @@ public sealed partial class LlmClient
 
                 var contentBlocks = new List<object?>();
                 var uses = new List<Dictionary<string, object?>>();
+                var malformedS = false;
                 foreach (var index in order)
                 {
                     var b = blocks[index];
                     if ((b["type"] as string) == "tool_use")
                     {
                         var json = b["json"]!.ToString()!;
+                        malformedS = malformedS || StopRecoveryState.MalformedArgs(json);
                         var tu = new Dictionary<string, object?>
                         {
                             ["type"] = "tool_use",
@@ -1872,18 +1918,26 @@ public sealed partial class LlmClient
                 }
                 messages.Add(new Dictionary<string, object?> { ["role"] = "assistant", ["content"] = contentBlocks });
 
+                var textS = new StringBuilder();
+                foreach (var b in contentBlocks.OfType<IDictionary<string, object?>>())
+                    if ((b.Get("type") as string) == "text")
+                        textS.Append(b.Get("text"));
+                var (nudgeA, dropA) = rec.Decide(turn == MaxTurns() - 1, uses.Count > 0, malformedS, stopReason == "max_tokens", textS.ToString());
+                if (nudgeA != null)
+                {
+                    if (dropA) messages.RemoveAt(messages.Count - 1);
+                    messages.Add(Msg("user", nudgeA));
+                    continue;
+                }
                 if (stopReason != "tool_use" || uses.Count == 0)
                 {
-                    var text = new StringBuilder();
-                    foreach (var b in contentBlocks.OfType<IDictionary<string, object?>>())
-                        if ((b.Get("type") as string) == "text")
-                            text.Append(b.Get("text"));
                     onEvent(StreamEvent.UsageEvent(usage.Copy()));
-                    var done0 = EndRun(runStart, text.ToString(), messages, toolCalls, turns, usage, lastModel);
+                    var done0 = EndRun(runStart, rec.Final(textS.ToString()), messages, toolCalls, turns, usage, lastModel);
                     onEvent(StreamEvent.DoneEvent(done0));
                     return done0;
                 }
 
+                rec.Carry = "";
                 var n = uses.Count;
                 foreach (var u in uses)
                     onEvent(CallEvent(u["id"]?.ToString(), u["name"]?.ToString() ?? "", (IDictionary<string, object?>)u["input"]!));
