@@ -73,7 +73,9 @@ All seven manifests (js, python, csharp, java, elixir, `clojure/build.clj`, `rus
 empty `## Unreleased` above it. **Update the docs install coordinates in the same commit** —
 `README.md`, `java/README.md`, `clojure/README.md`, `elixir/README.md`,
 `clojure/examples/*/deps.edn`, `rust/README.md`, `site/src/content/docs/install.mdx`,
-`quickstart.mdx`, `api/clojure.mdx`.
+`quickstart.mdx`, `api/clojure.mdx`, and the in-process-client recipe sources
+`site/recipes/in-process-client/*` (then run `node site/scripts/sync-recipes.mjs`, or CI's
+"API reference coverage" fails on stale pages).
 
 Leave historical statements alone: "on Clojars since v0.13.0", "Relay ships in golang/ as of
 0.12.0", and `docs/performance-benchmarks.md`'s "Versions measured". Rewriting those falsifies the

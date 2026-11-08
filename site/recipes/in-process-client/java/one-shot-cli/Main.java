@@ -1,5 +1,5 @@
 // run (Java 22+, multi-file source launcher): java -cp 'lib/*' Main.java python3 fake_cli.py
-//      (lib/ = toolnexus-0.26.0.jar + its runtime deps; OneShot.java sits next to this file)
+//      (lib/ = toolnexus-0.27.0.jar + its runtime deps; OneShot.java sits next to this file)
 import io.github.muthuishere.toolnexus.LlmClient;
 import io.github.muthuishere.toolnexus.NativeTool;
 import io.github.muthuishere.toolnexus.Toolkit;

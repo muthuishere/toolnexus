@@ -8,6 +8,8 @@ GitHub Releases `vX.Y.Z` via `release.yml` (see `PUBLISHING.md`).
 
 ## Unreleased
 
+## 0.27.0 — 2026-11-08
+
 **Rust: an ACP turn the agent never ends now fails after `permission_timeout`** (rust only, #124).
 Every other port bounds the whole `session/prompt` turn by the permission timeout, as SPEC §7 says
 ("the turn's permission timeout still applies"). Rust bounded only the host's `on_permission`

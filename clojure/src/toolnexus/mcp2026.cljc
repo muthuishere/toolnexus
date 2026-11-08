@@ -38,7 +38,7 @@
 (def code-header-mismatch -32020)
 (def code-unsupported-protocol -32022)
 
-(def client-info {"name" "toolnexus" "version" "0.26.0"})
+(def client-info {"name" "toolnexus" "version" "0.27.0"})
 
 (defn envelope
   "SPEC §2.3 — the `_meta` every 2026 request carries."

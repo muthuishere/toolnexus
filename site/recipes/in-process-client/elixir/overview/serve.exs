@@ -1,5 +1,5 @@
 # usage: elixir serve.exs
-Mix.install([{:toolnexus, "~> 0.26"}])
+Mix.install([{:toolnexus, "~> 0.27"}])
 
 add =
   Toolnexus.define_tool(
