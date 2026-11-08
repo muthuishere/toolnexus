@@ -303,48 +303,61 @@ jobs:
           TN_EXAMPLES: ${{ github.workspace }}/examples
 
   docs-examples:
-    name: Docs examples (eight ports)
+    # One job per port, in parallel: run sequentially the eight ports took ~33 min
+    # in one job; the slowest port (clojure, four modes) now sets the wall clock.
+    name: Docs examples (${{ matrix.lang }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        lang: [javascript, python, golang, java, csharp, elixir, clojure, rust]
     steps:
       - uses: actions/checkout@v4
 
-      # Every toolchain, because each documented example is compiled AND executed
-      # against its own port. Hermetic: no network, no live LLM.
+      # Node is always needed: the snippet extractor is a node script.
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
-      - uses: actions/setup-python@v5
+      - if: matrix.lang == 'python'
+        uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - uses: actions/setup-go@v5
+      - if: matrix.lang == 'golang' || matrix.lang == 'clojure'
+        uses: actions/setup-go@v5
         with:
           go-version: "1.23"
-      - uses: actions/setup-java@v4
+      - if: matrix.lang == 'java' || matrix.lang == 'clojure'
+        uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "21"
-      - uses: actions/setup-dotnet@v4
+      - if: matrix.lang == 'csharp'
+        uses: actions/setup-dotnet@v4
         with:
           dotnet-version: "10.0.x"
-      - uses: erlef/setup-beam@v1
+      - if: matrix.lang == 'elixir'
+        uses: erlef/setup-beam@v1
         with:
           elixir-version: "1.17"
           otp-version: "27"
-      # Clojure runs its examples on BOTH hosts, so this job needs the cljgo
-      # toolchain as well as the JVM one — a docs example that works under
-      # `clojure -M` and fails under `cljgo build` is the drift the port exists
-      # to prevent, and only the second host can see it.
-      - uses: DeLaGuardo/setup-clojure@13.4
+      # Clojure runs its examples on BOTH hosts (JVM and cljgo), so it needs the
+      # cljgo toolchain too.
+      - if: matrix.lang == 'clojure'
+        uses: DeLaGuardo/setup-clojure@13.4
         with:
           cli: latest
-      - run: go install github.com/muthuishere/cljgo/cmd/cljgo@v0.9.0
-      - run: echo "$HOME/go/bin" >> "$GITHUB_PATH"
+      - if: matrix.lang == 'clojure'
+        run: |
+          go install github.com/muthuishere/cljgo/cmd/cljgo@v0.9.0
+          echo "$HOME/go/bin" >> "$GITHUB_PATH"
 
-      # Build the ports the runners link against.
-      - run: npm install && npm run build
+      # Build the port the runner links against.
+      - if: matrix.lang == 'javascript'
+        run: npm install && npm run build
         working-directory: js
-      - run: ./gradlew jar --no-daemon
+      - if: matrix.lang == 'java'
+        run: ./gradlew jar --no-daemon
         working-directory: java
 
       - name: Extract and run every documented example
-        run: bash site/tests/run-all.sh
+        run: bash site/tests/run-all.sh ${{ matrix.lang }}
