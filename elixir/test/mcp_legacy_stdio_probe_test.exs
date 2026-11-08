@@ -1,7 +1,14 @@
 defmodule Toolnexus.McpLegacyStdioProbeTest do
   # SPEC §2.2a (amended): a fast discover reply reuses the stdio probe child for
   # the frozen path; only discover silence respawns.
-  use ExUnit.Case, async: true
+  #
+  # Not async, and a 5 s per-request budget: the first discover is answered only
+  # after a cold `node` start, and under `mix coveralls` with every async suite
+  # running beside it that start alone took > 1.5 s on CI (flaked on main too,
+  # run 42479901060). With 1.5 s a late discover *error* looked like silence, so
+  # the child was respawned and the spawn count (what this test pins) was wrong.
+  # Silence still costs exactly one budget, so the silent case stays bounded.
+  use ExUnit.Case, async: false
 
   alias Toolnexus.{Context, Mcp}
 
@@ -16,7 +23,7 @@ defmodule Toolnexus.McpLegacyStdioProbeTest do
       "command" => "node",
       "args" => [@server],
       "env" => %{"SPAWN_COUNT_FILE" => file, "DISCOVER_MODE" => mode},
-      "timeout" => 1_500
+      "timeout" => 5_000
     }
 
     src = Mcp.load(%{"mcpServers" => %{"legacy" => cfg}})

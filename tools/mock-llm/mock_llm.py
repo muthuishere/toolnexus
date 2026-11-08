@@ -50,7 +50,7 @@ mock_mcp.py (stdio / --http), fake_cli.py, fake_acp_agent.py, fake_media_cli.py
 (--as grok|codex); or `mock_llm.py --mcp|--cli|--acp`.
 
 Media (SPEC 7G): GET /v1/_mock/media-style.json returns a style whose baseUrl is this
-server; it declares all six verbs. image, video and talking are async (one
+server; it declares all seven verbs (music is sync and returns the WAV). image, video and talking are async (one
 "processing" poll, then "completed"; a body containing "[fail]" fails the job);
 speech, transcribe and cloneVoice are sync. Result URLs are served under /v1/files/
 (the shared 8x8 fixture PNG, a 10 ms WAV, a stub MP4).
@@ -407,9 +407,11 @@ def media_style(base):
                 "video": a("video", "video", {"prompt": "prompt", "image": "image_url", "seconds": "duration",
                                               "aspectRatio": "aspect_ratio"}, "data.url"),
                 "speech": y("speech", "audio", {"text": "text", "voice": "voice"}, "data.url"),
-                "transcribe": y("transcribe", "text", {"audio": "audio_url"}, "data.text"),
+                "music": y("music", "audio", {"prompt": "prompt", "seconds": "duration",
+                                              "instrumental": "instrumental", "lyrics": "lyrics"}, "data.url"),
+                "transcribe": y("transcribe", "text", {"audio": "audio_url", "language": "language"}, "data.text"),
                 "cloneVoice": y("cloneVoice", "text", {"name": "name", "samples": "samples"}, "data.voice_id"),
-                "talk": a("talking", "video", {"image": "image_url", "audio": "audio_url"}, "data.url"),
+                "talk": a("talking", "video", {"image": "image_url", "audio": "audio_url", "text": "text", "voice": "voice"}, "data.url"),
             },
             "_doc": "toolnexus mock model server (tools/mock-llm). Image/video/talking are async (one "
                     "'processing' poll, then 'completed'); a prompt containing [fail] fails the job."}
@@ -421,7 +423,7 @@ def media_start(verb, body, base):
             jid = f"{verb}-{len(JOBS) + 1}"
             JOBS[jid] = {"polls": 0, "verb": verb, "fail": "[fail]" in json.dumps(body)}
         return {"code": 0, "data": {"id": jid, "status": "queued"}}
-    if verb == "speech":
+    if verb in ("speech", "music"):
         return {"code": 0, "data": {"url": f"{base}/files/speech.wav"}}
     if verb == "transcribe":
         return {"code": 0, "data": {"text": f"Mock transcript of {body.get('audio_url', '')}."}}
