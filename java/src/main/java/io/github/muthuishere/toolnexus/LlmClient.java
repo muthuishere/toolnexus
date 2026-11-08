@@ -176,6 +176,11 @@ public final class LlmClient {
          * a {@code FAIL} surfaces the error immediately, skipping remaining retries. There is no
          * "suspend" tier — a failure is never a §10 {@code Pending}. Aborts (timeout/cancel) bypass it. */
         public Function<ErrorInfo, Tier> onError; // optional; null = default classifier
+        /** §8 Resilience: opt-in model fallback chain on overload. When a model call's retry
+         * budget is exhausted and the final status is 503 or 529, the same request is re-sent
+         * with the next model here (fresh budget). Empty/absent = unchanged behaviour. Disabled
+         * at runtime by env {@code TOOLNEXUS_DISABLE_MODEL_FALLBACK=1|true}. */
+        public List<String> fallbackModels; // optional; null/empty = no fallback
         /** §1B: reject a content part larger than this many <b>decoded</b> bytes (not the base64
          * string, which is +33%) at request assembly. Null ⇒ unlimited. The edge constructors
          * enforce the same limit process-wide via {@link ContentPart#setMaxPartBytes(long)};
@@ -213,6 +218,7 @@ public final class LlmClient {
         public Options bodyTransform(Function<Map<String, Object>, Map<String, Object>> v) { this.bodyTransform = v; return this; }
         public Options httpClient(HttpClient v) { this.httpClient = v; return this; }
         public Options onError(Function<ErrorInfo, Tier> v) { this.onError = v; return this; }
+        public Options fallbackModels(List<String> v) { this.fallbackModels = v; return this; }
         public Options maxPartBytes(long v) { this.maxPartBytes = v; return this; }
         public Options onUnsupportedPart(String v) { this.onUnsupportedPart = v; return this; }
     }
@@ -1080,6 +1086,8 @@ public final class LlmClient {
      *   <li>{@code THOUGHT} — a model's reasoning delta reported by an in-process/ACP model
      *       ({@code delta}, {@code via} set). Never part of the answer or {@link RunResult#text}.</li>
      *   <li>{@code USAGE} — token usage so far ({@code usage} set).</li>
+     *   <li>{@code FALLBACK} — only with {@code fallbackModels}: switching model after overload
+     *       ({@link #from()}, {@link #to()}).</li>
      *   <li>{@code DONE} — terminal event carrying the final {@link RunResult} ({@code result} set).</li>
      * </ul>
      */
@@ -1088,7 +1096,21 @@ public final class LlmClient {
                               Usage usage, RunResult result, Request request,
                               List<Map<String, Object>> parts, Map<String, Object> metadata,
                               String via) {
-        public enum Kind { TEXT, TOOL_CALL, TOOL_RESULT, USAGE, PENDING, DONE, THOUGHT }
+        public enum Kind { TEXT, TOOL_CALL, TOOL_RESULT, USAGE, PENDING, DONE, THOUGHT, FALLBACK }
+
+        /** {@code FALLBACK}: the model being switched away from (else null). */
+        public String from() { return type == Kind.FALLBACK && metadata != null ? (String) metadata.get("from") : null; }
+        /** {@code FALLBACK}: the model being switched to (else null). */
+        public String to() { return type == Kind.FALLBACK && metadata != null ? (String) metadata.get("to") : null; }
+
+        /** §8 Resilience: the call is switching from model {@code from} to {@code to} after overload. */
+        static StreamEvent fallback(String from, String to) {
+            Map<String, Object> m = new LinkedHashMap<>();
+            m.put("from", from);
+            m.put("to", to);
+            return new StreamEvent(Kind.FALLBACK, null, null, null, null, null, false, null, null, null, null,
+                    java.util.Collections.unmodifiableMap(m));
+        }
 
         /** Without {@code via} (every event that is not a tool-tiers {@code call_tool} call). */
         public StreamEvent(Kind type, String delta, String id, String name,
@@ -1566,7 +1588,9 @@ public final class LlmClient {
         headers.put("Content-Type", "application/json");
         if (opts.headers != null) headers.putAll(opts.headers);
 
-        Map<String, Object> data = llmCallJson(url, headers, body, newDeadline(), "openai");
+        String[] served = {turnModel};
+        Map<String, Object> data = llmCallJson(url, headers, body, newDeadline(), "openai", served);
+        turnModel = served[0];
         translateAfterLLM(data, turnModel);
 
         Translate.Result out = new Translate.Result();
@@ -1640,7 +1664,9 @@ public final class LlmClient {
         headers.put("Content-Type", "application/json");
         if (opts.headers != null) headers.putAll(opts.headers);
 
-        Map<String, Object> data = llmCallJson(endpoint, headers, body, newDeadline(), "anthropic");
+        String[] served = {turnModel};
+        Map<String, Object> data = llmCallJson(endpoint, headers, body, newDeadline(), "anthropic", served);
+        turnModel = served[0];
         translateAfterLLM(data, turnModel);
 
         Translate.Result out = new Translate.Result();
@@ -2299,7 +2325,14 @@ public final class LlmClient {
                 headers.put("Content-Type", "application/json");
                 if (opts.headers != null) headers.putAll(opts.headers);
 
-                Map<String, Object> data = llmCallJson(url, headers, body, deadline, "openai");
+                String[] served = {turnModel};
+                Map<String, Object> data;
+                try {
+                    data = llmCallJson(url, headers, body, deadline, "openai", served);
+                } finally {
+                    turnModel = served[0];
+                    lastModel[0] = turnModel;
+                }
                 addUsage(usage, (Map<String, Object>) data.get("usage"), "openai");
                 if (opts.hooks != null && opts.hooks.afterLLM != null) {
                     opts.hooks.afterLLM.accept(new AfterLLMEvent(data, turnModel, turn));
@@ -2434,7 +2467,14 @@ public final class LlmClient {
                 headers.put("Content-Type", "application/json");
                 if (opts.headers != null) headers.putAll(opts.headers);
 
-                Map<String, Object> data = llmCallJson(endpoint, headers, body, deadline, "anthropic");
+                String[] served = {turnModel};
+                Map<String, Object> data;
+                try {
+                    data = llmCallJson(endpoint, headers, body, deadline, "anthropic", served);
+                } finally {
+                    turnModel = served[0];
+                    lastModel[0] = turnModel;
+                }
                 addUsage(usage, (Map<String, Object>) data.get("usage"), "anthropic");
                 if (opts.hooks != null && opts.hooks.afterLLM != null) {
                     opts.hooks.afterLLM.accept(new AfterLLMEvent(data, turnModel, turn));
@@ -2597,8 +2637,15 @@ public final class LlmClient {
                 List<Integer> order = new ArrayList<>();
                 try {
                     // The JDK HttpClient streams the SSE response as lines — ideal for SSE.
-                    HttpResponse<Stream<String>> res =
-                            llmSend(url, headers, body, deadline, HttpResponse.BodyHandlers.ofLines());
+                    String[] served = {turnModel};
+                    HttpResponse<Stream<String>> res;
+                    try {
+                        res = llmSend(url, headers, body, deadline, HttpResponse.BodyHandlers.ofLines(),
+                                served, (from, to) -> onEvent.accept(StreamEvent.fallback(from, to)));
+                    } finally {
+                        turnModel = served[0];
+                        lastModel[0] = turnModel;
+                    }
                     if (res.statusCode() < 200 || res.statusCode() >= 300) {
                         String b = res.body() == null ? "" : res.body().collect(Collectors.joining("\n"));
                         throw providerError(res.statusCode(), b,
@@ -2800,8 +2847,15 @@ public final class LlmClient {
                 List<Integer> order = new ArrayList<>();
                 String[] stopReason = {""};
                 try {
-                    HttpResponse<Stream<String>> res =
-                            llmSend(endpoint, headers, body, deadline, HttpResponse.BodyHandlers.ofLines());
+                    String[] served = {turnModel};
+                    HttpResponse<Stream<String>> res;
+                    try {
+                        res = llmSend(endpoint, headers, body, deadline, HttpResponse.BodyHandlers.ofLines(),
+                                served, (from, to) -> onEvent.accept(StreamEvent.fallback(from, to)));
+                    } finally {
+                        turnModel = served[0];
+                        lastModel[0] = turnModel;
+                    }
                     if (res.statusCode() < 200 || res.statusCode() >= 300) {
                         String b = res.body() == null ? "" : res.body().collect(Collectors.joining("\n"));
                         throw providerError(res.statusCode(), b,
@@ -3194,6 +3248,65 @@ public final class LlmClient {
     private <T> HttpResponse<T> llmSend(String url, Map<String, String> headers,
                                         Map<String, Object> body, Deadline deadline,
                                         HttpResponse.BodyHandler<T> handler) {
+        return llmSend(url, headers, body, deadline, handler, null, null);
+    }
+
+    /** Environment reader; package-private so tests can simulate the kill switch. */
+    static Function<String, String> envLookup = System::getenv;
+
+    /** §8 Resilience: TOOLNEXUS_DISABLE_MODEL_FALLBACK = 1/true (case-insensitive) kills the chain. */
+    private static boolean fallbackDisabled() {
+        String v = envLookup.apply("TOOLNEXUS_DISABLE_MODEL_FALLBACK");
+        return v != null && (v.equals("1") || v.equalsIgnoreCase("true"));
+    }
+
+    /** {@code [turnModel, ...fallbackModels]}, skipping empty entries and duplicates. */
+    private List<String> modelChain(String turnModel) {
+        List<String> chain = new ArrayList<>();
+        chain.add(turnModel);
+        if (opts.fallbackModels == null || opts.fallbackModels.isEmpty() || fallbackDisabled()) return chain;
+        for (String m : opts.fallbackModels) {
+            if (m == null || m.isEmpty() || chain.contains(m)) continue;
+            chain.add(m);
+        }
+        return chain;
+    }
+
+    /**
+     * §8 Resilience fallback chain around the retry helper. {@code served[0]} receives the model
+     * that produced the returned response (or the last one tried). {@code onFallback} (stream only)
+     * is told {@code (from, to)} before each switch. A switch happens only when the budget was
+     * exhausted (no {@code onError} FAIL) and the final status is 503 or 529.
+     */
+    private <T> HttpResponse<T> llmSend(String url, Map<String, String> headers,
+                                        Map<String, Object> body, Deadline deadline,
+                                        HttpResponse.BodyHandler<T> handler, String[] served,
+                                        java.util.function.BiConsumer<String, String> onFallback) {
+        String turnModel = body.get("model") == null ? null : String.valueOf(body.get("model"));
+        List<String> chain = turnModel == null ? List.of() : modelChain(turnModel);
+        if (served != null) served[0] = turnModel;
+        if (chain.size() <= 1) return llmSendOnce(url, headers, body, deadline, handler, null);
+        Map<String, Object> b = body;
+        for (int i = 0; ; i++) {
+            if (i > 0) {
+                b = new LinkedHashMap<>(body);
+                b.put("model", chain.get(i));
+            }
+            if (served != null) served[0] = chain.get(i);
+            boolean[] failed = {false};
+            HttpResponse<T> res = llmSendOnce(url, headers, b, deadline, handler, failed);
+            int st = res.statusCode();
+            if (i == chain.size() - 1 || failed[0] || (st != 503 && st != 529)) return res;
+            if (res.body() instanceof AutoCloseable c) {
+                try { c.close(); } catch (Exception ignored) { /* best effort */ }
+            }
+            if (onFallback != null) onFallback.accept(chain.get(i), chain.get(i + 1));
+        }
+    }
+
+    private <T> HttpResponse<T> llmSendOnce(String url, Map<String, String> headers,
+                                            Map<String, Object> body, Deadline deadline,
+                                            HttpResponse.BodyHandler<T> handler, boolean[] failed) {
         int retries = retries();
         long base = retryBaseMs();
         RuntimeException lastErr = null;
@@ -3208,6 +3321,7 @@ public final class LlmClient {
                 // status, or fail a retryable one). A RETRY is still bounded by the budget below.
                 boolean retryable = isRetryableStatus(status, opts.retryableStatuses);
                 Tier tier = classify(new ErrorInfo(null, status, attempt, retryable));
+                if (tier == Tier.FAIL && failed != null) failed[0] = true;
                 if (tier == Tier.FAIL || attempt == retries) return res; // caller handles non-2xx
                 long wait = retryAfterMs(res).orElse((long) (base * Math.pow(2, attempt) + Math.random() * 100));
                 sleep(wait, deadline);
@@ -3281,29 +3395,27 @@ public final class LlmClient {
      */
     @SuppressWarnings("unchecked")
     private Map<String, Object> llmCallJson(String url, Map<String, String> headers,
-                                            Map<String, Object> body, Deadline deadline, String style) {
-        String turnModel = String.valueOf(body.get("model"));
+                                            Map<String, Object> body, Deadline deadline, String style,
+                                            String[] served) {
+        String[] model = {String.valueOf(body.get("model"))};
         long t0 = System.currentTimeMillis();
         try {
-            Map<String, Object> data = postJson(url, headers, body, deadline);
+            HttpResponse<String> res = llmSend(url, headers, body, deadline,
+                    HttpResponse.BodyHandlers.ofString(), model, null);
+            if (served != null) served[0] = model[0];
+            if (res.statusCode() < 200 || res.statusCode() >= 300) {
+                throw providerError(res.statusCode(), res.body(),
+                        res.headers().firstValue("retry-after").orElse(null));
+            }
+            Map<String, Object> data = Json.toMap(res.body());
             long[] tok = perCall((Map<String, Object>) data.get("usage"), style);
-            emit(new MetricEvent.Llm(turnModel, "ok", System.currentTimeMillis() - t0, tok[0], tok[1]));
+            emit(new MetricEvent.Llm(model[0], "ok", System.currentTimeMillis() - t0, tok[0], tok[1]));
             return data;
         } catch (RuntimeException e) {
-            emit(new MetricEvent.Llm(turnModel, "error", System.currentTimeMillis() - t0, 0, 0));
+            if (served != null && model[0] != null) served[0] = model[0];
+            emit(new MetricEvent.Llm(model[0], "error", System.currentTimeMillis() - t0, 0, 0));
             throw e;
         }
-    }
-
-    /** Send and parse a JSON object response, retrying transient failures + enforcing the deadline. */
-    private Map<String, Object> postJson(String url, Map<String, String> headers,
-                                         Map<String, Object> body, Deadline deadline) {
-        HttpResponse<String> res = llmSend(url, headers, body, deadline, HttpResponse.BodyHandlers.ofString());
-        if (res.statusCode() < 200 || res.statusCode() >= 300) {
-            throw providerError(res.statusCode(), res.body(),
-                    res.headers().firstValue("retry-after").orElse(null));
-        }
-        return Json.toMap(res.body());
     }
 
     @SuppressWarnings("unchecked")
