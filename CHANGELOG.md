@@ -16,7 +16,11 @@ back with their mime type, size and sha256 so a test can prove an image arrived,
 One, Cloudflare and OpenAI Decisions classifier wires with deterministic answers (noul 0.95, choice
 by hash, score within the rubric), serves a §7G media style covering all six verbs (async jobs with
 a poll, tiny real PNG/WAV/MP4 files), and injects 429/5xx with `Retry-After` on request. `--script`
-overrides replies. Every port now has an integration suite that runs its real client, classifier
+overrides replies. Sibling fakes cover every other source: an MCP server (stdio and HTTP, on both
+the `server/discover` path and the frozen one), an A2A agent, HTTP tool endpoints, a one-shot CLI
+for `createInProcessClient` and an ACP agent with permission, tool-call updates and
+`session/cancel`. The in-process recipe fakes moved here from `site/recipes/in-process-client/fakes/`.
+Every port now has an integration suite that runs its real client, classifier
 and media engine against it, in its normal test command. Docs: cookbook "Run without a model".
 
 - **Not done:** the ports' suites test the System One and Cloudflare classifier wires only; the

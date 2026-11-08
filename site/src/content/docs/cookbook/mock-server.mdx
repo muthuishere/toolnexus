@@ -42,6 +42,21 @@ sha256=…`, so a test proves the bytes arrived intact. To exercise retries, sen
 `POST /v1/_mock/faults {"path": "/chat/completions", "status": 429, "times": 1}`.
 `GET /v1/_mock/requests` returns per-route request counts.
 
+## Tool sources, CLI and ACP fakes
+
+The same folder holds a fake for every other thing toolnexus talks to. All are stdlib Python and
+deterministic.
+
+| Fake | Run | What it does |
+|---|---|---|
+| MCP server | `python3 tools/mock-llm/mock_mcp.py` (stdio) or `--http --port 0` | Tools `add(a, b)` and `echo(text)`. Answers `server/discover` with `2026-07-28`; `--legacy` refuses it so the client takes the frozen `initialize` path. |
+| A2A agent | the mock server, card at `http://127.0.0.1:8787/.well-known/agent-card.json` | Agent `mockagent`, skill `summarize`: one `working` poll, then `A2A mock done: <task>`. |
+| HTTP tool | `POST http://127.0.0.1:8787/v1/tools/add` | `{"a": 2, "b": 3}` returns `{"sum": 5}`. |
+| One-shot CLI | `python3 tools/mock-llm/fake_cli.py` | For `createInProcessClient`: asks for `add(19, 23)`, then answers `The sum is 42.` |
+| ACP agent | `python3 tools/mock-llm/fake_acp_agent.py` | Asks permission, reports a tool call, calls `add(17, 25)` on the MCP server you hand it, streams `The sum is 42.` A `[wait]` prompt waits for `session/cancel`. |
+
+`mock_llm.py --mcp`, `--cli` and `--acp` run the same fakes from one entry point.
+
 ## Point a client at it
 
 Use base URL `http://127.0.0.1:8787/v1` with any key. The key must be passed explicitly, because
