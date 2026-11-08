@@ -12,16 +12,16 @@ Each port: retry event in the streaming path, `x-should-retry` override in the s
 loop, and tests (event fields + order before the retried answer; true overrides a 400; false
 overrides a 503; no event from `run`).
 
-- [ ] `js/`
-- [ ] `python/`
-- [ ] `golang/`
-- [ ] `java/`
-- [ ] `csharp/`
-- [ ] `elixir/`
-- [ ] `clojure/`
-- [ ] `rust/`
+- [x] `js/`
+- [x] `python/`
+- [x] `golang/`
+- [x] `java/`
+- [x] `csharp/`
+- [x] `elixir/`
+- [x] `clojure/`
+- [x] `rust/`
 
 ## Verification
 
-- [ ] Each port's suite green
-- [ ] `CHANGELOG.md` entry under `## Unreleased`
+- [x] Each port's suite green
+- [x] `CHANGELOG.md` entry under `## Unreleased`

@@ -18,8 +18,8 @@ is transient.
 - `x-should-retry: true|false` (case-insensitive name and value) on a non-ok response overrides the
   default `retryable` classification before `onError` runs, in `run`, `ask` and `stream`.
 - Non-streaming output is otherwise byte-identical. Absent header ⇒ unchanged classification.
-- **BREAKING (Rust only)**: `StreamEvent` gains a `Retry` variant; exhaustive matches need an arm.
-  Other ports' event unions/classes gain a member, which is additive in their idiom.
+- Additive in every port (Rust `StreamEvent` is a struct with a `kind`, so no enum break).
+  Clojure delivers the event through `:on-event`.
 
 ## Impact
 

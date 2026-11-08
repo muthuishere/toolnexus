@@ -297,7 +297,7 @@ pub struct RunResult {
 }
 
 /// A streaming event. `kind`: `text` | `thought` | `tool_call` | `tool_result` |
-/// `usage` | `pending` | `done` | `error`. `thought` (an ACP agent's
+/// `usage` | `retry` | `pending` | `done` | `error`. `thought` (an ACP agent's
 /// `agent_thought_chunk`, `via: "acp"`) is never part of the answer text.
 #[derive(Debug, Clone, Default)]
 pub struct StreamEvent {
@@ -315,9 +315,33 @@ pub struct StreamEvent {
     pub result: Option<Box<RunResult>>,
     pub request: Option<Request>,
     pub error: Option<ClientError>,
+    /// `retry` only (streaming): the 1-based failed attempt about to be retried.
+    pub attempt: u32,
+    /// `retry` only: the effective retry budget (`retries`).
+    pub max: u32,
+    /// `retry` only: the exact wait about to be slept, in milliseconds.
+    pub delay_ms: u64,
+    /// `retry` only: the HTTP status; `None` on a network error.
+    pub status: Option<u16>,
+    /// `retry` only: `"HTTP <status>"` or `"network"`.
+    pub reason: String,
 }
 
 impl StreamEvent {
+    fn retry(attempt: u32, max: u32, delay: Duration, status: Option<u16>) -> Self {
+        Self {
+            kind: "retry".into(),
+            attempt,
+            max,
+            delay_ms: delay.as_millis() as u64,
+            status,
+            reason: match status {
+                Some(s) => format!("HTTP {s}"),
+                None => "network".into(),
+            },
+            ..Default::default()
+        }
+    }
     fn of(kind: &str) -> Self {
         Self {
             kind: kind.into(),
@@ -460,6 +484,16 @@ fn is_retryable_status(status: u16, extra: &[u16]) -> bool {
     DEFAULT_RETRYABLE.contains(&status) || extra.contains(&status)
 }
 
+/// Parse an `x-should-retry` value: trimmed `true`/`false` (case-insensitive)
+/// overrides the default retry classification; anything else is ignored.
+pub fn should_retry_header(v: &str) -> Option<bool> {
+    match v.trim().to_ascii_lowercase().as_str() {
+        "true" => Some(true),
+        "false" => Some(false),
+        _ => None,
+    }
+}
+
 /// Parse a `Retry-After` header: plain non-negative integer seconds ≤ i32::MAX only.
 pub fn retry_after_seconds(v: &str) -> Option<Duration> {
     let s = v.trim();
@@ -487,6 +521,9 @@ pub(crate) enum RespBody {
 pub(crate) struct RawResponse {
     pub status: u16,
     pub retry_after: String,
+    /// The `x-should-retry` override (SPEC § Resilience): `Some` only when the
+    /// header's trimmed value is `true`/`false` (case-insensitive).
+    pub should_retry: Option<bool>,
     pub body: RespBody,
 }
 
@@ -1111,9 +1148,15 @@ impl Client {
                     .and_then(|v| v.to_str().ok())
                     .unwrap_or("")
                     .to_owned();
+                let should_retry = resp
+                    .headers()
+                    .get("x-should-retry")
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(should_retry_header);
                 Ok(RawResponse {
                     status: resp.status().as_u16(),
                     retry_after,
+                    should_retry,
                     body: RespBody::Http(resp),
                 })
             }
@@ -1168,14 +1211,17 @@ impl Client {
                     if tier == ErrorTier::Fail || attempt == retries {
                         return Err(ClientError::Transport(e));
                     }
-                    self.sleep(self.backoff(attempt, ""), cancel).await?;
+                    let d = self.backoff(attempt, "");
+                    send(side, StreamEvent::retry(attempt + 1, retries, d, None));
+                    self.sleep(d, cancel).await?;
                 }
                 Ok(resp) => {
                     if resp.status < 300 {
                         return Ok(resp);
                     }
-                    let retryable =
-                        is_retryable_status(resp.status, &self.opts().retryable_statuses);
+                    let retryable = resp.should_retry.unwrap_or_else(|| {
+                        is_retryable_status(resp.status, &self.opts().retryable_statuses)
+                    });
                     let tier = classify(&ErrorInfo {
                         error: format!("LLM {}", resp.status),
                         status: resp.status,
@@ -1185,9 +1231,14 @@ impl Client {
                     if tier == ErrorTier::Fail || attempt == retries {
                         return Ok(resp);
                     }
-                    let ra = resp.retry_after.clone();
+                    let (ra, status) = (resp.retry_after.clone(), resp.status);
                     drop(resp);
-                    self.sleep(self.backoff(attempt, &ra), cancel).await?;
+                    let d = self.backoff(attempt, &ra);
+                    send(
+                        side,
+                        StreamEvent::retry(attempt + 1, retries, d, Some(status)),
+                    );
+                    self.sleep(d, cancel).await?;
                 }
             }
             attempt += 1;

@@ -8,6 +8,28 @@ GitHub Releases `vX.Y.Z` via `release.yml` (see `PUBLISHING.md`).
 
 ## Unreleased
 
+### A streamed turn now says when it is retrying (#189)
+
+When the provider answers `429`, `529` or a `5xx`, `stream()` now emits
+`{type: "retry", attempt, max, delayMs, status?, reason}` **before** it waits, so a host can show
+"Retrying in 4s · attempt 1/2" instead of a frozen spinner. `delayMs` is the exact wait the loop
+is about to sleep — a server's `Retry-After` when it sent one, otherwise the backoff actually
+drawn. `reason` is `"HTTP 429"` or `"network"`; `status` is absent on a network error. No event
+is emitted for a failure that will not be retried, and `run`/`ask` output is unchanged.
+
+The client also obeys the **`x-should-retry: true|false`** response header (the one Anthropic
+and OpenAI send, and their own SDKs obey): it overrides the default retryable classification
+before `onError` runs, in `run`, `ask` and `stream`. `onError` still has the final say and
+`retries` still bounds every retry. Without the header nothing changes.
+
+- Additive in every port: the event type gains a `retry` kind and fields (Rust: `kind == "retry"`
+  with `attempt`, `max`, `delay_ms`, `status: Option<u16>`, `reason` on the `StreamEvent` struct;
+  no exhaustive match breaks). Clojure has no stream entry point, so the event goes to
+  `:on-event` (a run without `:on-event` emits none).
+- In-process clients have no wire and emit no retry event.
+
+Spec: `SPEC.md` § Streaming and § Resilience; `openspec/changes/add-retry-stream-event`.
+
 ### Memory hierarchy and dreaming
 
 A persona's memory can now stay small and stay true. **Everything is opt-in; a persona built

@@ -1730,3 +1730,84 @@
     (is (false? (tool/concurrency-safe? plain {})))
     (is (false? (tool/concurrency-safe? own {})))
     (is (true? (tool/concurrency-safe? own {:dry true})))))
+
+;; ===========================================================================
+;; #189 — x-should-retry override + the retry event on the :on-event path
+;; ===========================================================================
+;; Clojure has no `stream` entry point: a run given `:on-event` is this port's
+;; streaming path, so the §8 retry event is emitted there and nowhere else.
+
+(defn- ok-res [style text]
+  {:status 200 :headers {} :body (json/write-str (text-response style text))})
+
+(defn- run-collecting [opts responses]
+  (let [[f n] (stub-http responses)
+        evs   (atom [])
+        c     (client/create-client (merge {:base-url "http://x.invalid" :model "m" :api-key "k"
+                                            :retries 2 :retry-base-ms 1 :http-client f}
+                                           opts))
+        r     (try (client/run c "hi" {:on-event #(swap! evs conj %)})
+                   (catch #?(:clj Throwable :default :default) e {:thrown e}))]
+    {:r r :events @evs :calls @n}))
+
+(deftest a-429-with-retry-after-0-emits-a-retry-event-before-done
+  (doseq [style ["openai" "anthropic"]]
+    (let [{:keys [r events calls]}
+          (run-collecting {:style style}
+                          [{:status 429 :headers {"retry-after" "0"} :body "{}"}
+                           (ok-res style "ok")])]
+      (is (= "ok" (:text r)) style)
+      (is (= 2 calls))
+      (is (= {:type "retry" :attempt 1 :max 2 :delay-ms 0 :status 429 :reason "HTTP 429"}
+             (first events)) style)
+      (is (= "done" (:type (last events))) style))))
+
+(deftest a-network-error-emits-a-retry-event-without-status
+  (let [{:keys [r events]} (run-collecting {} [{:status nil :error :connect} (ok-res "openai" "ok")])
+        ev (first events)]
+    (is (= "ok" (:text r)))
+    (is (= "retry" (:type ev)))
+    (is (= "network" (:reason ev)))
+    (is (not (contains? ev :status)))
+    (is (pos-int? (:delay-ms ev)))))
+
+(deftest a-terminal-400-emits-no-retry-event
+  (let [{:keys [r events calls]} (run-collecting {} [{:status 400 :headers {} :body "{}"}])]
+    (is (:thrown r))
+    (is (= 1 calls))
+    (is (not-any? #(= "retry" (:type %)) events))))
+
+(deftest a-run-without-on-event-is-unchanged-by-a-retry
+  (let [[f n] (stub-http [{:status 429 :headers {"retry-after" "0"} :body "{}"} (ok-res "openai" "ok")])
+        r (client/run (client/create-client {:base-url "http://x.invalid" :model "m" :api-key "k"
+                                             :retries 2 :retry-base-ms 1 :http-client f})
+                      "hi" {})]
+    (is (= "ok" (:text r)))
+    (is (= 2 @n))))
+
+(deftest x-should-retry-true-makes-a-400-retryable
+  (let [{:keys [r calls]} (run-collecting {} [{:status 400 :headers {"x-should-retry" " true "} :body "{}"}
+                                              (ok-res "openai" "retried")])]
+    (is (= "retried" (:text r)))
+    (is (= 2 calls))))
+
+(deftest x-should-retry-false-makes-a-503-terminal
+  (let [{:keys [r calls events]} (run-collecting {} [{:status 503 :headers {"x-should-retry" "False"} :body "{}"}
+                                                     (ok-res "openai" "never")])]
+    (is (= 503 (:status (ex-data (:thrown r)))))
+    (is (= 1 calls))
+    (is (not-any? #(= "retry" (:type %)) events))))
+
+(deftest x-should-retry-other-values-keep-the-default
+  (let [{:keys [r calls]} (run-collecting {} [{:status 400 :headers {"x-should-retry" "maybe"} :body "{}"}])]
+    (is (:thrown r))
+    (is (= 1 calls))))
+
+(deftest on-error-has-the-final-say-over-x-should-retry
+  (let [seen (atom nil)
+        {:keys [r calls]} (run-collecting {:on-error (fn [info] (reset! seen info) :fail)}
+                                          [{:status 400 :headers {"x-should-retry" "true"} :body "{}"}
+                                           (ok-res "openai" "never")])]
+    (is (:thrown r))
+    (is (= 1 calls))
+    (is (true? (:retryable? @seen)))))

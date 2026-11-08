@@ -326,7 +326,8 @@ defmodule Toolnexus.Client do
             on_unsupported_part: nil,
             max_part_bytes: nil,
             registry: nil,
-            deadline: nil
+            deadline: nil,
+            retry_emit: nil
 
   @type t :: %__MODULE__{}
 
@@ -822,7 +823,9 @@ defmodule Toolnexus.Client do
   Streaming variant: returns an `Enumerable` of event maps —
   `%{type: "text", delta}`, `%{type: "tool_call", id, name, args}`,
   `%{type: "tool_result", id, name, output, is_error, metadata}`, `%{type: "usage", usage}`,
-  `%{type: "pending", request}` (§10), `%{type: "done", result}`.
+  `%{type: "pending", request}` (§10),
+  `%{type: "retry", attempt, max, delay_ms, status?, reason}` (§8 — emitted before each LLM
+  retry wait; never from `run`/`ask`), `%{type: "done", result}`.
 
   With an `:id` it is stateful like `ask`: history is loaded before streaming and the
   transcript is saved back to the store on the terminal `done` event.
@@ -1495,7 +1498,9 @@ defmodule Toolnexus.Client do
         {:ok, resp}
 
       {:ok, %Req.Response{status: status} = resp} ->
-        retryable = retryable_status?(status, client.retryable_statuses)
+        retryable =
+          should_retry_override(resp, retryable_status?(status, client.retryable_statuses))
+
         tier = classify_error(client, %{status: status, attempt: attempt, retryable: retryable})
 
         if tier == :fail or attempt >= client.retries do
@@ -1509,25 +1514,66 @@ defmodule Toolnexus.Client do
 
           # `!= nil`, not truthiness: `Retry-After: 0` means retry now, and 0 is
           # truthy in Elixir but was previously rejected by the parser's `n > 0`.
+          # Computed once: the retry event reports exactly the wait that is slept.
           sleep_ms =
             if retry_after != nil,
               do: retry_after * 1000,
               else: client.retry_base_ms * Integer.pow(2, attempt) + :rand.uniform(100)
 
+          emit_retry(client, attempt, sleep_ms, status)
           Process.sleep(sleep_ms)
           llm_request(client, url, headers, body, attempt + 1)
         end
 
       {:error, e} ->
+        # `x-should-retry` is never consulted on a network error (there is no response).
         tier = classify_error(client, %{error: e, attempt: attempt, retryable: true})
 
         if tier == :fail or attempt >= client.retries do
           raise e
         else
-          Process.sleep(client.retry_base_ms * Integer.pow(2, attempt) + :rand.uniform(100))
+          sleep_ms = client.retry_base_ms * Integer.pow(2, attempt) + :rand.uniform(100)
+          emit_retry(client, attempt, sleep_ms, nil)
+          Process.sleep(sleep_ms)
           llm_request(client, url, headers, body, attempt + 1)
         end
     end
+  end
+
+  # §8 "x-should-retry override": a trimmed `true`/`false` (case-insensitive) on a non-ok
+  # response overrides the default classification before on_error runs; anything else keeps it.
+  defp should_retry_override(resp, default) do
+    v =
+      Enum.find_value(resp.headers || %{}, fn {k, vs} ->
+        if String.downcase(to_string(k)) == "x-should-retry", do: vs |> List.wrap() |> List.first()
+      end)
+
+    case v do
+      v when is_binary(v) ->
+        case v |> String.trim() |> String.downcase() do
+          "true" -> true
+          "false" -> false
+          _ -> default
+        end
+
+      _ ->
+        default
+    end
+  end
+
+  # §8 "Retry event (streaming only)": only the streaming path sets `retry_emit`, so
+  # run/ask never see it. Emitted BEFORE the wait, with the exact delay about to be slept.
+  defp emit_retry(%{retry_emit: nil}, _attempt, _delay, _status), do: :ok
+
+  defp emit_retry(%{retry_emit: emit} = client, attempt, delay, status) do
+    ev = %{type: "retry", attempt: attempt + 1, max: client.retries, delay_ms: delay}
+
+    ev =
+      if status,
+        do: ev |> Map.put(:status, status) |> Map.put(:reason, "HTTP #{status}"),
+        else: Map.put(ev, :reason, "network")
+
+    emit.(ev)
   end
 
   # §8 Gap 2 — one wire call. With a `:transport` the host's function makes the call
@@ -2405,12 +2451,15 @@ defmodule Toolnexus.Client do
         emit.(ev)
     end
 
+    # §8 Retry event: the streaming path alone carries a retry emitter into llm_request.
+    sclient = %{client | retry_emit: emit_ev}
+
     # A stream is cancelled by halting it (its worker is killed) or by an error;
     # either way the guard saves the partial transcript (SPEC §8).
     TurnGuard.run(id, client.store, client.style, fn ->
       case client.style do
-        "anthropic" -> stream_anthropic(client, prompt, toolkit, history, emit_ev)
-        _ -> stream_openai(client, prompt, toolkit, history, emit_ev)
+        "anthropic" -> stream_anthropic(sclient, prompt, toolkit, history, emit_ev)
+        _ -> stream_openai(sclient, prompt, toolkit, history, emit_ev)
       end
     end)
   end

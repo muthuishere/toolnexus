@@ -185,6 +185,7 @@ impl InProcess {
         Ok(RawResponse {
             status: 200,
             retry_after: String::new(),
+            should_retry: None,
             body: RespBody::Full(serde_json::to_vec(&out).unwrap_or_default()),
         })
     }
@@ -258,6 +259,7 @@ impl InProcess {
         RawResponse {
             status: 200,
             retry_after: String::new(),
+            should_retry: None,
             body: RespBody::Chunks(crx),
         }
     }
