@@ -25,6 +25,7 @@ per line. The twin of GenerateMedia(ctx, style, verb, args).
   --seconds int         Video length in seconds
   --model string        Model passed to the CLI
   --out string          Folder the files are saved in (default <tmp>/toolnexus-media)
+  --name string         File name (slug) for the saved file(s): <name>.<ext>, <name>-2.<ext>, …
   --timeout-ms int      Job deadline in ms (default 600000)
 
 CLI styles fold width/height/seconds/aspect ratio into the prompt text.
@@ -48,6 +49,7 @@ func mediaCmd(args []string, stdout, stderr io.Writer) int {
 	seconds := fs.Int("seconds", 0, "")
 	model := fs.String("model", "", "")
 	out := fs.String("out", "", "")
+	name := fs.String("name", "", "")
 	timeout := fs.Int("timeout-ms", 0, "")
 	if err := fs.Parse(args[1:]); err != nil {
 		return 2
@@ -67,6 +69,7 @@ func mediaCmd(args []string, stdout, stderr io.Writer) int {
 	}
 	cfg := toolnexus.MediaConfig{Model: *model}
 	cfg.Gather.Dir = *out
+	cfg.Gather.Name = *name
 	cfg.Loop.TimeoutMs = *timeout
 	res, err := toolnexus.GenerateMedia(context.Background(), *style, verb, in, cfg)
 	if err != nil {

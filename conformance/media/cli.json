@@ -1,9 +1,9 @@
 {
-  "_doc": "CLI client conformance (SPEC §7G.10, §7G.11) over conformance/media/fake-cli/fake-cli.sh — see fake-cli/README.md for the exact harness steps. client = grok|codex. Placeholders: {out} the fake's out dir, {dir} gather.dir, {cwd} in expectArgv = must equal <out>/cwd.txt byte for byte after removing its one trailing newline (the fake writes `pwd -P`; D17: the client passes the realpath of its temp dir, so no symlink resolution on either side). command (when present) replaces the fake command entirely (spawn-failure case). env is set in the TEST process (the child inherits it; Codex's folder lookup reads it). expectExists / expectMissing: paths that must / must not exist after the run. expectNoSpawn: argv.txt must not exist. maxElapsedMs: the call must return within it (kill on timeout). Other fields as in clients.json. modelParts (SPEC §7G.6 model visibility): the parts of this tool result that message assembly (§8A) emits to the model — only image parts; video/audio parts stay in RunResult.files and toolCalls[].parts only. Assert with the port's assembly function on a transcript containing this tool result. ctxTimeoutMs (D12): function face only, ctx.deadline = now + ctxTimeoutMs; errorPrefix asserts the message start. D9 (SPEC §7G.12): when modelParts is [] the tool-result content the port sends to the model is the plain output string in every message style incl. Anthropic — never an empty content array, never a placeholder; assert it with the same assembly function. D19: a CLI client that does not accept a canonical arg is skipped (never spawned) ⇒ the joined 'media: no client available for …' error. D20 runFilePath / D21 noUsage: as in clients.json. D21: Grok's end event: usage.input_tokens ⇒ inputTokens, usage.output_tokens ⇒ outputTokens, total_cost_usd ⇒ costUsd, total_cost_usd_ticks ⇒ raw.total_cost_usd_ticks (verbatim); each only when present. D20 runFilePath is asserted within the tool face; in url mode a CLI file's path is the CLI's own absolute file, not under {dir}. style (instead of client) names a built-in preset loaded with loadMediaStyle(style, config) (grok-cli | codex-cli | google-agy-cli, or a -mock twin); client grok|codex is the same as style grok-cli|codex-cli. oneShot:true ⇒ also run generateMedia(style, verb, args, config) and assert the same result. verbCases: createMedia over the listed styles (a string = preset, an object = an HTTP style); assert verbs() == expectVerbs, tools() names == expectTools, and generate(unsupported, {}) fails with error without starting any process. The unsupported-verb message says 'style' because every source is a loaded style.",
+  "_doc": "CLI client conformance (SPEC §7G.10, §7G.11) over conformance/media/fake-cli/fake-cli.sh — see fake-cli/README.md for the exact harness steps. style = a preset. Placeholders: {out} the fake's out dir, {dir} gather.dir, {cwd} in expectArgv = must equal <out>/cwd.txt byte for byte after removing its one trailing newline (the fake writes `pwd -P`; D17: the client passes the realpath of its temp dir, so no symlink resolution on either side). command (when present) replaces the fake command entirely (spawn-failure case). env is set in the TEST process (the child inherits it; Codex's folder lookup reads it). expectExists / expectMissing: paths that must / must not exist after the run. expectNoSpawn: argv.txt must not exist. maxElapsedMs: the call must return within it (kill on timeout). Other fields as in clients.json. modelParts (SPEC §7G.6 model visibility): the parts of this tool result that message assembly (§8A) emits to the model — only image parts; video/audio parts stay in RunResult.files and toolCalls[].parts only. Assert with the port's assembly function on a transcript containing this tool result. ctxTimeoutMs (D12): function face only, ctx.deadline = now + ctxTimeoutMs; errorPrefix asserts the message start. D9 (SPEC §7G.12): when modelParts is [] the tool-result content the port sends to the model is the plain output string in every message style incl. Anthropic — never an empty content array, never a placeholder; assert it with the same assembly function. D19: a CLI client that does not accept a canonical arg is skipped (never spawned) ⇒ the joined 'media: no client available for …' error. D20 runFilePath / D21 noUsage: as in clients.json. D21: Grok's end event: usage.input_tokens ⇒ inputTokens, usage.output_tokens ⇒ outputTokens, total_cost_usd ⇒ costUsd, total_cost_usd_ticks ⇒ raw.total_cost_usd_ticks (verbatim); each only when present. D20 runFilePath is asserted within the tool face; in url mode a CLI file's path is the CLI's own absolute file, not under {dir}. style (instead of client) names a built-in preset loaded with loadMediaStyle(style, config) (xai-grok-cli | openai-codex-cli | google-agy-cli, or a -mock twin); client grok|codex is the same as style xai-grok-cli|openai-codex-cli. oneShot:true ⇒ also run generateMedia(style, verb, args, config) and assert the same result. verbCases: createMedia over the listed styles (a string = preset, an object = an HTTP style); assert verbs() == expectVerbs, tools() names == expectTools, and generate(unsupported, {}) fails with error without starting any process. The unsupported-verb message says 'style' because every source is a loaded style. availabilityCases: loadMediaStyle(style, config) then available() — fast, no generation; assert {installed, loggedIn, reason} exactly. {dir} = a fresh temp dir (realpath); createFiles are created empty first; env set / unsetEnv removed for the case. A CLI's login is the existence of its own auth file (grok ~/.grok/auth.json, codex $CODEX_HOME/auth.json default ~/.codex/auth.json, agy ~/.gemini/antigravity-cli/antigravity-oauth-token), never its contents. result.style / result.model are asserted only when the expected result names them.",
   "cases": [
     {
       "name": "grok_image_path_from_tool_result_download",
-      "client": "grok",
+      "style": "xai-grok-cli",
       "liveVerified": true,
       "config": {
         "gather": {
@@ -92,7 +92,7 @@
     },
     {
       "name": "grok_image_url_mode_keeps_cli_path",
-      "client": "grok",
+      "style": "xai-grok-cli",
       "config": {
         "gather": {
           "mode": "url",
@@ -132,7 +132,9 @@
           }
         ],
         "jobId": "s1",
-        "status": "completed"
+        "status": "completed",
+        "style": "xai-grok-cli",
+        "model": "grok-4.7-build"
       },
       "tool": {
         "name": "generate_image",
@@ -165,7 +167,7 @@
     },
     {
       "name": "grok_keep_false_deletes_original",
-      "client": "grok",
+      "style": "xai-grok-cli",
       "config": {
         "gather": {
           "dir": "{dir}",
@@ -201,7 +203,7 @@
     },
     {
       "name": "grok_video_keeps_only_video_kind",
-      "client": "grok",
+      "style": "xai-grok-cli",
       "liveVerified": true,
       "config": {
         "gather": {
@@ -255,7 +257,7 @@
     },
     {
       "name": "grok_video_zdr_wrong_kind_is_unavailable",
-      "client": "grok",
+      "style": "xai-grok-cli",
       "liveVerified": true,
       "config": {
         "gather": {
@@ -284,7 +286,7 @@
     },
     {
       "name": "grok_video_other_tool_failure_is_failed",
-      "client": "grok",
+      "style": "xai-grok-cli",
       "config": {
         "gather": {
           "dir": "{dir}"
@@ -308,7 +310,7 @@
     },
     {
       "name": "grok_failed_tool_without_message_uses_raw_output_json",
-      "client": "grok",
+      "style": "xai-grok-cli",
       "config": {
         "gather": {
           "dir": "{dir}"
@@ -332,7 +334,7 @@
     },
     {
       "name": "grok_usage_limit_error_line_is_unavailable",
-      "client": "grok",
+      "style": "xai-grok-cli",
       "config": {
         "gather": {
           "dir": "{dir}"
@@ -355,7 +357,7 @@
     },
     {
       "name": "grok_no_file_no_error",
-      "client": "grok",
+      "style": "xai-grok-cli",
       "config": {
         "gather": {
           "dir": "{dir}"
@@ -378,7 +380,7 @@
     },
     {
       "name": "grok_nonzero_exit_with_file_is_completed",
-      "client": "grok",
+      "style": "xai-grok-cli",
       "config": {
         "gather": {
           "dir": "{dir}"
@@ -411,7 +413,7 @@
     },
     {
       "name": "grok_text_names_missing_file_exit_3",
-      "client": "grok",
+      "style": "xai-grok-cli",
       "config": {
         "gather": {
           "dir": "{dir}"
@@ -434,7 +436,7 @@
     },
     {
       "name": "grok_timeout_kills_process",
-      "client": "grok",
+      "style": "xai-grok-cli",
       "config": {
         "gather": {
           "dir": "{dir}"
@@ -461,7 +463,7 @@
     },
     {
       "name": "grok_spawn_failure_is_unavailable",
-      "client": "grok",
+      "style": "xai-grok-cli",
       "command": [
         "/nonexistent/toolnexus-fake-grok"
       ],
@@ -484,7 +486,7 @@
     },
     {
       "name": "grok_unsupported_arg_no_spawn",
-      "client": "grok",
+      "style": "xai-grok-cli",
       "config": {
         "gather": {
           "dir": "{dir}"
@@ -508,7 +510,7 @@
     },
     {
       "name": "codex_image_path_in_text",
-      "client": "codex",
+      "style": "openai-codex-cli",
       "liveVerified": true,
       "config": {
         "gather": {
@@ -589,7 +591,7 @@
     },
     {
       "name": "codex_image_from_generated_images_folder",
-      "client": "codex",
+      "style": "openai-codex-cli",
       "liveVerified": true,
       "note": "Live capture: Codex answered without the path; the file is found in $CODEX_HOME/generated_images/<thread>.",
       "config": {
@@ -648,7 +650,7 @@
     },
     {
       "name": "codex_usage_limit_is_unavailable",
-      "client": "codex",
+      "style": "openai-codex-cli",
       "config": {
         "gather": {
           "dir": "{dir}"
@@ -675,7 +677,7 @@
     },
     {
       "name": "codex_error_line_is_failed",
-      "client": "codex",
+      "style": "openai-codex-cli",
       "config": {
         "gather": {
           "dir": "{dir}"
@@ -702,8 +704,8 @@
     },
     {
       "name": "grok_failed_raw_output_keys_sorted",
+      "style": "xai-grok-cli",
       "note": "D15: rawOutput without message ⇒ compact JSON, object keys sorted by code point at every depth (array order kept).",
-      "client": "grok",
       "config": {
         "gather": {
           "dir": "{dir}"
@@ -727,8 +729,8 @@
     },
     {
       "name": "grok_text_capped_300",
+      "style": "xai-grok-cli",
       "note": "D4: 300 code points + … only when truncated.",
-      "client": "grok",
       "config": {
         "gather": {
           "dir": "{dir}"
@@ -751,8 +753,8 @@
     },
     {
       "name": "grok_tool_error_capped_400",
+      "style": "xai-grok-cli",
       "note": "D4: 400 code points + … only when truncated.",
-      "client": "grok",
       "config": {
         "gather": {
           "dir": "{dir}"
@@ -776,8 +778,8 @@
     },
     {
       "name": "codex_error_exactly_400_not_capped",
+      "style": "openai-codex-cli",
       "note": "D4",
-      "client": "codex",
       "config": {
         "gather": {
           "dir": "{dir}"
@@ -804,8 +806,8 @@
     },
     {
       "name": "grok_caller_deadline_is_timeout",
+      "style": "xai-grok-cli",
       "note": "D12: a ctx deadline kills the CLI and is status timeout, not cancelled.",
-      "client": "grok",
       "config": {
         "gather": {
           "dir": "{dir}"
@@ -826,7 +828,7 @@
     },
     {
       "name": "grok_usage_from_end_event",
-      "client": "grok",
+      "style": "xai-grok-cli",
       "config": {
         "gather": {
           "mode": "url",
@@ -915,7 +917,7 @@
     },
     {
       "name": "grok_size_hints_folded_into_prompt",
-      "style": "grok-cli",
+      "style": "xai-grok-cli",
       "note": "Spot fix (a): width/height/aspectRatio/seconds are folded into the prompt as ' (h1, h2)' in canonical verb order; never 'not supported'.",
       "config": {
         "gather": {
@@ -980,7 +982,7 @@
     },
     {
       "name": "grok_video_seconds_and_aspect_folded",
-      "style": "grok-cli",
+      "style": "xai-grok-cli",
       "config": {
         "gather": {
           "mode": "url",
@@ -1043,7 +1045,7 @@
     },
     {
       "name": "codex_aspect_folded",
-      "style": "codex-cli",
+      "style": "openai-codex-cli",
       "config": {
         "gather": {
           "mode": "url",
@@ -1204,7 +1206,7 @@
     },
     {
       "name": "mock_grok_cli_mock_image",
-      "style": "grok-cli-mock",
+      "style": "xai-grok-cli-mock",
       "oneShot": true,
       "note": "Mock preset: no process; fixed file <gather.dir>/<client>-mock-<verb>.<png|mp4> holding 'toolnexus mock <verb>'; text = the exact folded prompt; jobId mock.",
       "config": {
@@ -1256,7 +1258,7 @@
     },
     {
       "name": "mock_grok_cli_mock_video",
-      "style": "grok-cli-mock",
+      "style": "xai-grok-cli-mock",
       "oneShot": true,
       "note": "Mock preset: no process; fixed file <gather.dir>/<client>-mock-<verb>.<png|mp4> holding 'toolnexus mock <verb>'; text = the exact folded prompt; jobId mock.",
       "config": {
@@ -1308,7 +1310,7 @@
     },
     {
       "name": "mock_codex_cli_mock_image",
-      "style": "codex-cli-mock",
+      "style": "openai-codex-cli-mock",
       "oneShot": true,
       "note": "Mock preset: no process; fixed file <gather.dir>/<client>-mock-<verb>.<png|mp4> holding 'toolnexus mock <verb>'; text = the exact folded prompt; jobId mock.",
       "config": {
@@ -1409,13 +1411,131 @@
         }
       },
       "noUsage": true
+    },
+    {
+      "name": "gather_name_slug_mock",
+      "style": "xai-grok-cli-mock",
+      "note": "gather.name: sanitised slug ([^A-Za-z0-9._-] => '-', leading '.'/'-' dropped), saved as <slug><ext>, then <slug>-2<ext> … (first free name). style/model in the result say who served it.",
+      "config": {
+        "model": "grok-x",
+        "gather": {
+          "dir": "{dir}",
+          "name": "../my apple/cover"
+        }
+      },
+      "verb": "image",
+      "args": {
+        "prompt": "a red apple"
+      },
+      "fixture": [],
+      "expectNoSpawn": true,
+      "result": {
+        "files": [
+          {
+            "type": "image",
+            "mimeType": "image/png",
+            "path": "{dir}/my-apple-cover.png",
+            "url": "file://{dir}/my-apple-cover.png"
+          }
+        ],
+        "text": "Generate exactly one image with your image generation tool: a red apple. Do not write code. Reply only with the file path.",
+        "jobId": "mock",
+        "status": "completed",
+        "style": "xai-grok-cli-mock",
+        "model": "grok-x"
+      },
+      "tool": {
+        "name": "generate_image",
+        "isError": false,
+        "output": "image ready: {dir}/my-apple-cover.png",
+        "parts": [
+          {
+            "type": "image",
+            "mimeType": "image/png",
+            "data": "dG9vbG5leHVzIG1vY2sgaW1hZ2U="
+          }
+        ],
+        "metadata": {
+          "source": "media",
+          "verb": "image",
+          "client": "grok",
+          "jobId": "mock",
+          "status": "completed"
+        }
+      },
+      "noUsage": true
+    },
+    {
+      "name": "gather_name_two_files",
+      "style": "xai-grok-cli",
+      "config": {
+        "gather": {
+          "dir": "{dir}",
+          "name": "pic"
+        }
+      },
+      "verb": "image",
+      "args": {
+        "prompt": "two"
+      },
+      "fixture": [
+        "#file a/1.jpg ONE",
+        "#file a/2.jpg TWO",
+        "{\"type\":\"tool_call_update\",\"toolCallId\":\"c0\",\"status\":\"completed\",\"rawOutput\":{\"path\":\"{out}/a/1.jpg\"}}",
+        "{\"type\":\"tool_call_update\",\"toolCallId\":\"c1\",\"status\":\"completed\",\"rawOutput\":{\"path\":\"{out}/a/2.jpg\"}}",
+        "{\"type\":\"end\",\"stopReason\":\"end_turn\",\"sessionId\":\"s7\",\"num_turns\":1}"
+      ],
+      "result": {
+        "files": [
+          {
+            "type": "image",
+            "mimeType": "image/jpeg",
+            "path": "{dir}/pic.jpg",
+            "url": "file://{dir}/pic.jpg"
+          },
+          {
+            "type": "image",
+            "mimeType": "image/jpeg",
+            "path": "{dir}/pic-2.jpg",
+            "url": "file://{dir}/pic-2.jpg"
+          }
+        ],
+        "jobId": "s7",
+        "status": "completed",
+        "style": "xai-grok-cli"
+      },
+      "tool": {
+        "name": "generate_image",
+        "isError": false,
+        "output": "image ready: {dir}/pic.jpg\n{dir}/pic-2.jpg",
+        "parts": [
+          {
+            "type": "image",
+            "mimeType": "image/jpeg",
+            "data": "T05F"
+          },
+          {
+            "type": "image",
+            "mimeType": "image/jpeg",
+            "data": "VFdP"
+          }
+        ],
+        "metadata": {
+          "source": "media",
+          "verb": "image",
+          "client": "grok",
+          "jobId": "s7",
+          "status": "completed"
+        }
+      },
+      "noUsage": true
     }
   ],
   "verbCases": [
     {
       "name": "grok_cli_verbs",
       "styles": [
-        "grok-cli"
+        "xai-grok-cli"
       ],
       "expectVerbs": [
         "image",
@@ -1431,7 +1551,7 @@
     {
       "name": "codex_cli_verbs",
       "styles": [
-        "codex-cli"
+        "openai-codex-cli"
       ],
       "expectVerbs": [
         "image"
@@ -1459,7 +1579,7 @@
     {
       "name": "grok_cli_mock_verbs",
       "styles": [
-        "grok-cli-mock"
+        "xai-grok-cli-mock"
       ],
       "expectVerbs": [
         "image",
@@ -1475,7 +1595,7 @@
     {
       "name": "codex_cli_mock_verbs",
       "styles": [
-        "codex-cli-mock"
+        "openai-codex-cli-mock"
       ],
       "expectVerbs": [
         "image"
@@ -1520,7 +1640,7 @@
             }
           }
         },
-        "codex-cli",
+        "openai-codex-cli",
         "google-agy-cli"
       ],
       "expectVerbs": [
@@ -1554,7 +1674,7 @@
             }
           }
         },
-        "grok-cli"
+        "xai-grok-cli"
       ],
       "expectVerbs": [
         "image",
@@ -1568,6 +1688,142 @@
       ],
       "unsupported": "transcribe",
       "error": "media: no style supports \"transcribe\""
+    }
+  ],
+  "availabilityCases": [
+    {
+      "name": "mock_available",
+      "style": "xai-grok-cli-mock",
+      "expect": {
+        "installed": true,
+        "loggedIn": true,
+        "reason": "grok: mock"
+      }
+    },
+    {
+      "name": "mock_set_unavailable",
+      "style": "openai-codex-cli-mock",
+      "env": {
+        "TOOLNEXUS_MEDIA_MOCK_AVAILABLE": "0"
+      },
+      "expect": {
+        "installed": false,
+        "loggedIn": false,
+        "reason": "codex: mock set unavailable by TOOLNEXUS_MEDIA_MOCK_AVAILABLE=0"
+      }
+    },
+    {
+      "name": "cli_not_installed",
+      "style": "xai-grok-cli",
+      "config": {
+        "command": [
+          "/nonexistent/toolnexus-grok"
+        ]
+      },
+      "expect": {
+        "installed": false,
+        "loggedIn": false,
+        "reason": "grok: \"/nonexistent/toolnexus-grok\" not found on PATH"
+      }
+    },
+    {
+      "name": "codex_not_logged_in",
+      "style": "openai-codex-cli",
+      "config": {
+        "command": [
+          "/bin/sh"
+        ]
+      },
+      "env": {
+        "CODEX_HOME": "{dir}"
+      },
+      "expect": {
+        "installed": true,
+        "loggedIn": false,
+        "reason": "codex: installed, not logged in ({dir}/auth.json missing)"
+      }
+    },
+    {
+      "name": "codex_logged_in",
+      "style": "openai-codex-cli",
+      "config": {
+        "command": [
+          "/bin/sh"
+        ]
+      },
+      "env": {
+        "CODEX_HOME": "{dir}"
+      },
+      "createFiles": [
+        "{dir}/auth.json"
+      ],
+      "expect": {
+        "installed": true,
+        "loggedIn": true,
+        "reason": "codex: installed, logged in ({dir}/auth.json present)"
+      }
+    },
+    {
+      "name": "http_env_missing",
+      "style": {
+        "name": "keyed",
+        "baseUrl": "https://example.invalid",
+        "headers": {
+          "Authorization": "Bearer ${TN_AVAIL_KEY}"
+        },
+        "verbs": {
+          "image": {
+            "mode": "sync",
+            "kind": "image",
+            "start": {
+              "path": "/i"
+            },
+            "args": {
+              "prompt": "prompt"
+            },
+            "resultPath": "url"
+          }
+        }
+      },
+      "unsetEnv": [
+        "TN_AVAIL_KEY"
+      ],
+      "expect": {
+        "installed": true,
+        "loggedIn": false,
+        "reason": "keyed: TN_AVAIL_KEY is not set"
+      }
+    },
+    {
+      "name": "http_env_present",
+      "style": {
+        "name": "keyed",
+        "baseUrl": "https://example.invalid",
+        "headers": {
+          "Authorization": "Bearer ${TN_AVAIL_KEY}"
+        },
+        "verbs": {
+          "image": {
+            "mode": "sync",
+            "kind": "image",
+            "start": {
+              "path": "/i"
+            },
+            "args": {
+              "prompt": "prompt"
+            },
+            "resultPath": "url"
+          }
+        }
+      },
+      "env": {
+        "TN_AVAIL_KEY": "YOUR_KEY_HERE"
+      },
+      "expect": {
+        "installed": true,
+        "loggedIn": true,
+        "reason": "keyed: env present"
+      }
     }
   ]
 }

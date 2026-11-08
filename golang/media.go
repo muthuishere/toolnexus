@@ -168,6 +168,11 @@ type MediaResult struct {
 	Status string      `json:"status"`
 	// Usage is what the provider reported (§7G.12 D21), never estimated; nil when none.
 	Usage *MediaUsage `json:"usage,omitempty"`
+	// Style is who served the call: the preset id for a CLI preset, the style's
+	// name for an HTTP style, else the client's name (§7G.10b).
+	Style string `json:"style,omitempty"`
+	// Model is the configured model for the verb, when one was set; never guessed.
+	Model string `json:"model,omitempty"`
 	// hasText marks a text-kind result, so an empty Text ("" — e.g. silence)
 	// still serialises as "text":"".
 	hasText bool
@@ -263,6 +268,10 @@ type MediaLoop struct {
 // url). Dir default <os temp>/toolnexus-media; MaxBytes default 100 MiB;
 // Keep (CLI only) default true — false deletes the CLI's original after a copy.
 type MediaGather struct {
+	// Name, when set, names saved files "<name><ext>", then "<name>-2<ext>", …
+	// (first free name). Sanitised: anything outside [A-Za-z0-9._-] becomes "-",
+	// leading "." and "-" are dropped; empty ⇒ the default naming (§7G.10b).
+	Name     string
 	Mode     string
 	Dir      string
 	MaxBytes int64
@@ -523,6 +532,12 @@ func (m *Media) route(ctx context.Context, verb string, args map[string]any, cal
 		a := clean
 		res, err := callMediaVerb(ctx, c, verb, a, call)
 		if err == nil {
+			if res.Style == "" {
+				res.Style = mediaSourceID(c)
+			}
+			if res.Model == "" {
+				res.Model = mediaSourceModel(c, verb)
+			}
 			return res, c.Name(), nil
 		}
 		if !errors.Is(err, ErrMediaUnavailable) {

@@ -203,15 +203,17 @@ func scriptOf(t *testing.T, c map[string]any) []mediaScriptEntry {
 func configOf(t *testing.T, raw any) MediaConfig {
 	t.Helper()
 	var c struct {
-		Model  string            `json:"model"`
-		Models map[string]string `json:"models"`
-		Key    string            `json:"key"`
-		URL    string            `json:"url"`
-		Loop   struct {
+		Model   string            `json:"model"`
+		Models  map[string]string `json:"models"`
+		Key     string            `json:"key"`
+		Command []string          `json:"command"`
+		URL     string            `json:"url"`
+		Loop    struct {
 			IntervalMs int `json:"intervalMs"`
 			TimeoutMs  int `json:"timeoutMs"`
 		} `json:"loop"`
 		Gather struct {
+			Name     string `json:"name"`
 			Mode     string `json:"mode"`
 			Dir      string `json:"dir"`
 			MaxBytes int64  `json:"maxBytes"`
@@ -224,8 +226,9 @@ func configOf(t *testing.T, raw any) MediaConfig {
 		}
 	}
 	return MediaConfig{Model: c.Model, Models: c.Models, Key: c.Key, URL: c.URL,
-		Loop:   MediaLoop{IntervalMs: c.Loop.IntervalMs, TimeoutMs: c.Loop.TimeoutMs},
-		Gather: MediaGather{Mode: c.Gather.Mode, Dir: c.Gather.Dir, MaxBytes: c.Gather.MaxBytes, Keep: c.Gather.Keep}}
+		Loop:    MediaLoop{IntervalMs: c.Loop.IntervalMs, TimeoutMs: c.Loop.TimeoutMs},
+		Command: c.Command,
+		Gather:  MediaGather{Name: c.Gather.Name, Mode: c.Gather.Mode, Dir: c.Gather.Dir, MaxBytes: c.Gather.MaxBytes, Keep: c.Gather.Keep}}
 }
 
 func assertRequests(t *testing.T, face string, c map[string]any, got []mediaRecorded) {
@@ -324,6 +327,11 @@ func assertResult(t *testing.T, c map[string]any, client, dir string, res MediaR
 		return
 	}
 	got := jsonNorm(t, res).(map[string]any)
+	for _, k := range []string{"style", "model"} { // asserted only when the case names them
+		if _, ok := mediaMap(want)[k]; !ok {
+			delete(got, k)
+		}
+	}
 	wf, _ := mediaMap(want)["files"].([]any)
 	gf, _ := got["files"].([]any)
 	if len(wf) == len(gf) {
@@ -619,7 +627,7 @@ func TestMediaConformanceCLI(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, raw := range loadMediaFile(t, "cli.json", 33) {
+	for _, raw := range loadMediaFile(t, "cli.json", 35) {
 		var head struct{ Name string }
 		_ = json.Unmarshal(raw, &head)
 		t.Run(head.Name, func(t *testing.T) {
@@ -1375,3 +1383,57 @@ func TestMediaConformanceCLIVerbs(t *testing.T) {
 		})
 	}
 }
+
+func TestMediaConformanceAvailability(t *testing.T) {
+	var f struct {
+		AvailabilityCases []json.RawMessage `json:"availabilityCases"`
+	}
+	if err := json.Unmarshal(readConformance(t, "cli.json"), &f); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.AvailabilityCases) != 7 {
+		t.Fatalf("availabilityCases = %d, want 7", len(f.AvailabilityCases))
+	}
+	for _, raw := range f.AvailabilityCases {
+		var head struct{ Name string }
+		_ = json.Unmarshal(raw, &head)
+		t.Run(head.Name, func(t *testing.T) {
+			dir, _ := filepath.EvalSymlinks(t.TempDir())
+			c := substitute(t, raw, map[string]string{"{dir}": dir})
+			applyEnv(t, c)
+			for _, p := range toStrings(c["createFiles"]) {
+				if err := os.WriteFile(p, nil, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			var s MediaStyle
+			var err error
+			if name, ok := c["style"].(string); ok {
+				s, err = LoadMediaStyle(name, configOf(t, c["config"]))
+			} else {
+				s, err = parseMediaStyle([]byte(mediaJSON(c["style"])), "inline")
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			start := time.Now()
+			got := jsonNorm(t, s.Available(context.Background()))
+			if time.Since(start) > time.Second {
+				t.Fatalf("Available took %v", time.Since(start))
+			}
+			if !reflect.DeepEqual(got, c["expect"]) {
+				t.Fatalf("available = %s\nwant        %s", mediaJSON(got), mediaJSON(c["expect"]))
+			}
+		})
+	}
+}
+
+func toStrings(v any) []string {
+	var out []string
+	for _, x := range asSlice(v) {
+		out = append(out, x.(string))
+	}
+	return out
+}
+
+func asSlice(v any) []any { a, _ := v.([]any); return a }

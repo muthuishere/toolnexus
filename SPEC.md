@@ -2439,11 +2439,15 @@ failure.
 
 `createMedia(client | [client])` returns `media` with the seven verbs (port-idiomatic:
 `media.image({prompt})`, `media.Image(ctx, ImageInput{…})`, `media.image(prompt=…)`), a generic
-`generate(verb, args, ctx?)`, `supports(verb)` and `tools()`. Normative order for one call:
+`generate(verb, args, ctx?)`, `supports(verb)`, `verbs()` (every verb some source supports, in
+`verbs.json` order) and `tools()`. A loaded style (`loadMediaStyle`, HTTP file or §7G.10a preset)
+is accepted anywhere a client is. Normative order for one call:
 
 1. Empty client list ⇒ error at creation: `media: no clients`.
 2. Candidates = clients whose `supports(verb)` is true, in list order. None ⇒
-   `media: no client supports "<verb>"`, status `failed`, no request.
+   `media: no client supports "<verb>"`, status `failed`, no request — or
+   `media: no style supports "<verb>"` when **every** source given to `createMedia` is a loaded
+   style (§7G.10a). `supports(verb)` is the only verb-support mechanism; no port special-cases a vendor.
 3. **Non-canonical key** (§7G.12 D7/D19): a key that is not a canonical arg of the verb
    (`verbs.json`) ⇒ `<verb>: argument "<key>" not supported` (first in sorted code-point order),
    status `failed`, before any client is tried. A null/nil/None value is absent everywhere.
@@ -2799,8 +2803,18 @@ and collects files. ACP is not used (ADR 0037). One run, normative:
    the text is non-empty.
 7. Remove `cwd` (after any copy-out).
 
-The client's `model` becomes `-m <model>`; the prompt is the client's template with `{prompt}`
-replaced. CLI clients accept `prompt*` only (any other arg ⇒ the §7G.3 unsupported-arg error).
+The client's `model` becomes `-m <model>` (agy: `--model <model>`); the prompt is the client's
+template with `{prompt}` replaced by the **folded prompt** below. CLI clients accept: image —
+`prompt*`, `width`, `height`, `aspectRatio`; video — `prompt*`, `seconds`, `aspectRatio`. Any other
+arg (e.g. `seed`) ⇒ the §7G.3 / D19 unsupported-arg skip.
+
+**Size-hint folding** (pinned 2026-11-08, consumer report): a CLI takes no size flags, so the
+hints become prompt text. `folded = prompt`, then, if any hint is present, `" (" + hints.join(", ") + ")"`
+where `hints` are the present args in `verbs.json` order rendered: `width` ⇒ `width <n> px`,
+`height` ⇒ `height <n> px`, `seconds` ⇒ `about <n> seconds long`, `aspectRatio` ⇒
+`aspect ratio <v>` (values as `argText`: string as-is, integral number as integer text). Example:
+`{prompt:"a red apple", width:1024, aspectRatio:"16:9"}` ⇒ `a red apple (width 1024 px, aspect ratio 16:9)`.
+Cases `grok_size_hints_folded_into_prompt`, `grok_video_seconds_and_aspect_folded`, `codex_aspect_folded`.
 
 **Grok** (`GrokMediaClient`, `grok`; image *live-verified*, video *live-verified after opting in*,
 see below). Command default `grok`. Argv: `-p <prompt> --cwd <cwd> --output-format streaming-json
@@ -2836,6 +2850,57 @@ Parse by `type` (every line's `type` is reported as status): `thread.started` �
 file: it comes from the text scan and `folder(thread) = $CODEX_HOME/generated_images/<thread>`
 (`CODEX_HOME` from the process env, default `<home>/.codex`). Unavailable matcher: `usage limit`
 or `quota` ⇒ `codex: <error capped 400>`.
+
+**Google Antigravity** (label `agy`, `agy`; image *live-verified* with agy 1.4.12, 2026-11-08).
+Command default `agy`. Argv: `-p <prompt> --output-format stream-json --dangerously-skip-permissions`,
+then `--model <model>` when set. Template:
+`Generate exactly one image with your image generation tool: {prompt}. Do not write code. Reply only with the absolute path where the image was saved.`
+Parse by `event`: `init` ⇒ session `conversation_id`, status `init`; `step_update` with
+`step_update.tool_name` and `.state` ⇒ status `tool <name> <state>`; `result` ⇒ session
+`result.conversation_id`, text `result.response`, status `result <status>`, usage from
+`result.usage.input_tokens` / `output_tokens`; when `result.status != "SUCCESS"`, error =
+`result.error` (string), else `result.error.message`, else the text, else the compact sorted JSON of
+`result`; `error` ⇒ error `message`. No event carries the file (agy delegates to an
+`image-generator` subagent); it comes from the text scan, then `folder(conv) =
+<home>/.gemini/antigravity-cli/brain/<conv>`. Unavailable matcher: `quota` or `usage limit` ⇒
+`agy: <error capped 400>` (the failure line shape is not live-captured; the free tier is the
+"Antigravity Starter Quota").
+
+**Permissions.** Each preset runs headless with no interactive prompt: Grok `--yolo`, agy
+`--dangerously-skip-permissions`, Codex `exec -s workspace-write` (sandboxed: it can write its image
+into `$CODEX_HOME`, so no bypass flag is used).
+
+### 7G.10a CLI presets as styles (ADR 0042)
+
+`loadMediaStyle(pathOrPreset, config?)` also takes a **built-in preset** name; the result is a
+style backed by the CLI client above with `config` (§7G.4). Preset names are the byte contract,
+spelled per port as an enum/constant (`MediaStyle.XaiGrokCli`, `MediaStyleXaiGrokCli`,
+`MediaStyle.XAI_GROK_CLI`, …) — an owner-accepted exception to "no vendor names in the public API":
+
+| preset | client | verbs |
+|---|---|---|
+| `xai-grok-cli` | Grok | image, video |
+| `openai-codex-cli` | Codex | image |
+| `google-agy-cli` | Google Antigravity (`agy`) | image |
+| `xai-grok-cli-mock`, `openai-codex-cli-mock`, `google-agy-cli-mock` | the same client, mocked | same as the preset |
+
+A **mock** preset is the same client (label, verbs, args, folding, errors) that never starts a
+process: it writes `<gather.dir or <tmp>/toolnexus-media>/<label>-mock-<verb>.<png|mp4>` (absolute)
+holding the bytes `toolnexus mock <verb>`, gathers it like a CLI file (§7G.5), and returns
+`text` = the exact templated prompt, `jobId` `mock`, status `completed`. Use it to test code
+written against a real preset without a CLI, an account or a network.
+
+`generateMedia(style, verb, args, config?)` is one-shot sugar for
+`createMedia(loadMediaStyle(style, config)).generate(verb, args)` — same results and errors. Its
+shell twin is the Go CLI `toolnexus media <verb> --style <preset|file> --prompt … [--aspect-ratio]
+[--width] [--height] [--seconds] [--model] [--out dir] [--timeout-ms]`, which prints each file's
+path (or URL) per line and exits non-zero with the error on stderr.
+
+Docs and examples use **one** style per `createMedia`. A list still routes as §7G.3 describes, but
+fall-through between CLI presets is not advertised.
+
+Conformance: `cli.json` cases with `style`, `oneShot`, and `verbCases` (verbs, tool names and the
+unsupported-verb error for each preset, mock and an HTTP style mixed with presets).
 
 ### 7G.11 Hermetic conformance
 

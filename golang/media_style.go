@@ -12,6 +12,8 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"reflect"
 	"regexp"
 	"sort"
@@ -704,4 +706,123 @@ func mediaHas(xs []string, s string) bool {
 		}
 	}
 	return false
+}
+
+// mediaSourceID names who served a call (MediaResult.Style).
+func mediaSourceID(c MediaClient) string {
+	if s, ok := c.(MediaStyle); ok {
+		if s.CLI != "" {
+			return s.CLI
+		}
+		if s.Label != "" {
+			return s.Label
+		}
+		return "style"
+	}
+	return c.Name()
+}
+
+// mediaSourceModel is the configured model for verb, or "" (never guessed).
+func mediaSourceModel(c MediaClient, verb string) string {
+	s, ok := c.(MediaStyle)
+	if !ok {
+		return ""
+	}
+	if m := s.cfg.Models[verb]; m != "" {
+		return m
+	}
+	return s.cfg.Model
+}
+
+// MediaAvailability is the cheap pre-flight answer of MediaStyle.Available.
+type MediaAvailability struct {
+	Installed bool   `json:"installed"`
+	LoggedIn  bool   `json:"loggedIn"`
+	Reason    string `json:"reason"`
+}
+
+// MediaMockAvailableEnv set to "0" makes every mock preset report unavailable.
+const MediaMockAvailableEnv = "TOOLNEXUS_MEDIA_MOCK_AVAILABLE"
+
+// Available reports, in well under a second and without generating anything,
+// whether the style can run: for a CLI preset, the binary is found and the CLI's
+// own login file exists (its contents are never read); for an HTTP style, every
+// ${VAR} its headers use is set (or the config Key is). §7G.10b.
+func (s MediaStyle) Available(ctx context.Context) MediaAvailability {
+	if s.CLI == "" {
+		if s.cfg.Key != "" {
+			return MediaAvailability{true, true, s.styleID() + ": key from config"}
+		}
+		for _, name := range styleEnvVars(s) {
+			if os.Getenv(name) == "" {
+				return MediaAvailability{true, false, s.styleID() + ": " + name + " is not set"}
+			}
+		}
+		return MediaAvailability{true, true, s.styleID() + ": env present"}
+	}
+	label := cliPresets[s.CLI]
+	if strings.HasSuffix(s.CLI, "-mock") {
+		if os.Getenv(MediaMockAvailableEnv) == "0" {
+			return MediaAvailability{false, false, label + ": mock set unavailable by " + MediaMockAvailableEnv + "=0"}
+		}
+		return MediaAvailability{true, true, label + ": mock"}
+	}
+	cmd := s.cfg.Command
+	bin := label
+	if len(cmd) > 0 {
+		bin = cmd[0]
+	}
+	if _, err := exec.LookPath(bin); err != nil {
+		return MediaAvailability{false, false, fmt.Sprintf("%s: %q not found on PATH", label, bin)}
+	}
+	auth := cliAuthFile(label)
+	if auth == "" {
+		return MediaAvailability{true, false, label + ": installed; login state unknown"}
+	}
+	if fi, err := os.Stat(auth); err != nil || fi.IsDir() {
+		return MediaAvailability{true, false, fmt.Sprintf("%s: installed, not logged in (%s missing)", label, auth)}
+	}
+	return MediaAvailability{true, true, fmt.Sprintf("%s: installed, logged in (%s present)", label, auth)}
+}
+
+func (s MediaStyle) styleID() string {
+	if s.Label != "" {
+		return s.Label
+	}
+	return "style"
+}
+
+// cliAuthFile is the file each CLI writes when logged in (checked for existence only).
+func cliAuthFile(label string) string {
+	home, _ := os.UserHomeDir()
+	switch label {
+	case "grok":
+		return filepath.Join(home, ".grok", "auth.json")
+	case "codex":
+		if h := os.Getenv("CODEX_HOME"); h != "" {
+			return filepath.Join(h, "auth.json")
+		}
+		return filepath.Join(home, ".codex", "auth.json")
+	case "agy":
+		return filepath.Join(home, ".gemini", "antigravity-cli", "antigravity-oauth-token")
+	}
+	return ""
+}
+
+var styleEnvRe = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)\}`)
+
+// styleEnvVars lists the ${VAR}s the style's headers use, sorted, unique.
+func styleEnvVars(s MediaStyle) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, v := range s.Headers {
+		for _, m := range styleEnvRe.FindAllStringSubmatch(v, -1) {
+			if !seen[m[1]] {
+				seen[m[1]] = true
+				out = append(out, m[1])
+			}
+		}
+	}
+	sort.Strings(out)
+	return out
 }

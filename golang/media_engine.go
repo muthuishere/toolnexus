@@ -24,6 +24,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 	"unicode/utf8"
@@ -485,6 +486,9 @@ func gatherBytes(g MediaGather, mode, client, verb, kind string, data []byte, mi
 		return f, fail(fmt.Sprintf("%s: %v", verb, err))
 	}
 	p := filepath.Join(abs, fmt.Sprintf("%s-%s-%d-%d%s", client, verb, time.Now().UnixMilli(), mediaSeq.Add(1), ext))
+	if slug := mediaSlug(g.Name); slug != "" {
+		p = mediaFreeName(abs, slug, ext)
+	}
 	if err := os.WriteFile(p, data, 0o644); err != nil {
 		return f, fail(fmt.Sprintf("%s: %v", verb, err))
 	}
@@ -778,4 +782,37 @@ func MediaUserAgent() string {
 		}
 	}
 	return "toolnexus/" + v + " (golang)"
+}
+
+// mediaSlug sanitises gather.name (§7G.10b).
+func mediaSlug(name string) string {
+	b := []byte(name)
+	for i, c := range b {
+		ok := c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '.' || c == '_' || c == '-'
+		if !ok {
+			b[i] = '-'
+		}
+	}
+	return strings.TrimLeft(string(b), ".-")
+}
+
+var mediaNameMu sync.Mutex
+
+// mediaFreeName is the first of <slug><ext>, <slug>-2<ext>, … not yet in dir.
+// The file is created empty under a lock so concurrent gathers never collide.
+func mediaFreeName(dir, slug, ext string) string {
+	mediaNameMu.Lock()
+	defer mediaNameMu.Unlock()
+	for n := 1; ; n++ {
+		name := slug + ext
+		if n > 1 {
+			name = fmt.Sprintf("%s-%d%s", slug, n, ext)
+		}
+		p := filepath.Join(dir, name)
+		f, err := os.OpenFile(p, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+		if err == nil {
+			f.Close()
+			return p
+		}
+	}
 }
