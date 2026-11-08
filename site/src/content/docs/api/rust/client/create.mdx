@@ -274,6 +274,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         retries: 2,                         // 0 => 2
         retry_base_ms: 500,                 // 0 => 500
         retryable_statuses: vec![520, 521], // ADDED to the default set
+        fallback_models: vec!["backup-model".into()], // next model after 503/529 overload
         timeout_ms: 30_000,                 // whole-run deadline; 0 => none
         on_error: Some(Arc::new(|_info| ErrorTier::Retry)),
         http_client: None,                  // Some(reqwest::Client) to bring your own
@@ -333,7 +334,7 @@ Every field has a default (`ClientOptions` is `Default`), so `..Default::default
 | `headers` | `HashMap<String, String>` | Extra request headers. |
 | `system_prompt` | `String` | Prepended to the toolkit's `skills_prompt()`. |
 | `max_turns` | `usize` | Caps the tool-calling loop. `0` ⇒ 10. |
-| `retries`, `retry_base_ms`, `retryable_statuses` | resilience | Transient-failure retry budget and backoff. See [`ErrorInfo`](/api/rust/client/resilience/). |
+| `retries`, `retry_base_ms`, `retryable_statuses`, `fallback_models` | resilience | Transient-failure retry budget and backoff; `fallback_models` switches model after 503/529 overload. See [`ErrorInfo`](/api/rust/client/resilience/). |
 | `timeout_ms` | `u64` | Whole-run deadline in ms. `0` ⇒ no deadline. |
 | `on_error` | `Option<OnErrorFn>` | Classify a failed LLM attempt as `ErrorTier::Retry` or `Fail`. |
 | `http_client` | `Option<reqwest::Client>` | Overrides the client used for LLM requests. |
