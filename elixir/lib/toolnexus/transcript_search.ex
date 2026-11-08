@@ -6,8 +6,8 @@ defmodule Toolnexus.TranscriptSearch do
 
   The store is any `Toolnexus.Client.ConversationStore` struct whose module also
   exports `list/1` (both shipped stores do). Messages may be plain maps or
-  `Jason.OrderedObject`s; a `tool_use` input is encoded as compact JSON in the map's
-  own key order (an ordered object keeps its stored order).
+  `Jason.OrderedObject`s; a `tool_use` input is encoded as compact JSON with object keys
+  sorted by code point at every depth (§7E), so stored key order never matters.
   """
 
   alias Toolnexus.ToolResult
@@ -164,7 +164,7 @@ defmodule Toolnexus.TranscriptSearch do
       part when is_map(part) ->
         case field(part, "type") do
           "text" -> if is_binary(field(part, "text")), do: [field(part, "text")], else: []
-          "tool_use" -> [Jason.encode!(field(part, "input") || %{})]
+          "tool_use" -> [Jason.encode!(sort_keys(field(part, "input") || %{}))]
           "tool_result" -> parts_text(field(part, "content"))
           _ -> []
         end
@@ -175,6 +175,21 @@ defmodule Toolnexus.TranscriptSearch do
   end
 
   defp parts_text(_), do: []
+
+  # Object keys sorted by code point (UTF-8 byte order is code-point order) at every
+  # depth; lists keep their order (§7E).
+  defp sort_keys(%Jason.OrderedObject{values: kvs}), do: sort_pairs(kvs)
+  defp sort_keys(%_{} = s), do: s
+  defp sort_keys(m) when is_map(m), do: sort_pairs(Map.to_list(m))
+  defp sort_keys(l) when is_list(l), do: Enum.map(l, &sort_keys/1)
+  defp sort_keys(v), do: v
+
+  defp sort_pairs(kvs) do
+    kvs
+    |> Enum.map(fn {k, v} -> {to_string(k), sort_keys(v)} end)
+    |> Enum.sort_by(&elem(&1, 0))
+    |> Jason.OrderedObject.new()
+  end
 
   # Plain maps and Jason.OrderedObject (which implements Access) read the same way.
   defp field(%Jason.OrderedObject{} = o, k), do: o[k]

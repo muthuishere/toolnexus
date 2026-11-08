@@ -352,13 +352,6 @@ async fn g2_memory_tool_cases() {
 // G3 — transcript search
 // ===========================================================================
 
-/// serde_json maps keep keys sorted (no `preserve_order`), so a stored
-/// `tool_use` input's "stored order" is key order. The one fixture line that
-/// pins insertion order is mapped accordingly — a documented Rust gap.
-fn rust_key_order(expected: &str) -> String {
-    expected.replace(r#"{"q":"zubat","n":2}"#, r#"{"n":2,"q":"zubat"}"#)
-}
-
 #[tokio::test]
 async fn g3_transcript_search_cases() {
     let ts = &load("memory-hierarchy")["transcriptSearch"];
@@ -375,8 +368,7 @@ async fn g3_transcript_search_cases() {
             name: None,
         };
         let tool = transcript_search_tool(stub_store(convs), opts).unwrap();
-        let mut want = c["expect"].clone();
-        want["output"] = json!(rust_key_order(s(&want["output"])));
+        let want = c["expect"].clone();
         assert_eq!(
             exec(&tool, c["args"].clone()).await,
             want,

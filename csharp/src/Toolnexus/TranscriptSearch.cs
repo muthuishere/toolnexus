@@ -127,11 +127,47 @@ public static class TranscriptSearch
             var type = part.TryGetValue("type", out var t) ? t as string : null;
             if (type == "text" && part.TryGetValue("text", out var tx) && tx is string txs) outp.Add(txs);
             else if (type == "tool_use")
-                outp.Add(Json.Stringify(part.TryGetValue("input", out var inp) && inp != null ? inp : new Dictionary<string, object?>()));
+                outp.Add(Json.Stringify(SortKeys(Json.ParseLoose(Json.Stringify(part.TryGetValue("input", out var inp) && inp != null ? inp : new Dictionary<string, object?>())))));
             else if (type == "tool_result") outp.AddRange(PartsText(part.TryGetValue("content", out var rc) ? rc : null));
         }
         return outp;
     }
+
+    /// <summary>A copy with every object's keys sorted by code point, recursively (§7E); lists keep order.</summary>
+    private static object? SortKeys(object? v)
+    {
+        if (v is IDictionary<string, object?> d)
+        {
+            var keys = new List<string>(d.Keys);
+            keys.Sort(ByCodePoint);
+            var o = new Dictionary<string, object?>();
+            foreach (var k in keys) o[k] = SortKeys(d[k]);
+            return o;
+        }
+        if (v is IList<object?> l)
+        {
+            var a = new List<object?>(l.Count);
+            foreach (var x in l) a.Add(SortKeys(x));
+            return a;
+        }
+        return v;
+    }
+
+    private static int ByCodePoint(string a, string b)
+    {
+        int i = 0, j = 0;
+        while (i < a.Length && j < b.Length)
+        {
+            int x = CodePointAt(a, i), y = CodePointAt(b, j);
+            if (x != y) return x.CompareTo(y);
+            i += x > 0xFFFF ? 2 : 1;
+            j += y > 0xFFFF ? 2 : 1;
+        }
+        return (a.Length - i).CompareTo(b.Length - j);
+    }
+
+    private static int CodePointAt(string s, int i) =>
+        char.IsSurrogatePair(s, i) ? char.ConvertToUtf32(s[i], s[i + 1]) : s[i];
 
     /// <summary>Messages may be stored as plain maps or as JSON nodes/elements; view them as maps.</summary>
     private static IDictionary<string, object?>? AsMap(object? o) => o switch

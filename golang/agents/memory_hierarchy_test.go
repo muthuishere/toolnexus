@@ -107,8 +107,8 @@ func sameJSON(a, b any) bool {
 }
 
 // stubStore is the fixtures' store: List() in fixture order, Get(id), and a
-// Save that must never be called. Tool-use inputs are kept as raw JSON so their
-// stored key order survives (a Go map has none).
+// Save that must never be called. Tool-use inputs are kept as raw JSON so the
+// raw-input path (which must sort keys, §7E) is exercised too.
 type stubStore struct {
 	ids   []string
 	msgs  map[string][]any
@@ -395,10 +395,14 @@ func TestMemoryHierarchyG3TranscriptSearch(t *testing.T) {
 		t.Error("maxResults < 1 must error")
 	}
 
-	// A Go map has no key order: a tool_use input held as a map comes out key-sorted.
+	// §7E: keys sorted at every depth, whether the input is a map or raw JSON.
 	m := map[string]any{"role": "assistant", "content": []any{map[string]any{"type": "tool_use", "input": map[string]any{"q": "zubat", "n": 2}}}}
 	if got := tn.TranscriptMessageText(m); got != `{"n":2,"q":"zubat"}` {
 		t.Errorf("map input: %q", got)
+	}
+	rm := map[string]any{"role": "assistant", "content": []any{map[string]any{"type": "tool_use", "input": json.RawMessage(`{ "q": {"z":1,"a":[{"y":1.50,"b":2}]}, "n": 2 }`)}}}
+	if got := tn.TranscriptMessageText(rm); got != `{"n":2,"q":{"a":[{"b":2,"y":1.50}],"z":1}}` {
+		t.Errorf("raw input: %q", got)
 	}
 
 	// Works over the shipped InMemoryConversationStore.

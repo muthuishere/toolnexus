@@ -2117,8 +2117,9 @@ Schema: `query` (string, `Text to find (case-insensitive substring).`), `convers
 (string, `Search only this conversation.`), `limit` (integer, `Most hits to return (default and max <maxResults>).`); `required: ["query"]`.
 
 - **Message text** = pieces joined by `"\n"`: string `content`; for array content, each part in
-  order — `text` parts' `text`, `tool_use` parts' `input` as compact JSON (no spaces, keys in
-  stored order), `tool_result` parts' content (recursively, same rules); other parts (images…)
+  order — `text` parts' `text`, `tool_use` parts' `input` as compact JSON (no spaces; object keys
+  **sorted** lexicographically by code point, recursively for nested objects; arrays keep their
+  order; non-ASCII emitted as-is, `JSON.stringify` escaping otherwise), `tool_result` parts' content (recursively, same rules); other parts (images…)
   contribute nothing; then each OpenAI `tool_calls[].function.arguments` string verbatim. The
   text is then **normalized**: every run of ASCII whitespace (space, `\t \n \r \f \v`) ⇒ one
   space, leading/trailing space trimmed.

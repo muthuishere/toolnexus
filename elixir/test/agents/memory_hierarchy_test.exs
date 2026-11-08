@@ -60,19 +60,15 @@ defmodule Toolnexus.Agents.MemoryHierarchyTest do
   @mh @mh_path |> File.read!() |> Jason.decode!()
   @dr @dr_path |> File.read!() |> Jason.decode!()
 
-  # Stored messages keep their key order (a tool_use input encodes in stored order).
-  defp ordered_convs(path, keys) do
-    fixture = path |> File.read!() |> Jason.decode!(objects: :ordered_objects)
-
+  defp convs(fixture, keys) do
     keys
     |> Enum.reduce(fixture, fn k, acc -> acc[k] end)
     |> Enum.map(fn c -> %{"id" => c["id"], "messages" => c["messages"]} end)
   end
 
-  defp mh_store,
-    do: Stub.new(ordered_convs(@mh_path, ["transcriptSearch", "store", "conversations"]))
+  defp mh_store, do: Stub.new(convs(@mh, ["transcriptSearch", "store", "conversations"]))
 
-  defp dr_store, do: Stub.new(ordered_convs(@dr_path, ["store", "conversations"]))
+  defp dr_store, do: Stub.new(convs(@dr, ["store", "conversations"]))
 
   defp mkhome(files) do
     token = :crypto.strong_rand_bytes(8) |> Base.url_encode64(padding: false)

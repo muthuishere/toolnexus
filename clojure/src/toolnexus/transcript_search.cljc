@@ -48,8 +48,9 @@
   [cps]
   (mapv (fn [c] (if (re-matches #"[A-Z]" c) (str/lower-case c) c)) cps))
 
-;; Compact JSON in STORED key order. `koine.json/write-str` sorts object keys,
-;; and §7E pins a tool_use input as compact JSON with keys in stored order.
+;; Compact JSON, object keys sorted by CODE POINT at every depth (§7E); arrays
+;; keep their order; non-ASCII emitted as-is. Own encoder so the key order and
+;; escaping are the same on every host.
 (defn- json-str [s]
   (str "\""
        (apply str (map (fn [c]
@@ -64,12 +65,32 @@
                        (code-point-strings s)))
        "\""))
 
+(defn- code-point [c]
+  (let [hi (int (nth c 0))]
+    (if (= 2 (count c))
+      (+ 0x10000 (* (- hi 0xD800) 0x400) (- (int (nth c 1)) 0xDC00))
+      hi)))
+
+(defn- by-code-point
+  "Lexicographic by code point (vector `compare` would order by length first)."
+  [a b]
+  (loop [x (map code-point (code-point-strings a))
+         y (map code-point (code-point-strings b))]
+    (cond
+      (and (empty? x) (empty? y)) 0
+      (empty? x) -1
+      (empty? y) 1
+      (not= (first x) (first y)) (compare (first x) (first y))
+      :else (recur (rest x) (rest y)))))
+
+(defn- key-str [k] (if (keyword? k) (subs (str k) 1) (str k)))
+
 (defn- compact-json [v]
   (cond
     (map? v)        (str "{" (str/join "," (map (fn [[k x]]
-                                                  (str (json-str (if (keyword? k) (subs (str k) 1) (str k)))
-                                                       ":" (compact-json x)))
-                                                v)) "}")
+                                                  (str (json-str k) ":" (compact-json x)))
+                                                (sort-by first by-code-point
+                                                         (map (fn [[k x]] [(key-str k) x]) v)))) "}")
     (sequential? v) (str "[" (str/join "," (map compact-json v)) "]")
     (string? v)     (json-str v)
     (keyword? v)    (json-str (subs (str v) 1))

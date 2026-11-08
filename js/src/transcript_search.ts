@@ -37,6 +37,29 @@ function fold(s: string): string {
   return s.replace(/[A-Z]/g, (c) => String.fromCharCode(c.charCodeAt(0) + 32))
 }
 
+/** Code-point order (not UTF-16 code-unit order, which differs above U+FFFF). */
+function byCodePoint(a: string, b: string): number {
+  const x = Array.from(a)
+  const y = Array.from(b)
+  for (let i = 0; i < x.length && i < y.length; i++) {
+    const d = x[i].codePointAt(0)! - y[i].codePointAt(0)!
+    if (d !== 0) return d
+  }
+  return x.length - y.length
+}
+
+/** A copy with every object's keys sorted by code point, recursively (§7E); arrays keep order. */
+function sortKeys(v: unknown): unknown {
+  if (Array.isArray(v)) return v.map(sortKeys)
+  if (v && typeof v === "object" && Object.getPrototypeOf(v) === Object.prototype) {
+    const o = v as Record<string, unknown>
+    const out: Record<string, unknown> = {}
+    for (const k of Object.keys(o).sort(byCodePoint)) out[k] = sortKeys(o[k])
+    return out
+  }
+  return v
+}
+
 function partsText(content: unknown): string[] {
   if (typeof content === "string") return [content]
   if (!Array.isArray(content)) return []
@@ -45,7 +68,7 @@ function partsText(content: unknown): string[] {
     if (!p || typeof p !== "object") continue
     const part = p as Record<string, unknown>
     if (part.type === "text" && typeof part.text === "string") out.push(part.text)
-    else if (part.type === "tool_use") out.push(JSON.stringify(part.input ?? {}))
+    else if (part.type === "tool_use") out.push(JSON.stringify(sortKeys(part.input ?? {})))
     else if (part.type === "tool_result") out.push(...partsText(part.content))
   }
   return out

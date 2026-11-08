@@ -579,6 +579,36 @@
             {
               "role": "assistant",
               "content": "Long log. Route 3 first, then the Pokemon Center, then heal up and buy Repels before going in; the cave is dark and full of wild encounters. Inside mt. moon take the ladder down twice, grab the Moon Stone on the west side, avoid the Rocket grunts near the fossils, pick the Dome Fossil, and then climb out toward Route 4 and Cerulean City beyond the hills."
+            },
+            {
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "tool_use",
+                  "id": "t2",
+                  "name": "catalog",
+                  "input": {
+                    "z": "pikachu",
+                    "y": [
+                      {
+                        "b": 1,
+                        "a": 2
+                      }
+                    ],
+                    "x": {
+                      "d": true,
+                      "c": null
+                    },
+                    "w": "é",
+                    "v": 1,
+                    "u": 2,
+                    "t": 3,
+                    "s": 4,
+                    "r": 5,
+                    "B": 6
+                  }
+                }
+              ]
             }
           ]
         },
@@ -648,7 +678,17 @@
           "query": "zubat"
         },
         "expect": {
-          "output": "s2#0 user: Remind me: MT. MOON has Zubats\ns2#1 assistant: Checking. {\"q\":\"zubat\",\"n\":2}\ns2#2 user: Zubat count: 12",
+          "output": "s2#0 user: Remind me: MT. MOON has Zubats\ns2#1 assistant: Checking. {\"n\":2,\"q\":\"zubat\"}\ns2#2 user: Zubat count: 12",
+          "isError": false
+        }
+      },
+      {
+        "name": "tool-use-input-sorted-keys",
+        "args": {
+          "query": "pikachu"
+        },
+        "expect": {
+          "output": "s2#4 assistant: {\"B\":6,\"r\":5,\"s\":4,\"t\":3,\"u\":2,\"v\":1,\"w\":\"é\",\"x\":{\"c\":null,\"d\":true},\"y\":[{\"a\":2,\"b\":1}],\"z\":\"pikachu\"}",
           "isError": false
         }
       },

@@ -51,7 +51,7 @@ def _parts_text(content: Any) -> list[str]:
             out.append(part["text"])
         elif kind == "tool_use":
             inp = part.get("input")
-            out.append(json.dumps({} if inp is None else inp, separators=(",", ":"), ensure_ascii=False))
+            out.append(json.dumps({} if inp is None else inp, separators=(",", ":"), ensure_ascii=False, sort_keys=True))
         elif kind == "tool_result":
             out.extend(_parts_text(part.get("content")))
     return out

@@ -58,10 +58,9 @@ fn parts_text(content: &Value, out: &mut Vec<String>) {
                         }
                     }
                     Some("tool_use") => {
-                        // serde_json maps keep keys sorted, so "stored order" is key order.
                         let input = p.get("input").cloned().unwrap_or_else(|| json!({}));
                         let input = if input.is_null() { json!({}) } else { input };
-                        out.push(input.to_string());
+                        out.push(sorted_json(&input));
                     }
                     Some("tool_result") => {
                         if let Some(c) = p.get("content") {
@@ -73,6 +72,28 @@ fn parts_text(content: &Value, out: &mut Vec<String>) {
             }
         }
         _ => {}
+    }
+}
+
+/// Compact JSON with object keys sorted by code point at every depth (§7E);
+/// arrays keep their order. Explicit, so it holds even if serde_json's
+/// `preserve_order` feature is ever unified in.
+fn sorted_json(v: &Value) -> String {
+    match v {
+        Value::Object(m) => {
+            let mut keys: Vec<&String> = m.keys().collect();
+            keys.sort();
+            let body: Vec<String> = keys
+                .into_iter()
+                .map(|k| format!("{}:{}", Value::String(k.clone()), sorted_json(&m[k])))
+                .collect();
+            format!("{{{}}}", body.join(","))
+        }
+        Value::Array(a) => {
+            let body: Vec<String> = a.iter().map(sorted_json).collect();
+            format!("[{}]", body.join(","))
+        }
+        other => other.to_string(),
     }
 }
 

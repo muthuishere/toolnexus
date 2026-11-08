@@ -57,18 +57,21 @@ func asciiFold(r []rune) []rune {
 }
 
 // compactJSON renders v as compact JSON without HTML escaping (JSON.stringify
-// shape). A json.RawMessage keeps its stored key order; a Go map has none, so
-// its keys come out sorted.
+// shape), object keys sorted by code point at every depth (§7E). A Go map
+// already encodes sorted; a json.RawMessage is decoded (numbers kept verbatim)
+// and re-encoded so its stored key order does not leak through.
 func compactJSON(v any) string {
 	if v == nil {
 		return "{}"
 	}
 	if raw, ok := v.(json.RawMessage); ok {
-		var buf bytes.Buffer
-		if err := json.Compact(&buf, raw); err == nil {
-			return buf.String()
+		dec := json.NewDecoder(bytes.NewReader(raw))
+		dec.UseNumber()
+		var decoded any
+		if err := dec.Decode(&decoded); err != nil {
+			return string(raw)
 		}
-		return string(raw)
+		v = decoded
 	}
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)

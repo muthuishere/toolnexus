@@ -153,6 +153,29 @@ public final class TranscriptSearch {
         return out;
     }
 
+    /** A copy with every object's keys sorted by code point, recursively (§7E); lists keep order. */
+    private static Object sortKeys(Object v) {
+        if (v instanceof Map<?, ?> m) {
+            List<Map.Entry<?, ?>> entries = new ArrayList<>(m.entrySet());
+            entries.sort((a, b) -> byCodePoint(String.valueOf(a.getKey()), String.valueOf(b.getKey())));
+            Map<String, Object> out = new LinkedHashMap<>();
+            for (Map.Entry<?, ?> e : entries) out.put(String.valueOf(e.getKey()), sortKeys(e.getValue()));
+            return out;
+        }
+        if (v instanceof List<?> l) {
+            List<Object> out = new ArrayList<>(l.size());
+            for (Object x : l) out.add(sortKeys(x));
+            return out;
+        }
+        return v;
+    }
+
+    private static int byCodePoint(String a, String b) {
+        int[] x = a.codePoints().toArray(), y = b.codePoints().toArray();
+        for (int i = 0; i < x.length && i < y.length; i++) if (x[i] != y[i]) return Integer.compare(x[i], y[i]);
+        return Integer.compare(x.length, y.length);
+    }
+
     private static void partsText(Object content, List<String> out) {
         if (content instanceof String s) {
             out.add(s);
@@ -165,7 +188,7 @@ public final class TranscriptSearch {
             if ("text".equals(type) && part.get("text") instanceof String t) out.add(t);
             else if ("tool_use".equals(type)) {
                 Object input = part.get("input");
-                out.add(Json.stringify(input != null ? input : Map.of()));
+                out.add(Json.stringify(sortKeys(input != null ? input : Map.of())));
             } else if ("tool_result".equals(type)) partsText(part.get("content"), out);
         }
     }
