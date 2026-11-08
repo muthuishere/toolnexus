@@ -441,6 +441,13 @@
                     the final say, so `:on-error` returning `:fail` overrides a
                     status listed here. Example: a Cloudflare-fronted origin
                     that answers `520`–`527`.
+    :fallback-models
+                    §8 — ordered model ids tried, each with a fresh retry
+                    budget, only when the current model's budget ends on a
+                    `503`/`529`. Run's `:on-event` sees
+                    `{:type \"fallback\" :from :to}` before the switch. Env
+                    TOOLNEXUS_DISABLE_MODEL_FALLBACK=1|true ignores it. Absent
+                    ⇒ unchanged.
     :hooks          §8 lifecycle middleware — a map of any of
                     {:before-llm :after-llm :before-tool :after-tool}; see
                     `before-llm!` / `execute-tool`. Absent => nothing changes.
@@ -1105,6 +1112,9 @@
 
                             :else
                             (throw (provider-error status (:body res) (http/header res "retry-after")))))]
+            ;; §8 fallbackModels — the chain advances only when the budget ran
+            ;; out on a RETRY verdict; a `:fail` verdict must never advance.
+            (when-let [v (::last-verdict client)] (reset! v verdict))
             (if (and (= :retry verdict) (< attempt budget))
               (do (ktime/sleep! (or (retry-after-ms res)
                                     ;; exponential backoff + jitter, identical to
@@ -1141,32 +1151,88 @@
   (let [m (if (contains? shaped "model") (get shaped "model") (get shaped :model))]
     (if (string? m) m fallback)))
 
+(defn ^:no-doc fallback-disabled?
+  "§8 kill switch: TOOLNEXUS_DISABLE_MODEL_FALLBACK = `1`/`true` (any case),
+  read at each model call."
+  [client]
+  (let [raw (some-> ((or (::get-env client) env/get-env) "TOOLNEXUS_DISABLE_MODEL_FALLBACK")
+                    str/trim str/lower-case)]
+    (contains? #{"1" "true"} raw)))
+
+(defn ^:no-doc model-chain
+  "§8 fallbackModels — `[turn-model ...fallback-models]`, empty and duplicate
+  entries skipped. Absent option, kill switch, or an in-process source ⇒ just
+  `[turn-model]`, so behaviour is byte-identical."
+  [client turn-model]
+  (let [fbs (:fallback-models client)]
+    (if (or (empty? fbs)
+            (= in-process-base-url (:base-url client))
+            (fallback-disabled? client))
+      [turn-model]
+      (reduce (fn [acc m]
+                (if (or (not (string? m)) (= "" m) (some #(= m %) acc)) acc (conj acc m)))
+              [turn-model] fbs))))
+
+(defn- with-fallback
+  "Run `attempt` (model -> [decoded sent]) over the model chain. Each model gets
+  a fresh retry budget; the call advances only when that budget was exhausted on
+  a retry verdict AND the final status is 503/529. Anything else rethrows as
+  today; the last model's error surfaces when the chain is exhausted."
+  [client turn-model attempt]
+  (let [chain (model-chain client turn-model)]
+    (if (= 1 (count chain))
+      (attempt client turn-model)
+      (loop [[m & more] chain]
+        (let [verdict (atom nil)
+              c       (assoc client ::last-verdict verdict)
+              r       (try (attempt c m)
+                           (catch Throwable e
+                             (let [d (ex-data e)]
+                               (if (and (seq more)
+                                        (= :provider (:toolnexus/error d))
+                                        (contains? #{503 529} (:status d))
+                                        (= :retry @verdict))
+                                 ::advance
+                                 (throw e)))))]
+          (if (= ::advance r)
+            (do (when-let [sink (::on-event client)]
+                  (sink {:type "fallback" :from m :to (first more)}))
+                (recur more))
+            r))))))
+
 (defn- llm-call
   "The agent loop's round trip: build the loop's body, then post it."
   [client model system messages tools]
-  (let [shaped (body-map client model system messages tools)
-        ;; §8 — report the model TRANSMITTED: a :request-params / :body-transform
-        ;; model (the agent Loop's per-call override) wins over the hook's.
-        sent   (model-of shaped model)]
-    [(post-with-retry client
-                      (endpoint client)
-                      (merge {"content-type" "application/json"} (request-headers client))
-                      (json/write-str shaped)
-                      sent)
-     sent]))
+  (with-fallback
+    client model
+    (fn [client model]
+      (let [shaped (body-map client model system messages tools)
+            ;; §8 — report the model TRANSMITTED: a :request-params / :body-transform
+            ;; model (the agent Loop's per-call override) wins over the hook's.
+            sent   (model-of shaped model)]
+        [(post-with-retry client
+                          (endpoint client)
+                          (merge {"content-type" "application/json"} (request-headers client))
+                          (json/write-str shaped)
+                          sent)
+         sent]))))
 
 (defn call-provider*
   "`call-provider`, returning `[decoded-response transmitted-model]` — the model
   the shaped body actually carried (§8/§11: the model reported is the model sent)."
   [client body]
-  (let [shaped (shape-body client body)
-        m      (model-of shaped (or (:model body) (:model client)))]
-    [(post-with-retry client
-                      (endpoint client)
-                      (merge {"content-type" "application/json"} (request-headers client))
-                      (json/write-str shaped)
-                      m)
-     m]))
+  (with-fallback
+    client (or (:model body) (:model client))
+    (fn [client model]
+      (let [body   (if (= model (or (:model body) (:model client))) body (assoc body :model model))
+            shaped (shape-body client body)
+            m      (model-of shaped model)]
+        [(post-with-retry client
+                          (endpoint client)
+                          (merge {"content-type" "application/json"} (request-headers client))
+                          (json/write-str shaped)
+                          m)
+         m]))))
 
 (defn call-provider
   "ONE provider round trip for a CALLER-BUILT body map, through exactly the
