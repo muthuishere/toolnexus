@@ -36,6 +36,13 @@ description: >-
 >   100 ms–seconds model call dominates. These tables show the tax a framework adds on top.
 > - **Not an orchestration engine, not a managed platform.** No graph runtime, no hosted deploy, no
 >   eval product. LangGraph, ADK and Mastra are the better choice for those.
+> - **No RAG, no vector store, no embeddings.** toolnexus has no document loaders, chunking,
+>   embedding models, vector-DB connectors or retrievers. Spring AI (`VectorStore`), LangChain /
+>   LangChain4j (embedding stores), Mastra (`@mastra/rag`), Semantic Kernel, Eino, rig and swiftide
+>   ship that; we don't, by design. Retrieval is our sibling project
+>   [citenexus](https://muthuishere.github.io/citenexus/): evidence-first RAG that answers only from
+>   cited quotes and abstains when the evidence is weak. Today you plug it into toolnexus as a tool
+>   (MCP or native), not as a built-in. [QUALITATIVE]
 > - **Smaller and younger** than every framework on this page.
 
 ---
@@ -68,7 +75,7 @@ MCP-client cells without a link are [MEASURED]: the framework connected to our s
 in the benchmark below. Streaming is supported by every framework above and is not a differentiator, so
 it has no column. [QUALITATIVE]
 
-**What the matrix says.** [QUALITATIVE] toolnexus covers every column. For most competitors several
+**What the matrix says.** [QUALITATIVE] toolnexus covers every column *of this matrix*; the matrix has no RAG column because we have nothing there (see above). For most competitors several
 cells are still unverified, so read this as our coverage, not their absence. toolnexus is the only
 entry in eight languages with one contract. That's the real edge. It is *not* that any single
 column is ours alone: skills, ACP, evals, A2A and media each exist elsewhere now, and LangChain4j is
