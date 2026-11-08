@@ -8,8 +8,9 @@
 
 ## Context
 
-A user with a Grok, ChatGPT (Codex) or Google Antigravity subscription can already make images (and,
-on Grok, video) from the CLI on their machine — no API key, no per-call bill. The `media-clients`
+Grok, Codex and Google Antigravity each ship an official CLI with a documented headless mode
+(`grok -p`, `codex exec`, `agy -p`) that can make images (and, on Grok, video) for a user who is
+signed in to it. The `media-clients`
 branch drove `grok` and `codex` headless and pinned their output shapes live. A consumer (Spot) hit
 two problems: `aspectRatio` raised "argument not supported" on the CLI clients, and Grok's output
 carries a watermark nobody had mentioned.
@@ -20,8 +21,9 @@ conformance.
 
 ## Decision
 
-1. CLI media ships, through the user's own logged-in CLI and subscription. toolnexus never
-   holds a key for it and never edits the CLI's settings.
+1. CLI media ships: a preset drives the vendor's official CLI in its documented headless mode,
+   signed in by the user. toolnexus holds no credential for it and never edits the CLI's
+   settings. The provider's terms of service apply to how the user uses its CLI; the docs say so.
 2. The entry point is the **style loader**: `loadMediaStyle(MediaStyle.XaiGrokCli | OpenAICodexCli |
    GoogleAgyCli)` (spelled per port), accepted by `createMedia` like an HTTP style. One-shot:
    `generateMedia(style, verb, args)`. Shell: `toolnexus media <verb> --style xai-grok-cli …`.

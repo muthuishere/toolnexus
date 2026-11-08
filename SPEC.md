@@ -2776,7 +2776,7 @@ multipart fields; never on the tool face.
 
 ### 7G.10 CLI clients
 
-`CliMediaClient` runs a local subscription CLI **once, headless**, reads its JSON-lines stdout,
+`CliMediaClient` runs a vendor's official CLI **once**, in its documented headless mode,, reads its JSON-lines stdout,
 and collects files. ACP is not used (ADR 0037). One run, normative:
 
 1. Make a fresh temp dir `cwd`. Spawn `command ++ client argv` with working dir `cwd`, the process
@@ -2863,7 +2863,7 @@ Parse by `event`: `init` ⇒ session `conversation_id`, status `init`; `step_upd
 `result`; `error` ⇒ error `message`. No event carries the file (agy delegates to an
 `image-generator` subagent); it comes from the text scan, then `folder(conv) =
 <home>/.gemini/antigravity-cli/brain/<conv>`. Unavailable matcher: `quota` or `usage limit` ⇒
-`agy: <error capped 400>` (the failure line shape is not live-captured; the free tier is the
+`agy: <error capped 400>` (the failure line shape is not live-captured; its quota is named
 "Antigravity Starter Quota").
 
 **Permissions.** Each preset runs headless with no interactive prompt: Grok `--yolo`, agy

@@ -1,6 +1,7 @@
 ## Why
-Users with a Grok, ChatGPT (Codex) or Google Antigravity subscription should get images and video
-through their own CLI with no API key, from the same `createMedia` they already use. A consumer
+Users signed in to the official Grok, Codex or Google Antigravity CLI should be able to drive it in
+its documented headless mode (`grok -p`, `codex exec`, `agy -p`) for images and video, from the same
+`createMedia` they already use. A consumer
 (Spot) reported `aspectRatio` rejected on CLI clients and an undocumented Grok watermark.
 
 ## What Changes

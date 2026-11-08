@@ -8,9 +8,10 @@ GitHub Releases `vX.Y.Z` via `release.yml` (see `PUBLISHING.md`).
 
 ## Unreleased
 
-**Images and video from the CLI you already pay for — Grok, Codex or Google Antigravity, no API
-key.** If you have a SuperGrok, ChatGPT or Google Antigravity login, one line now makes an image
-(and, on Grok, a video) through that CLI on your machine:
+**Images and video through the official Grok, Codex or Google Antigravity CLI.** A preset drives
+the vendor's CLI in its documented headless mode (`grok -p`, `codex exec`, `agy -p`), signed in by
+you, and hands back the file it saved, from the same `createMedia` you already use. Your provider's
+terms of service apply to how you use its CLI.
 
 ```ts
 const r = await generateMedia(MediaStyle.XaiGrokCli, "image", { prompt: "a red apple", aspectRatio: "16:9" })
@@ -71,7 +72,7 @@ and your agent seven tools, and the provider is a small named client instead of 
   switch provider, so prompts and skills keep working. Media tools are concurrency-safe.
 - **Built-in clients, one config shape** — `A2EMediaClient`, `ElevenLabsMediaClient`,
   `OpenAIMediaClient` (its `url` reaches any OpenAI-compatible server), `OpenRouterMediaClient`,
-  `FalMediaClient` (any hosted model by id through fal's queue), and two local subscription CLIs,
+  `FalMediaClient` (any hosted model by id through fal's queue), and two local CLIs,
   `GrokMediaClient` and `CodexMediaClient`, which run the CLI once headless and pick up the file it
   saved. Every client takes the same `{model, models, key, url, command, loop, gather}`; the key
   defaults to the provider's usual env var (`OPENAI_API_KEY`, `FAL_API_KEY`, …).
