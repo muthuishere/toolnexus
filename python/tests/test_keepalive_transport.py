@@ -66,19 +66,47 @@ def _fresh_pool():
     tc._KEEPALIVE.__dict__.clear()
 
 
-def test_stale_idle_connection_is_retried_once():
+def test_idle_connection_closed_by_server_is_replaced():
     # One response per connection, then a silent close — no "Connection: close"
     # header, so the client believes the socket is still reusable.
+    closed = threading.Event()
+
     def handler(conn):
         if _read_request(conn):
             _reply(conn, 200, {"ok": True})
+        conn.close()
+        closed.set()
+
+    srv, url, accepted = _serve(handler)
+    try:
+        assert tc._post(url, {}, {"q": 1}, 5) == {"ok": True}
+        assert closed.wait(2)
+        assert tc._post(url, {}, {"q": 2}, 5) == {"ok": True}  # stale socket -> fresh one
+        assert len(accepted) == 2
+    finally:
+        srv.close()
+
+
+def test_drop_after_request_was_sent_is_not_retried():
+    # The server reads a request on the reused connection, then dies without answering.
+    # It may have processed it, so re-POSTing could bill the call twice: the error surfaces.
+    received: list[int] = []
+
+    def handler(conn):
+        if _read_request(conn):
+            received.append(1)
+            _reply(conn, 200, {"ok": True})
+        if _read_request(conn):
+            received.append(1)
         conn.close()
 
     srv, url, accepted = _serve(handler)
     try:
         assert tc._post(url, {}, {"q": 1}, 5) == {"ok": True}
-        assert tc._post(url, {}, {"q": 2}, 5) == {"ok": True}  # stale socket -> retried
-        assert len(accepted) == 2
+        with pytest.raises(Exception):
+            tc._post(url, {}, {"q": 2}, 5)
+        assert len(received) == 2
+        assert len(accepted) == 1
     finally:
         srv.close()
 

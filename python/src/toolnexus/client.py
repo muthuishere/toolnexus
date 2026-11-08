@@ -32,6 +32,7 @@ import re
 import sys
 import functools
 import http.client
+import select
 import threading
 import time
 import urllib.error
@@ -438,6 +439,10 @@ def _post(url: str, headers: dict[str, str], payload: dict[str, Any], timeout: f
         pool = _KEEPALIVE.conns = {}
     for attempt in (0, 1):
         conn = pool.get(key)
+        if conn is not None and _peer_closed(conn):
+            conn.close()  # the server dropped it while idle: nothing was sent on it
+            pool.pop(key, None)
+            conn = None
         reused = conn is not None
         if conn is None:
             cls = http.client.HTTPSConnection if u.scheme == "https" else http.client.HTTPConnection
@@ -448,15 +453,24 @@ def _post(url: str, headers: dict[str, str], payload: dict[str, Any], timeout: f
                 conn.sock.settimeout(timeout)
         try:
             conn.request("POST", path, body, {"Content-Length": str(len(body)), **headers})
-            resp = conn.getresponse()
-            data = resp.read()
-        except (http.client.RemoteDisconnected, BrokenPipeError, ConnectionResetError, http.client.BadStatusLine):
+        except (BrokenPipeError, ConnectionResetError):
             conn.close()
             pool.pop(key, None)
+            # Failed while sending on a reused connection: the request never reached the
+            # server intact, so one retry on a fresh connection cannot double-bill it.
             if reused and attempt == 0:
-                continue  # stale idle connection: retry once on a fresh one
+                continue
             raise
         except BaseException:
+            conn.close()
+            pool.pop(key, None)
+            raise
+        try:
+            resp = conn.getresponse()
+            data = resp.read()
+        except BaseException:
+            # Failed after the request was sent: the server may have processed it, so a
+            # POST is never retried here.
             conn.close()
             pool.pop(key, None)
             raise
@@ -467,6 +481,19 @@ def _post(url: str, headers: dict[str, str], payload: dict[str, Any], timeout: f
             raise _HttpError(resp.status, data.decode("utf-8", errors="replace"), resp.getheader("Retry-After"))
         return json.loads(data.decode("utf-8"))
     raise AssertionError("unreachable")  # pragma: no cover
+
+
+def _peer_closed(conn: http.client.HTTPConnection) -> bool:
+    """True when an idle kept-alive socket is already readable: on a connection with no request
+    in flight that can only be the server's close (or junk), so the socket is not reusable."""
+    sock = conn.sock
+    if sock is None:
+        return False
+    try:
+        readable, _, _ = select.select([sock], [], [], 0)
+    except (OSError, ValueError):
+        return True
+    return bool(readable)
 
 
 @functools.lru_cache(maxsize=64)
