@@ -580,3 +580,25 @@ test("mcp2026 oauth: tokens never appear in errors or logs", async (t) => {
     if (tok.refreshToken) assert.ok(!s.includes(tok.refreshToken), s)
   }
 })
+
+// §2.2a (change reuse-stdio-discover-probe): a fast discover error reuses the probe child; only
+// discover silence kills it and respawns.
+for (const [mode, starts] of [["error", 1], ["silent", 2]] as const) {
+  test(`stdio legacy server, discover ${mode} ⇒ ${starts} spawn(s), echo works`, async () => {
+    const dir = fs.mkdtempSync(path.join((await import("node:os")).tmpdir(), "tn-spawn-"))
+    const countFile = path.join(dir, "count")
+    const script = path.join(here, "..", "..", "examples", "mcp-2026", "legacy-stdio", "server.mjs")
+    const src = await loadMcp({ legacy: { command: ["node", script], env: { SPAWN_COUNT_FILE: countFile, DISCOVER_MODE: mode }, timeout: 1500 } })
+    try {
+      assert.equal(src.status.legacy, "connected")
+      const echo = src.tools.find((t) => t.name === "legacy_echo")!
+      const r = await echo.execute({ text: "hi" }, {} as any)
+      assert.match(JSON.stringify(r), /echo:hi/)
+      const lines = fs.readFileSync(countFile, "utf8").trim().split("\n")
+      assert.equal(lines.length, starts)
+    } finally {
+      await src.close()
+      fs.rmSync(dir, { recursive: true, force: true })
+    }
+  })
+}

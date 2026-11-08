@@ -73,7 +73,9 @@ All seven manifests (js, python, csharp, java, elixir, `clojure/build.clj`, `rus
 empty `## Unreleased` above it. **Update the docs install coordinates in the same commit** —
 `README.md`, `java/README.md`, `clojure/README.md`, `elixir/README.md`,
 `clojure/examples/*/deps.edn`, `rust/README.md`, `site/src/content/docs/install.mdx`,
-`quickstart.mdx`, `api/clojure.mdx`.
+`quickstart.mdx`, `api/clojure.mdx`, and the in-process-client recipe sources
+`site/recipes/in-process-client/*` (then run `node site/scripts/sync-recipes.mjs`, or CI's
+"API reference coverage" fails on stale pages).
 
 Leave historical statements alone: "on Clojars since v0.13.0", "Relay ships in golang/ as of
 0.12.0", and `docs/performance-benchmarks.md`'s "Versions measured". Rewriting those falsifies the
@@ -133,7 +135,12 @@ toolnexus@<version> tokio -F tokio/full && cargo build`.
 **Indexing lag is normal and is not failure**: NuGet ~5 min, Maven Central ~15–20 min. Poll before
 concluding anything. Clojars is `net.clojars.muthuishere`, **not** `io.github.muthuishere`.
 
-### 7. If a leg failed
+### 7. Marketing
+
+Run the `marketing` skill for this version (drafts only; the owner posts). It builds
+`~/.marketing/toolnexus/<version>/` from the changelog section and the standing page.
+
+### 8. If a leg failed
 
 Diagnose first — `gh run view <id> --log-failed`. Credential failures (`API key revoked`,
 `401`, `403`) are owner fixes; report them and **file an issue** rather than retrying blindly.

@@ -24,6 +24,9 @@ dependencies {
     implementation 'org.springframework.boot:spring-boot-starter'
     implementation 'org.springframework.ai:spring-ai-starter-model-openai'
     implementation 'org.springframework.ai:spring-ai-starter-mcp-client'
+    // SkillsTool (Agent Skills, SKILL.md) for the BENCH_CONFIG=skills row — see
+    // https://spring.io/blog/2026/01/13/spring-ai-generic-agent-skills/
+    implementation 'org.springaicommunity:spring-ai-agent-utils:0.13.0'
 }
 
 application {

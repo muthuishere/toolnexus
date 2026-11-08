@@ -32,7 +32,8 @@ from mcp.types import Tool as McpToolDef
 
 from .content import describe_part
 from .mcp2026.auth import AuthPending, OAuth, OpenUrl, TokenStore
-from .mcp2026.session import Session2026, merged_env, probe_http, probe_stdio
+from .mcp2026.session import STDIO_PROBE_MAX, Session2026, merged_env, probe_http, probe_stdio
+from .mcp2026.stdio import StdioConn, sdk_streams
 from .mcp2026.wire import bm25_rank
 from .skill import SkillDef, _parse_frontmatter
 from .types import (
@@ -900,6 +901,13 @@ class _SdkBearerAuth(httpx.Auth):
             yield request
 
 
+def _connect_budget(cfg: ServerConfig, timeout: float) -> float:
+    """The bound on connect + init + list. A stdio server whose discover goes silent spends up to
+    ``min(timeout, 5 s)`` in the probe before the frozen path even starts (§2.2a); that probe window is
+    bounded on its own, so it is added rather than eating the frozen path's ``timeout``."""
+    return timeout if is_remote(cfg) else timeout + min(timeout, STDIO_PROBE_MAX)
+
+
 async def _connect_session(
     stack: AsyncExitStack,
     name: str,
@@ -936,18 +944,23 @@ async def _connect_session(
         s26 = await probe_stdio(
             name, argv, merged_env(cfg.get("environment") or cfg.get("env")), cfg.get("cwd"), timeout, wait_for
         )
-        if s26 is not None:
+        if isinstance(s26, StdioConn):
+            # §2.2a reuse: the server replied to discover without 2026 — continue into
+            # ``initialize`` on the SAME child (no kill + respawn).
+            read, write = await stack.enter_async_context(sdk_streams(s26))
+        elif s26 is not None:
             stack.callback(s26.close)
             return s26
-        cmd, args = argv[0], argv[1:]
-        env = {**os.environ, **(cfg.get("environment") or cfg.get("env") or {})}
-        params = StdioServerParameters(
-            command=cmd,
-            args=args,
-            cwd=cfg.get("cwd"),
-            env=env,
-        )
-        read, write = await stack.enter_async_context(stdio_client(params))
+        else:  # discover silence: the probe child was killed; spawn afresh
+            cmd, args = argv[0], argv[1:]
+            env = {**os.environ, **(cfg.get("environment") or cfg.get("env") or {})}
+            params = StdioServerParameters(
+                command=cmd,
+                args=args,
+                cwd=cfg.get("cwd"),
+                env=env,
+            )
+            read, write = await stack.enter_async_context(stdio_client(params))
 
     # Advertise elicitation + register the bridge ONLY when a wait_for exists to
     # satisfy it — a wait_for-less host degrades cleanly (the server won't elicit).
@@ -1062,7 +1075,7 @@ async def load_mcp_with_context(
                 # asyncio.timeout bounds connect + init + list (SSE fallback included)
                 # in the CURRENT task, so the anyio transports are entered/exited in the
                 # same task (no cross-task cancel-scope error).
-                async with asyncio.timeout(timeout):
+                async with asyncio.timeout(_connect_budget(cfg, timeout)):
                     session = await _connect_session(server_stack, name, cfg, wait_for, opts)
                     defs = await _paginate_tools(session)
                     server_skills = await _remote_skills(name, session)
@@ -1119,7 +1132,7 @@ async def _server_worker(
     reports through ``ready``, then holds the connection until ``close_evt``."""
     server_stack = AsyncExitStack()
     try:
-        async with asyncio.timeout(timeout):
+        async with asyncio.timeout(_connect_budget(cfg, timeout)):
             session = await _connect_session(server_stack, name, cfg, wait_for, opts)
             defs = await _paginate_tools(session)
             skills = await _remote_skills(name, session)
@@ -1279,7 +1292,7 @@ async def list_mcp_tools(
         timeout = _to_seconds(cfg.get("timeout", DEFAULT_TIMEOUT * 1000))
         server_stack = AsyncExitStack()
         try:
-            async with asyncio.timeout(timeout):
+            async with asyncio.timeout(_connect_budget(cfg, timeout)):
                 session = await _connect_session(server_stack, name, cfg, None, opts)
                 defs = await _paginate_tools(session)
             by_server[name] = [

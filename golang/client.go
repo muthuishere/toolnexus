@@ -1094,6 +1094,37 @@ func (c *Client) finalizeBody(body map[string]any) map[string]any {
 	return body
 }
 
+// toolsWire caches the marshalled tools array for one Run, so the (static) tool
+// schemas go through reflection once per Run instead of once per turn. The cache
+// is used only when nothing can observe or change the array between turns: no
+// BeforeLLM hook (it receives the slice and may mutate it in place), no
+// BodyTransform (it receives the body map and would see a different value type),
+// and body["tools"] still being the exact slice built for this Run (a prompt-cache
+// marker or an override replaces it). The substituted json.RawMessage is the
+// output of json.Marshal on that same slice, so the request bytes are identical.
+type toolsWire struct {
+	src []any
+	raw json.RawMessage
+}
+
+func (w *toolsWire) apply(c *Client, body map[string]any) {
+	if c.opts.BodyTransform != nil || (c.opts.Hooks != nil && c.opts.Hooks.BeforeLLM != nil) {
+		return
+	}
+	got, ok := body["tools"].([]any)
+	if !ok || len(got) == 0 || len(got) != len(w.src) || &got[0] != &w.src[0] {
+		return
+	}
+	if w.raw == nil {
+		b, err := json.Marshal(got)
+		if err != nil {
+			return // let postJSON surface the error exactly as before
+		}
+		w.raw = b
+	}
+	body["tools"] = w.raw
+}
+
 func (c *Client) postJSON(ctx context.Context, endpoint string, headers map[string]string, body any) ([]byte, error) {
 	raw, err := json.Marshal(body)
 	if err != nil {
@@ -1119,6 +1150,7 @@ func (c *Client) runOpenAI(ctx context.Context, prompt any, tk *Toolkit, history
 		return RunResult{}, err
 	}
 	endpoint := strings.TrimRight(c.opts.BaseURL, "/") + "/chat/completions"
+	authHeader := map[string]string{"Authorization": "Bearer " + key}
 
 	var messages []any
 	if len(history) > 0 {
@@ -1131,6 +1163,7 @@ func (c *Client) runOpenAI(ctx context.Context, prompt any, tk *Toolkit, history
 		messages = append(messages, userMessage(prompt))
 	}
 	tools := ToOpenAI(c.requestTools(tk))
+	toolsJSON := toolsWire{src: tools}
 	var toolCalls []ToolCall
 	var usage Usage
 	turns := 0
@@ -1181,9 +1214,10 @@ func (c *Client) runOpenAI(ctx context.Context, prompt any, tk *Toolkit, history
 			body["tool_choice"] = "auto"
 		}
 		body = c.finalizeBody(body)
+		toolsJSON.apply(c, body)
 		t0 := time.Now()
 		lastModel = turnModel
-		raw, err := c.postJSON(ctx, endpoint, map[string]string{"Authorization": "Bearer " + key}, body)
+		raw, err := c.postJSON(ctx, endpoint, authHeader, body)
 		if err != nil {
 			c.emitLLM(turnModel, "error", t0, 0, 0)
 			return RunResult{}, err
@@ -1415,6 +1449,7 @@ func (c *Client) runAnthropic(ctx context.Context, prompt any, tk *Toolkit, hist
 		messages = append(messages, userMessage(prompt))
 	}
 	tools := ToAnthropic(c.requestTools(tk))
+	toolsJSON := toolsWire{src: tools}
 	var toolCalls []ToolCall
 	var usage Usage
 	turns := 0
@@ -1471,6 +1506,7 @@ func (c *Client) runAnthropic(ctx context.Context, prompt any, tk *Toolkit, hist
 			body["tools"] = tools
 		}
 		body = c.finalizeBody(body)
+		toolsJSON.apply(c, body)
 		t0 := time.Now()
 		lastModel = turnModel
 		raw, err := c.postJSON(ctx, endpoint, headers, body)

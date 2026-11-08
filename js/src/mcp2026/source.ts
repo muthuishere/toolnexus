@@ -8,7 +8,8 @@ import { randomBytes } from "node:crypto"
 import { Mcp2026Client } from "./client.js"
 import { HttpStatusError, NotJsonRpcError, PROTOCOL_VERSION, RpcError, SKILLS_EXT, type Obj } from "./protocol.js"
 import { LoopbackAuthorizer, MemoryTokenStore, OAuth, PauseAuthorizer, PendingError, type TokenStore } from "./auth.js"
-import { spawnStdio, StdioClosedError } from "./stdio.js"
+import { spawnStdio, StdioClosedError, type StdioTransport } from "./stdio.js"
+import type { ChildProcess } from "node:child_process"
 import { rank } from "./toolsearch.js"
 import type { Answer, JSONSchema, Request, Tool, ToolContext, ToolResult } from "../types.js"
 import { sanitize } from "../types.js"
@@ -88,7 +89,9 @@ async function authed(oauth: OAuth | undefined, waitFor: WaitFor | undefined, f:
 }
 
 /** What the probe decided. `fallback` ⇒ take the frozen SDK path; anything thrown ⇒ status failed. */
-export type Probe = { kind: "modern"; server: ModernServer } | { kind: "fallback" }
+export type Probe =
+  | { kind: "modern"; server: ModernServer }
+  | { kind: "fallback"; reuse?: { child: ChildProcess; leftover: Buffer } }
 
 /** §2.2a: which discover failures mean "old server". */
 function isFallbackError(e: unknown): boolean {
@@ -115,11 +118,14 @@ export interface ProbeTarget {
 /** Discover first (§2.2). Resolves `modern` (tools listed) or `fallback`; throws on a load failure. */
 export async function probe(t: ProbeTarget, o: Load2026Options): Promise<Probe> {
   let client: Mcp2026Client
+  let stdio: StdioTransport | undefined
   if (t.remote) {
     client = new Mcp2026Client(t.remote.url, { headers: t.remote.headers, auth: t.remote.oauth, timeoutMs: t.timeout })
   } else {
-    const tr = await spawnStdio(t.local!.argv, t.local!.env, t.local!.cwd)
-    client = new Mcp2026Client("", { transport: tr, timeoutMs: t.timeout })
+    stdio = await spawnStdio(t.local!.argv, t.local!.env, t.local!.cwd)
+    // Stop parsing right after the discover reply so an old server's child can be handed over.
+    stdio.holdAfterNextResponse()
+    client = new Mcp2026Client("", { transport: stdio, timeoutMs: t.timeout })
   }
   const oauth = t.remote?.oauth
   let disc: Obj
@@ -129,6 +135,8 @@ export async function probe(t: ProbeTarget, o: Load2026Options): Promise<Probe> 
     disc = await authed(oauth, o.waitFor, () => client.call("server/discover", {}, { timeoutMs, signal: o.signal }))
   } catch (e) {
     const stdioTimeout = !!t.local && e instanceof Error && e.message === "stdio request timed out"
+    // §2.2a: a fast JSON-RPC error over stdio ⇒ the SAME child continues into initialize.
+    if (stdio && e instanceof RpcError && !o.signal?.aborted) return { kind: "fallback", reuse: stdio.detach() }
     await client.close().catch(() => {})
     if (o.signal?.aborted) throw e
     if (e instanceof StdioClosedError) throw e
@@ -136,9 +144,11 @@ export async function probe(t: ProbeTarget, o: Load2026Options): Promise<Probe> 
     throw e
   }
   if (!supports2026(disc)) {
+    if (stdio) return { kind: "fallback", reuse: stdio.detach() }
     await client.close().catch(() => {})
     return { kind: "fallback" }
   }
+  stdio?.release()
   try {
     const server = new ModernServer(t, client, disc, o)
     await server.load()

@@ -265,9 +265,29 @@ p50 within 0.4 ms (JVM 5.1–5.5, cljgo 5.6–5.8).
 </Aside>
 </TabItem>
 <TabItem label="Rust">
-The Rust port (`rmcp` for MCP) has **not been benchmarked yet**. It joined as the eighth port
-after the July runs above, and no mock-LLM competitor numbers have been taken for it. We will not
-publish a Rust row until a measured one exists.
+The Rust MCP client is **`rmcp`** (used by toolnexus, rig and swiftide). Measured in the Nov 2026
+run (`benchmarks/results-2026-11.json`: 30 runs after 5 warm-up, Apple M5 Pro, rustc 1.99.0,
+toolnexus 0.26.0), not the July runs above. AutoAgents has a runner (`benchmarks/run_autoagents/`)
+but no row in that run.
+
+#### Over MCP (`rmcp`)
+
+| Framework | Init (ms) | p50 (ms) | p95 (ms) | mean (ms) | RSS (MB) | Tools | ok |
+|---|--:|--:|--:|--:|--:|--:|:-:|
+| **toolnexus** (+ skill + native) | 27.4 | 0.573 | 0.700 | 0.599 | **16.8** | 5 | ✅ |
+| **toolnexus** | 35.4 | **0.529** | **0.631** | **0.542** | **16.8** | 3 | ✅ |
+| rig | 21.9 | 0.584 | 0.725 | 0.602 | 23.0 | 3 | ✅ |
+| swiftide | **17.7** | 0.668 | 1.018 | 0.709 | 16.9 | 3 | ✅ |
+
+#### Native tools
+
+| Framework | Init (ms) | p50 (ms) | p95 (ms) | mean (ms) | RSS (MB) | Tools | ok |
+|---|--:|--:|--:|--:|--:|--:|:-:|
+| **toolnexus** | 0.1 | 0.436 | 0.494 | 0.441 | 11.2 | 2 | ✅ |
+
+**Read this honestly:** toolnexus has the lowest per-run latency and footprint over MCP, but the
+slowest `Init` of the three (35.4 ms vs 21.9 ms for rig and 17.7 ms for swiftide). No Rust
+competitor was measured with native tools.
 </TabItem>
 </Tabs>
 

@@ -1,12 +1,7 @@
 # toolnexus
 
-**We wrote one agent SDK and ported it, by hand, to eight languages — JS, Python, Go, Java,
-C#, Elixir, Clojure, Rust — until the same conformance suite passes byte-identical output in every
-one of them.**
-
-**Building any agentic framework? Build it on toolnexus.** MCP client and server, agent skills, A2A and ACP agents, a typed decision classifier,
-image/video/speech generation, streaming, memory and resilience — with the lowest or level overhead
-in most languages; [see the benchmark](https://muthuishere.github.io/toolnexus/standing-2026-11/).
+**Building any agentic framework? Build it on toolnexus.** Fast tool calling, any number of MCP
+servers, any agent skill and media generation, for any LLM, in eight languages.
 
 [![CI](https://github.com/muthuishere/toolnexus/actions/workflows/ci.yml/badge.svg)](https://github.com/muthuishere/toolnexus/actions/workflows/ci.yml)
 [![npm](https://img.shields.io/npm/v/toolnexus?logo=npm&label=npm)](https://www.npmjs.com/package/toolnexus)
@@ -23,141 +18,104 @@ in most languages; [see the benchmark](https://muthuishere.github.io/toolnexus/s
 [![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![Discord](https://img.shields.io/badge/AgentNexus-join%20the%20community-5865F2?logo=discord&logoColor=white)](https://discord.gg/V9C2kvHC8D)
 
-### Your LLM, with MCP tools and agent skills built in — in 3 lines, in 8 languages.
+One vendor-neutral agent library, ported by hand to **JavaScript, Python, Go, Java, C#, Elixir,
+Clojure and Rust**, held to one conformance contract ([`SPEC.md`](SPEC.md)) so the shared
+[`examples/`](examples/) produce the same output in every port.
 
-Point toolnexus at an `mcp.json` and a `skills/` folder and you get a **working agent**: the
-tool-calling loop, skills injection, six unified tool sources, and conversation memory — all
-included. Vendor-neutral, byte-identical across **JavaScript · Python · Go · Java · C# · Elixir ·
-Clojure** — the Clojure port is one `.cljc` tree that runs on both the JVM and cljgo, held
-to the same `full` tier as the other six and published to Clojars like the rest.
+## The idea: it is all the same thing to an LLM
 
-> **Right-sized.** Not a framework — no builders, advisors, runnables, or config to wade through.
-> Not a toy that falls over the moment you need streaming or a retry. Exactly what a real agent
-> needs — MCP, skills, native + HTTP + built-in tools, remote A2A agents, in-process sub-agents,
-> the loop, hooks, streaming, retries, memory, and media generation (images, video and speech from a JSON style, as typed calls and as agent tools). Nothing it doesn't.
+An MCP server tool, an agent skill, your own function, a remote HTTP endpoint, a built-in
+shell/file tool, a remote A2A agent and an in-process sub-agent are all *the same thing* to a
+model: a named, described, schema'd callable (an insight borrowed from
+[opencode](https://github.com/anomalyco/opencode)). toolnexus puts every one of them behind one
+`Tool` interface, emits the schema in OpenAI / Anthropic / Gemini shape, and drives any model with
+them through one client loop.
+
+## Install (0.27.0)
 
 ```sh
-npm i toolnexus                                   # JS / TypeScript
-pip install toolnexus                             # Python
+npm i toolnexus                                   # JavaScript / TypeScript (npm)
+pip install toolnexus                             # Python (PyPI)
 go get github.com/muthuishere/toolnexus/golang    # Go
-dotnet add package Toolnexus                       # C#
-{:toolnexus, "~> 0.26"}                             # Elixir (mix.exs deps)
-# Java (Maven): io.github.muthuishere:toolnexus:0.26.0
-# Clojure (deps.edn): net.clojars.muthuishere/toolnexus {:mvn/version "0.26.0"} — JVM and cljgo
+dotnet add package Toolnexus                       # C# / .NET (NuGet)
+{:toolnexus, "~> 0.27"}                             # Elixir (mix.exs deps, Hex)
+# Java (Maven Central): io.github.muthuishere:toolnexus:0.27.0
+# Clojure (deps.edn, Clojars): net.clojars.muthuishere/toolnexus {:mvn/version "0.27.0"} (JVM and cljgo)
 cargo add toolnexus                                # Rust (crates.io)
 ```
 
-The insight (borrowed from [opencode](https://github.com/anomalyco/opencode)): MCP server
-tools, agent skills, your own functions, remote HTTP endpoints, the built-in shell/file
-tools, remote A2A agents, and in-process **sub-agents** are all *the same thing* to an LLM — a
-named, described, schema'd callable. toolnexus unifies **every tool source** behind one `Tool`
-interface and drives **any** model with them.
+## Zero to agent
 
-
-## Built on toolnexus
-
-- **[wfnexus](https://muthuishere.github.io/wfnexus/)**: typed pipelines for coding agents. Each step is a whole agent with scoped tools, a budget, guardrails and a JSON-schema output.
-
-Built something on toolnexus? Open a PR adding one line here: name, link and what it does.
-
-## From zero to agent in 3 steps
-
-**1. Point at an `mcp.json`** — the standard Claude-desktop-style config:
-
-```jsonc
-{
-  "mcpServers": {
-    "fs":   { "command": ["npx", "-y", "@modelcontextprotocol/server-filesystem", "/data"] },
-    "acme": { "type": "remote", "url": "https://api.acme.com/mcp",
-              "headers": { "Authorization": "Bearer ${ACME_TOKEN}" } }
-  }
-}
-```
-
-**2. Point at a `skills/` folder** — `**/SKILL.md` files with YAML frontmatter, loaded on demand
-through one `skill` tool (progressive disclosure).
-
-**3. Run.**
+Point it at an `mcp.json` (the standard Claude-desktop-style config) and a `skills/` folder of
+`SKILL.md` files, then run:
 
 ```ts
 import { createToolkit, createClient } from "toolnexus"
 
-const tk = await createToolkit({ mcp: "mcp.json", skills: ["skills"] })
+const tk = await createToolkit({ mcpConfig: "./mcp.json", skillsDir: "./skills" })
 const agent = createClient({ baseUrl: "https://openrouter.ai/api/v1", style: "openai", model: "openai/gpt-4o-mini" })
 
 const { text } = await agent.run("Refund order 4021 using the policy.", { toolkit: tk })
 ```
 
-The key above comes from `OPENROUTER_API_KEY`, because the host is `openrouter.ai`. **Since
-0.22.0 a key is only ever sent to the host it belongs to**: with no `apiKey`, the client reads
-only the env var matching the `baseUrl` host (`openrouter.ai` → `OPENROUTER_API_KEY`,
-`api.openai.com` → `OPENAI_API_KEY`, `api.anthropic.com` → `ANTHROPIC_API_KEY`, https only).
-A local server or a proxy needs `apiKey` or `apiKeyEnv` (the *name* of the env var to read):
+The key comes from `OPENROUTER_API_KEY` because the host is `openrouter.ai`: a key is only ever
+sent to the host it belongs to. A local server or proxy needs `apiKey` or `apiKeyEnv`
+([recipe](https://muthuishere.github.io/toolnexus/cookbook/api-key-by-host/)). The same shape in every language:
+[Quickstart](https://muthuishere.github.io/toolnexus/quickstart/).
 
-```ts
-createClient({ baseUrl: "http://localhost:11434/v1", style: "openai", model: "llama3", apiKey: "unused" })
-createClient({ baseUrl: "https://llm.internal/v1", style: "openai", model: "m", apiKeyEnv: "INTERNAL_LLM_KEY" })
-```
+## What you get
 
-The same three steps, in the same shape, in every port — see your language's
-[API reference](https://muthuishere.github.io/toolnexus/) below.
+- **MCP, 2026-07-28 and legacy** — client for stdio and streamable-HTTP servers, and a server:
+  expose your toolkit over MCP. Elicitation, OAuth and per-server readiness included. [MCP](https://muthuishere.github.io/toolnexus/mcp/)
+- **Agent skills** — the open `SKILL.md` standard, loaded on demand through one `skill` tool. [Skills](https://muthuishere.github.io/toolnexus/skills/)
+- **Native, HTTP and built-in tools** — your functions, remote endpoints, shell/file tools. [Native](https://muthuishere.github.io/toolnexus/native/) · [HTTP](https://muthuishere.github.io/toolnexus/http/) · [Built-ins](https://muthuishere.github.io/toolnexus/builtins/)
+- **A2A** — call remote agents as tools, or serve your toolkit as one. [A2A](https://muthuishere.github.io/toolnexus/a2a/)
+- **ACP and the in-process client** — drive a local coding agent over ACP, or any function, as the client's model. [In-process client](https://muthuishere.github.io/toolnexus/in-process-client/)
+- **Typed decisions** — `createClassifier` and judge adapters: yes/no, pick-one and score answers as typed values. [Typed decisions](https://muthuishere.github.io/toolnexus/judge/)
+- **Media generation** — images, video and speech from a JSON style, as typed calls and as agent tools. [Media](https://muthuishere.github.io/toolnexus/media/)
+- **Human in the loop** — any tool can suspend on a `Request`; a `waitFor` host resolves it, or the run returns `pending` and resumes later. [Suspension](https://muthuishere.github.io/toolnexus/suspension/)
+- **The loop** — parallel and chained tool calls, hooks, streaming, memory, retries and resilience, prompt caching and tool tiers, sub-agents, observability. [Streaming](https://muthuishere.github.io/toolnexus/streaming/) · [Memory](https://muthuishere.github.io/toolnexus/memory/) · [Resilience](https://muthuishere.github.io/toolnexus/resilience/) · [Sub-agents](https://muthuishere.github.io/toolnexus/subagents/)
 
-## New in 0.22
+Exact per-port spellings and any port-specific gaps are in [`CHANGELOG.md`](CHANGELOG.md) and each
+port's API reference.
 
-- **Prompt caching and tool tiers.** `promptCache` marks the stable prefix for the provider
-  (Anthropic cache breakpoints, OpenAI `prompt_cache_key`) and usage reports
-  `cacheReadTokens` / `cacheWriteTokens`. `toolTiers` sends only your core tool schemas and
-  lets the model load the rest through `tool_search` / `call_tool`, so the tools array — and
-  the cached prefix — never changes mid-session.
-  [Recipe](https://muthuishere.github.io/toolnexus/cookbook/prompt-cache-and-tool-tiers/).
-- **API key by host** (breaking for local/custom hosts, above).
-  [Recipe](https://muthuishere.github.io/toolnexus/cookbook/api-key-by-host/).
-- **Host hooks**: a cancellable `waitFor`, per-server MCP readiness (`onServer`), MCP resource
-  tools, tool hints (`readOnly` / `destructive` / `openWorld`) on `beforeTool` for permission
-  gates, opt-in builtins (background shells, `websearch`, `notebook_edit`), grep context,
-  compaction notices, `asToolWith` for subagents under the parent's gates, `callId` on the tool
-  context, and `listModels`.
-  [Recipe](https://muthuishere.github.io/toolnexus/cookbook/host-hooks/).
-- **Go and Rust only, for now:** ACP host hooks (`OnPermission`, `OnUpdate`, `GenerateCtx`,
-  `GenerateStream`). [Recipe](https://muthuishere.github.io/toolnexus/cookbook/acp-hooks/).
+## Benchmarks
 
-Per-port spellings are in [`CHANGELOG.md`](CHANGELOG.md) and each port's API reference.
+Measured against 21 frameworks on a zero-cost mock model, per language. Honest summary: **fastest in
+some languages, level in some, behind in a couple** (Eino in Go, LangChain4j on the JVM, AutoAgents
+in Rust over MCP). Every row, loss included: [Nov 2026 standing](https://muthuishere.github.io/toolnexus/standing-2026-11/).
+
+## What it is not
+
+- **Not a graph orchestrator.** No graph, builder or workflow DSL; compose agents as tools.
+- **Not a hosted platform.** A library you embed; nothing to sign up for.
+- **Not a RAG / vector store.** That is the sister project
+  [citenexus](https://github.com/muthuishere/citenexus) (S3-first, with pgvector support).
 
 ## The eight ports
 
-| language | package | API reference |
+| language | package | docs |
 |---|---|---|
-| JavaScript / TypeScript | [`toolnexus`](https://www.npmjs.com/package/toolnexus) (npm) | [api/javascript](https://muthuishere.github.io/toolnexus/api/javascript/) |
-| Python | [`toolnexus`](https://pypi.org/project/toolnexus/) (PyPI) | [api/python](https://muthuishere.github.io/toolnexus/api/python/) |
-| Go | [`github.com/muthuishere/toolnexus/golang`](https://pkg.go.dev/github.com/muthuishere/toolnexus/golang) | [api/go](https://muthuishere.github.io/toolnexus/api/go/) |
-| Java | [`io.github.muthuishere:toolnexus`](https://central.sonatype.com/artifact/io.github.muthuishere/toolnexus) | [api/java](https://muthuishere.github.io/toolnexus/api/java/) |
-| C# / .NET | [`Toolnexus`](https://www.nuget.org/packages/Toolnexus) (NuGet) | [api/csharp](https://muthuishere.github.io/toolnexus/api/csharp/) |
-| Elixir | [`toolnexus`](https://hex.pm/packages/toolnexus) (Hex) | [api/elixir](https://muthuishere.github.io/toolnexus/api/elixir/) |
-| Clojure | [`net.clojars.muthuishere/toolnexus`](https://clojars.org/net.clojars.muthuishere/toolnexus) | [api/clojure](https://muthuishere.github.io/toolnexus/api/clojure/) |
-| Rust | `toolnexus` (crates.io) · [`rust/`](rust/README.md) | [api/rust](https://muthuishere.github.io/toolnexus/api/rust/) |
+| JavaScript / TypeScript | [`toolnexus`](https://www.npmjs.com/package/toolnexus) | [`js/`](js/README.md) · [API](https://muthuishere.github.io/toolnexus/api/javascript/) |
+| Python | [`toolnexus`](https://pypi.org/project/toolnexus/) | [`python/`](python/README.md) · [API](https://muthuishere.github.io/toolnexus/api/python/) |
+| Go | [`github.com/muthuishere/toolnexus/golang`](https://pkg.go.dev/github.com/muthuishere/toolnexus/golang) | [`golang/`](golang/README.md) · [API](https://muthuishere.github.io/toolnexus/api/go/) |
+| Java | [`io.github.muthuishere:toolnexus`](https://central.sonatype.com/artifact/io.github.muthuishere/toolnexus) | [`java/`](java/README.md) · [API](https://muthuishere.github.io/toolnexus/api/java/) |
+| C# / .NET | [`Toolnexus`](https://www.nuget.org/packages/Toolnexus) | [`csharp/`](csharp/README.md) · [API](https://muthuishere.github.io/toolnexus/api/csharp/) |
+| Elixir | [`toolnexus`](https://hex.pm/packages/toolnexus) | [`elixir/`](elixir/README.md) · [API](https://muthuishere.github.io/toolnexus/api/elixir/) |
+| Clojure | [`net.clojars.muthuishere/toolnexus`](https://clojars.org/net.clojars.muthuishere/toolnexus) | [`clojure/`](clojure/README.md) · [API](https://muthuishere.github.io/toolnexus/api/clojure/) |
+| Rust | [`toolnexus`](https://crates.io/crates/toolnexus) | [`rust/`](rust/README.md) · [API](https://muthuishere.github.io/toolnexus/api/rust/) |
 
-Each port's own README covers install and a quick start; everything beyond that is on the docs site.
+## Built on toolnexus
 
-## Documentation
+- **[wfnexus](https://muthuishere.github.io/wfnexus/)**: typed pipelines for coding agents. Each step is a whole agent with scoped tools, a budget, guardrails and a JSON-schema output.
 
-| | |
-|---|---|
-| **Start here** | [Quickstart](https://muthuishere.github.io/toolnexus/quickstart/) · [Concepts](https://muthuishere.github.io/toolnexus/concepts/) · [Install](https://muthuishere.github.io/toolnexus/install/) |
-| **Tool sources** | [MCP](https://muthuishere.github.io/toolnexus/mcp/) · [Skills](https://muthuishere.github.io/toolnexus/skills/) · [Native](https://muthuishere.github.io/toolnexus/native/) · [HTTP](https://muthuishere.github.io/toolnexus/http/) · [Built-ins](https://muthuishere.github.io/toolnexus/builtins/) · [A2A](https://muthuishere.github.io/toolnexus/a2a/) |
-| **The loop** | [Streaming](https://muthuishere.github.io/toolnexus/streaming/) · [Memory](https://muthuishere.github.io/toolnexus/memory/) · [Suspension](https://muthuishere.github.io/toolnexus/suspension/) · [Resilience](https://muthuishere.github.io/toolnexus/resilience/) · [Observability](https://muthuishere.github.io/toolnexus/observability/) |
-| **Agents** | [Sub-agents & teams](https://muthuishere.github.io/toolnexus/subagents/) · [Personas](https://muthuishere.github.io/toolnexus/persona-agents/) · [Typed decisions (`Classifier`)](https://muthuishere.github.io/toolnexus/judge/) |
-| **Cookbook** | [Zero to agent](https://muthuishere.github.io/toolnexus/cookbook/zero-to-agent/) · [MCP servers](https://muthuishere.github.io/toolnexus/cookbook/mcp-servers/) · [Agent skills](https://muthuishere.github.io/toolnexus/cookbook/agent-skills/) · [Prompt cache & tool tiers](https://muthuishere.github.io/toolnexus/cookbook/prompt-cache-and-tool-tiers/) · [API key by host](https://muthuishere.github.io/toolnexus/cookbook/api-key-by-host/) · [Host hooks](https://muthuishere.github.io/toolnexus/cookbook/host-hooks/) · [Judge](https://muthuishere.github.io/toolnexus/cookbook/judge/) |
-| **Numbers** | [Performance](https://muthuishere.github.io/toolnexus/performance/) · [Comparison](https://muthuishere.github.io/toolnexus/comparison/) · [Judge, live](https://muthuishere.github.io/toolnexus/harness/judge-live/) |
+Built something on toolnexus? Open a PR adding one line here.
 
-## The contract
+## Docs and contract
 
-[`SPEC.md`](SPEC.md) is the cross-language contract — §0 is the one-page conformance suite every
-port must satisfy. A behaviour change lands in all eight ports or it is not done; the shared
-fixtures in [`examples/`](examples/) are what "identical" is measured against.
-
-Changes go through [OpenSpec](openspec/) before code. See [`CLAUDE.md`](CLAUDE.md) for the
-workflow, [`CHANGELOG.md`](CHANGELOG.md) for what shipped, and [`PUBLISHING.md`](PUBLISHING.md)
-for how each port is released.
+- **Docs site:** [muthuishere.github.io/toolnexus](https://muthuishere.github.io/toolnexus/) — quickstart, concepts, cookbook, API reference per language.
+- **[`SPEC.md`](SPEC.md)** — the cross-language contract; §0 is the one-page conformance suite. A behaviour change lands in all eight ports or it is not done.
+- **[`CHANGELOG.md`](CHANGELOG.md)** — what shipped. Changes go through [OpenSpec](openspec/) first; see [`CLAUDE.md`](CLAUDE.md) and [`PUBLISHING.md`](PUBLISHING.md).
 
 ## Community
 

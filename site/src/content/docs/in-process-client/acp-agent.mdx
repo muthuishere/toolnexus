@@ -227,7 +227,7 @@ func main() {
 
 ```java title="Main.java"
 // run: java -cp 'lib/*' Main.java npx -y @agentclientprotocol/claude-agent-acp@0.100.0
-//      (lib/ = toolnexus-0.26.0.jar + its runtime deps)
+//      (lib/ = toolnexus-0.27.0.jar + its runtime deps)
 import io.github.muthuishere.toolnexus.InProcess;
 import io.github.muthuishere.toolnexus.LlmClient;
 import io.github.muthuishere.toolnexus.McpServe;
@@ -334,7 +334,7 @@ await client.StreamAsync("Use the add tool to add 17 and 25. Reply with just the
 <TabItem label="Elixir">
 ```elixir title="main.exs"
 # usage: elixir main.exs npx -y @agentclientprotocol/claude-agent-acp@0.100.0
-Mix.install([{:toolnexus, "~> 0.26"}])
+Mix.install([{:toolnexus, "~> 0.27"}])
 
 add =
   Toolnexus.define_tool(
@@ -380,7 +380,7 @@ end
 Clojure has no stream API: the agent's chunks reach `run`'s `:on-event` live, while the turn runs.
 
 ```clojure title="main.clj"
-;; deps.edn: {:deps {net.clojars.muthuishere/toolnexus {:mvn/version "0.26.0"}}}
+;; deps.edn: {:deps {net.clojars.muthuishere/toolnexus {:mvn/version "0.27.0"}}}
 ;; run:      clojure -M main.clj npx -y @agentclientprotocol/claude-agent-acp@0.100.0
 (ns main
   (:require [toolnexus.acp :as acp]
@@ -492,7 +492,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 | | how |
 |---|---|
-| all eight recipes | compiled and run on toolnexus 0.25.0 against a fake ACP agent ([`fake_acp_agent.py`](https://github.com/muthuishere/toolnexus/blob/main/site/recipes/in-process-client/fakes/fake_acp_agent.py), stdlib Python: answers `initialize` / `session/new`, sends a `session/request_permission`, calls `tools/list` + `tools/call` on the served URL with the entry's bearer header, streams two `agent_message_chunk`s). Each printed `[tool] add(17, 25)` and `final: The sum is 42.` |
+| all eight recipes | compiled and run on toolnexus 0.25.0 against a fake ACP agent ([`fake_acp_agent.py`](https://github.com/muthuishere/toolnexus/blob/main/tools/mock-llm/fake_acp_agent.py), stdlib Python: answers `initialize` / `session/new`, sends a `session/request_permission`, calls `tools/list` + `tools/call` on the served URL with the entry's bearer header, streams two `agent_message_chunk`s). Each printed `[tool] add(17, 25)` and `final: The sum is 42.` |
 | JavaScript, Python, Go, Java, C#, Rust, live | `@agentclientprotocol/claude-agent-acp@0.100.0` on 2026-11-06: the agent found the tool (`[agent tool] ToolSearch`), called `mcp__toolnexus__add` over MCP with the bearer token, our `add` ran, and it answered `42`, streamed |
 | Elixir, Clojure, live | not run live; same library wire, verified against the fake only |
 

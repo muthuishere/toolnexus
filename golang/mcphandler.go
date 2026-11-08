@@ -167,6 +167,10 @@ type MCPHandlerConfig struct {
 	// ProtocolVersions this handler accepts, newest first. Entries outside
 	// MCPHandlerImplementedVersions are dropped. Default ["2025-06-18"].
 	// initialize echoes the client's version when accepted, else the first.
+	// "2026-07-28" is opt-in (SPEC §7C.2): initialize never answers it (that
+	// wire has no initialize; clients use server/discover), and on a mount
+	// that also lists legacy versions a request is served on the 2026 wire
+	// only when it carries an Mcp-Method header or a _meta protocol version.
 	ProtocolVersions []string
 
 	// Authenticate runs on every HTTP request before JSON-RPC parsing. Its
@@ -400,7 +404,7 @@ type mcpRPCMessage struct {
 // checkSession validates the Mcp-Session-Id header (stateful mode) and the
 // MCP-Protocol-Version header. It writes the HTTP error itself on failure.
 func (h *MCPHTTPHandler) checkSession(ctx context.Context, w http.ResponseWriter, r *http.Request) (context.Context, string, bool) {
-	if v := r.Header.Get("MCP-Protocol-Version"); v != "" && !mcpHasVersion(h.legacy, v) {
+	if v := r.Header.Get("MCP-Protocol-Version"); v != "" && !mcpHasVersion(h.versions, v) {
 		http.Error(w, "Bad Request: unsupported MCP-Protocol-Version", http.StatusBadRequest)
 		return ctx, "", false
 	}

@@ -57,7 +57,7 @@ class Tracker {
   inflight = 0
   peak = 0
   log: string[] = []
-  tool(name: string, readOnly: boolean): Tool {
+  tool(name: string, readOnly: boolean, ms = 60): Tool {
     return {
       name, description: name, source: "custom", inputSchema: { type: "object", properties: {} },
       hints: readOnly ? { readOnly: true, destructive: false, openWorld: false } : undefined,
@@ -65,7 +65,7 @@ class Tracker {
         this.inflight++
         this.peak = Math.max(this.peak, this.inflight)
         this.log.push(`start ${name}`)
-        await new Promise((r) => setTimeout(r, 60))
+        await new Promise((r) => setTimeout(r, ms))
         this.inflight--
         this.log.push(`end ${name}`)
         return { output: `out ${name}`, isError: false }
@@ -81,16 +81,16 @@ const MODES = [
   { name: "anthropic-stream", style: "anthropic", stream: true },
 ] as const
 
-async function runSched(mode: (typeof MODES)[number], names: string[], tools: Tool[], maxToolConcurrency?: number): Promise<string[]> {
+async function runSched(mode: (typeof MODES)[number], names: string[], tools: Tool[], maxToolConcurrency?: number, field: "name" | "output" = "name"): Promise<string[]> {
   const toolkit = await createToolkit({ builtins: false, extraTools: tools })
   try {
     const client = createClient({
       baseUrl: "http://mock.local", style: mode.style, model: "m", apiKey: "k", fetch: scriptedFetch(names), maxToolConcurrency,
     })
-    if (!mode.stream) return (await client.run("go", { toolkit })).toolCalls.map((c) => c.name)
+    if (!mode.stream) return (await client.run("go", { toolkit })).toolCalls.map((c) => String(c[field]))
     let got: string[] = []
     for await (const ev of client.stream("go", { toolkit })) {
-      if (ev.type === "done") got = ev.result.toolCalls.map((c) => c.name)
+      if (ev.type === "done") got = ev.result.toolCalls.map((c) => String(c[field]))
     }
     return got
   } finally {
@@ -118,6 +118,17 @@ for (const mode of MODES) {
     const got = await runSched(mode, names, tools)
     assert.equal(tr.peak, 6)
     assert.deepEqual(got, names)
+  })
+
+  test(`tool scheduling (${mode.name}): results keep emitted order when calls finish out of order`, async () => {
+    const tr = new Tracker()
+    const names = ["r1", "r2", "r3", "r4"]
+    // r1 is slowest, r4 fastest: completion order is the reverse of emitted order
+    const tools = names.map((x, i) => tr.tool(x, true, 20 * (names.length - i)))
+    const outputs = await runSched(mode, names, tools, undefined, "output")
+    assert.equal(tr.log.filter((e) => e.startsWith("end ")).join(","), "end r4,end r3,end r2,end r1")
+    // each call keeps its own output, in emitted order
+    assert.deepEqual(outputs, names.map((x) => `out ${x}`))
   })
 
   test(`tool scheduling (${mode.name}): the cap is honoured`, async () => {

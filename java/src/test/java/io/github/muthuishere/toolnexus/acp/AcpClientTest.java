@@ -137,6 +137,33 @@ class AcpClientTest {
         }
     }
 
+    /** SPEC §7 ACP host hooks, "Cancellation": interrupting the turn's thread (the Java cancel
+     * seam) sends the session/cancel notification (no id), waits for the turn's reply, throws
+     * the cancellation error, and leaves the process and session warm. */
+    @Test
+    void cancelledTurn_sendsSessionCancelNotification_sessionStaysWarm() throws Exception {
+        try (AcpClient client = startClient("cancel")) {
+            Thread caller = Thread.currentThread();
+            Thread canceller = new Thread(() -> {
+                try { Thread.sleep(300); } catch (InterruptedException ignored) { }
+                caller.interrupt();
+            });
+            canceller.start();
+            Throwable ex = null;
+            try {
+                client.generate(request(List.of(userMessage("go"))));
+            } catch (Throwable e) {
+                ex = e;
+            }
+            canceller.join();
+            assertTrue(ex instanceof io.github.muthuishere.toolnexus.LlmClient.CancelledException,
+                    "expected CancelledException, got " + ex);
+            assertTrue(Thread.interrupted(), "the interrupt status is preserved (and cleared here)");
+            String next = client.generate(request(List.of(userMessage("again")))).content;
+            assertEquals("warm:cancels=1;withId=false", next);
+        }
+    }
+
     // ---- stale-answer prevented by the supersedes marker ----------------------------------
 
     @Test

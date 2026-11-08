@@ -17,6 +17,7 @@ use serde_json::{Value, json};
 use super::elicit::{answer_to_elicit_result, elicitation_to_request};
 use super::oauth::{OAuth, OpenUrlFn, TokenStore};
 use super::wire::{Obj, PROTOCOL_VERSION, SKILLS_EXT, Session, WireError, lock, sha256_hex};
+pub(crate) use super::wire::{StdioHandoff, StdoutReader};
 use super::{
     ServerConfig, apply_tools_filter, build_input_schema, expand_env_headers, hints_of,
     map_wire_result,
@@ -40,7 +41,12 @@ pub(crate) enum Probe {
     /// The server speaks 2026-07-28.
     Direct(Connected),
     /// Use the frozen SDK path; `bearer` is a token OAuth already obtained.
-    Fallback { bearer: String },
+    Fallback {
+        bearer: String,
+        /// stdio only: the probe child after a fast non-2026 discover reply,
+        /// to continue into `initialize` (no respawn). `None` ⇒ spawn anew.
+        stdio: Option<Box<StdioHandoff>>,
+    },
 }
 
 pub(crate) struct Connected {
@@ -108,14 +114,18 @@ pub(crate) async fn probe(name: &str, cfg: &ServerConfig, ctx: &LoadCtx) -> Resu
         | Err(WireError::Http(400 | 404 | 405 | 500..=599)) => {
             // SPEC §2.2a (amended): a 5xx on discover also tries the frozen path
             // (some SDK servers answer unknown methods with 500)
-            return Ok(fallback(session, cfg).await);
+            return Ok(fallback(name, session, cfg, true, remote).await);
         }
-        Err(WireError::Timeout(_)) if !remote => return Ok(fallback(session, cfg).await),
+        // silence: the probe child is killed and the frozen path respawns
+        Err(WireError::Timeout(_)) if !remote => {
+            return Ok(fallback(name, session, cfg, false, remote).await);
+        }
         Err(e) => {
             session.close().await;
             return Err(e.to_string());
         }
     };
+    session.release_probe();
     let defs = match resolve_auth(&session, &ctx.wait_for, || session.list_tools(true)).await {
         Ok(d) => d,
         Err(e) => {
@@ -158,13 +168,32 @@ pub(crate) async fn probe(name: &str, cfg: &ServerConfig, ctx: &LoadCtx) -> Resu
     }))
 }
 
-async fn fallback(session: Session, cfg: &ServerConfig) -> Probe {
+async fn fallback(
+    name: &str,
+    session: Session,
+    cfg: &ServerConfig,
+    replied: bool,
+    remote: bool,
+) -> Probe {
     let bearer = session
         .auth()
         .map(|a| a.stored_bearer(cfg.url.as_deref().unwrap_or_default()))
         .unwrap_or_default();
+    // a stdio server that answered discover keeps its process (SPEC §2.2a)
+    let stdio = if replied && !remote {
+        let h = session.take_stdio().await.map(Box::new);
+        if h.is_none() {
+            // never silent: the hand-over failed, so the frozen path spawns a second process
+            eprintln!(
+                "[toolnexus] warn: MCP server {name:?} probe child hand-over failed; respawning for the frozen path"
+            );
+        }
+        h
+    } else {
+        None
+    };
     session.close().await;
-    Probe::Fallback { bearer }
+    Probe::Fallback { bearer, stdio }
 }
 
 fn supports_2026(d: &Obj) -> bool {

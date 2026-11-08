@@ -223,7 +223,7 @@
         { "request": { "method": "POST", "version": "2025-03-26", "body": { "jsonrpc": "2.0", "id": 4, "method": "ping" } },
           "expect": { "status": 400 } },
         { "request": { "method": "POST", "version": "2026-07-28", "body": { "jsonrpc": "2.0", "id": 5, "method": "ping" } },
-          "expect": { "status": 400 } },
+          "expect": { "status": 200, "json": { "jsonrpc": "2.0", "id": 5, "result": {} } } },
         { "request": { "method": "POST", "sessionId": "anything", "version": "2025-11-25", "body": { "jsonrpc": "2.0", "id": 6, "method": "ping" } },
           "expect": { "status": 200, "json": { "jsonrpc": "2.0", "id": 6, "result": {} } } },
         { "request": { "method": "POST", "version": "2025-11-25",
@@ -407,7 +407,15 @@
         { "request": {"method": "POST", "body": {"jsonrpc": "2.0", "id": 4, "method": "server/discover"}},
           "expect": {"status": 400, "json": {"error": {"code": -32020, "message": "Header mismatch: MCP-Protocol-Version header missing"}, "id": 4, "jsonrpc": "2.0"}} },
         { "request": {"method": "POST", "version": "2025-06-18", "body": {"jsonrpc": "2.0", "id": 5, "method": "tools/call", "params": {"name": "nope", "arguments": {}}}},
-          "expect": {"status": 200, "json": {"error": {"code": -32602, "message": "tool not found: nope"}, "id": 5, "jsonrpc": "2.0"}} }
+          "expect": {"status": 200, "json": {"error": {"code": -32602, "message": "tool not found: nope"}, "id": 5, "jsonrpc": "2.0"}} },
+        { "request": {"method": "POST", "version": "2026-07-28", "body": {"jsonrpc": "2.0", "id": 6, "method": "ping"}},
+          "expect": {"status": 200, "json": {"id": 6, "jsonrpc": "2.0", "result": {}}} },
+        { "request": {"method": "POST", "version": "2026-07-28", "body": {"jsonrpc": "2.0", "id": 7, "method": "tools/call", "params": {"name": "nope", "arguments": {}}}},
+          "expect": {"status": 200, "json": {"error": {"code": -32602, "message": "tool not found: nope"}, "id": 7, "jsonrpc": "2.0"}} },
+        { "request": {"method": "POST", "version": "2026-07-28", "body": {"jsonrpc": "2.0", "id": 8, "method": "server/discover"}},
+          "expect": {"status": 400, "json": {"error": {"code": -32020, "message": "Header mismatch: Mcp-Method header value '' does not match body value 'server/discover'"}, "id": 8, "jsonrpc": "2.0"}} },
+        { "request": {"method": "POST", "version": "2099-01-01", "body": {"jsonrpc": "2.0", "id": 9, "method": "ping"}},
+          "expect": {"status": 400} }
       ],
       "expectExecuted": []
     },

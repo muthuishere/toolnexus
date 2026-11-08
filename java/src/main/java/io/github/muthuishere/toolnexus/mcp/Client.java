@@ -75,13 +75,28 @@ public class Client implements AutoCloseable {
     public String url() { return url; }
 
     /** Starts the process (stderr inherited, never parsed) and returns a client with the same API. */
-    public static Client stdio(ProcessBuilder pb) throws IOException {
+    public static Client stdio(ProcessBuilder pb) throws IOException { return stdio(pb, false); }
+
+    /**
+     * {@code probe=true} (§2.2a): the reader parks after the first response, so the caller must then
+     * {@link #resumeStdio()} (2026 server) or {@link #detachStdio()} (old server, same child continues).
+     */
+    public static Client stdio(ProcessBuilder pb, boolean probe) throws IOException {
         Client c = new Client("");
-        c.stdio = StdioConn.start(pb, null);
+        c.stdio = StdioConn.start(pb, null, probe);
         return c;
     }
 
     public boolean isStdio() { return stdio != null; }
+
+    /**
+     * §2.2a stdio probe handoff: after a fast discover reply from an old server, returns the live child
+     * so the frozen path continues on it (no respawn). This client must not be used or closed afterwards.
+     */
+    public Process detachStdio() { return stdio == null ? null : stdio.detach(); }
+
+    /** After a 2026 discover result on stdio: resume reading responses on the same child. */
+    public void resumeStdio() { if (stdio != null) stdio.resume(); }
 
     /** True when e is a stdio request that got no reply in time (the §2.2a stdio fallback trigger). */
     public static boolean isTimeout(Throwable e) { return e instanceof StdioConn.TimeoutException; }

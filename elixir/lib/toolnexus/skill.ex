@@ -45,13 +45,14 @@ defmodule Toolnexus.Skill do
   defmodule Source do
     @moduledoc "The built skill source: skills + the single `skill` tool + system-prompt catalog."
     @enforce_keys [:skills, :tool, :prompt]
-    defstruct [:skills, :tool, :prompt, skipped: []]
+    defstruct [:skills, :tool, :prompt, skipped: [], warnings: []]
 
     @type t :: %__MODULE__{
             skills: [Toolnexus.Skill.Info.t()],
             tool: Toolnexus.Tool.t(),
             prompt: String.t(),
-            skipped: [%{location: String.t(), reason: String.t(), detail: String.t() | nil}]
+            skipped: [%{location: String.t(), reason: String.t(), detail: String.t() | nil}],
+            warnings: [%{location: String.t(), reason: String.t(), chars: non_neg_integer()}]
           }
   end
 
@@ -100,7 +101,13 @@ defmodule Toolnexus.Skill do
       execute: fn args, _ctx -> execute_skill(args, by_name, sample_limit) end
     }
 
-    %Source{skills: skills, tool: tool, prompt: skills_prompt(skills), skipped: skipped}
+    %Source{
+      skills: skills,
+      tool: tool,
+      prompt: skills_prompt(skills),
+      skipped: skipped,
+      warnings: description_warnings(skills)
+    }
   end
 
   @doc """
@@ -114,12 +121,30 @@ defmodule Toolnexus.Skill do
   """
   @spec list(String.t() | [String.t()] | keyword() | map()) :: %{
           skills: [Info.t()],
-          skipped: [%{location: String.t(), reason: String.t(), detail: String.t() | nil}]
+          skipped: [%{location: String.t(), reason: String.t(), detail: String.t() | nil}],
+          warnings: [%{location: String.t(), reason: String.t(), chars: non_neg_integer()}]
         }
   def list(input) do
     opts = normalize_opts(input)
     {skills, skipped} = merge_candidates(collect_candidates(opts))
-    %{skills: skills, skipped: skipped}
+    %{skills: skills, skipped: skipped, warnings: description_warnings(skills)}
+  end
+
+  # SPEC §3 (#84): a description over 1024 Unicode CODE POINTS is warned, never
+  # modified. Code points, not graphemes — `String.length/1` would undercount.
+  @description_limit 1024
+  defp description_warnings(skills) do
+    for %{description: d, location: loc} <- skills,
+        is_binary(d),
+        chars = length(String.to_charlist(d)),
+        chars > @description_limit do
+      warn(
+        "[toolnexus] skill description is #{chars} code points (over #{@description_limit}) " <>
+          "at #{loc} — kept unmodified"
+      )
+
+      %{location: loc, reason: "oversized-description", chars: chars}
+    end
   end
 
   # ── Options ─────────────────────────────────────────────────────────────────

@@ -109,7 +109,14 @@ public final class FakeAcpServer {
                 result.put("sessionId", "sess-1");
                 reply(idObj, result);
             }
-            case "session/set_mode", "session/cancel" -> reply(idObj, Map.of());
+            case "session/set_mode" -> reply(idObj, Map.of());
+            case "session/cancel" -> {
+                cancelCount++;
+                if (idObj != null) { cancelHadId = true; reply(idObj, Map.of()); }
+                Object held = cancelHeldId;
+                cancelHeldId = null;
+                if (held != null) reply(held, Map.of("stopReason", "cancelled"));
+            }
             case "session/prompt" -> {
                 Map<String, Object> params = (Map<String, Object>) msg.get("params");
                 String userText = extractPromptText(params);
@@ -126,7 +133,24 @@ public final class FakeAcpServer {
         }
     }
 
+    // "cancel" scenario: the first turn is held open until a session/cancel arrives.
+    private static volatile Object cancelHeldId;
+    private static volatile int cancelCount;
+    private static volatile boolean cancelHadId;
+    private static volatile boolean cancelFirstSeen;
+
     private static void handlePrompt(String scenario, Object id, Object sid, String userText, List<String> history) {
+        if ("cancel".equals(scenario)) {
+            if (!cancelFirstSeen) {
+                cancelFirstSeen = true;
+                sendUpdate(sid, "agent_message_chunk", "working");
+                cancelHeldId = id;
+            } else {
+                sendUpdate(sid, "agent_message_chunk", "warm:cancels=" + cancelCount + ";withId=" + cancelHadId);
+                reply(id, Map.of("stopReason", "end_turn"));
+            }
+            return;
+        }
         switch (scenario) {
             case "stale" -> handleStale(id, userText, history);
             case "hang" -> sendRequest("session/request_permission", permissionParams(sid));

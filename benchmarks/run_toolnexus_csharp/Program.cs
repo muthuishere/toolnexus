@@ -9,7 +9,9 @@ using Toolnexus;
 // LlmClient. Per-request = agent.RunAsync over the fixed scenario. JIT warmup is
 // handled with explicit warmup iterations before the measured loop.
 //
-//   -config mcp|full   -runs N   -warmup W
+//   -config mcp|full|native   -runs N   -warmup W
+//   native = get_weather + add as annotated native tools, no MCP — the same
+//   shape as the MEAI / Semantic Kernel native rows.
 
 static class Bench
 {
@@ -19,6 +21,19 @@ static class Bench
         [ToolMethod("multiply", "Multiply two integers locally.")]
         public string Multiply([Param("a", "a")] long a, [Param("b", "b")] long b)
             => (a * b).ToString(CultureInfo.InvariantCulture);
+    }
+
+    // Native get_weather + add for the "native" config (same names/behaviour as
+    // the shared MCP server and the MEAI / SK runners).
+    public sealed class WeatherAddTools
+    {
+        [ToolMethod("get_weather", "Get the current weather for a city.")]
+        public string GetWeather([Param("city", "city")] string city)
+            => $"The weather in {city} is Sunny, 22C.";
+
+        [ToolMethod("add", "Add two integers.")]
+        public string Add([Param("a", "a")] long a, [Param("b", "b")] long b)
+            => (a + b).ToString(CultureInfo.InvariantCulture);
     }
 
     public static async Task<int> Main(string[] args)
@@ -50,9 +65,11 @@ static class Bench
 
         // ---- cold init ----
         var sw = Stopwatch.StartNew();
-        var opts = new Toolkit.Options()
-            .WithMcpConfig(mcpConfig)
-            .WithBuiltins(false);
+        var opts = new Toolkit.Options().WithBuiltins(false);
+        if (config == "native")
+            opts.WithAnnotatedObjects(new WeatherAddTools());
+        else
+            opts.WithMcpConfig(mcpConfig);
         if (config == "full")
             opts.WithSkillsDir(repo + "/examples/skills");
         if (config == "full")

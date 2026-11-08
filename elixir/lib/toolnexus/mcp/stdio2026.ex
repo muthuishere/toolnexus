@@ -25,6 +25,18 @@ defmodule Toolnexus.Mcp.Stdio2026 do
       {:error, :closed}
   end
 
+  @doc """
+  Hand the live child to `owner` (§2.2a amended: a discover reply means the same
+  child continues into the frozen `initialize`). Returns `{:ok, port, os_pid}`;
+  this process then stops WITHOUT closing the port. The port stays in
+  `{:line, _}` mode.
+  """
+  def handoff(pid, owner) do
+    GenServer.call(pid, {:handoff, owner})
+  catch
+    :exit, _ -> {:error, :closed}
+  end
+
   @doc "Stop the server (and its child)."
   def close(pid) do
     GenServer.stop(pid)
@@ -97,6 +109,15 @@ defmodule Toolnexus.Mcp.Stdio2026 do
   end
 
   @impl true
+  def handle_call({:handoff, _owner}, _from, %{err: e} = s) when e != nil,
+    do: {:reply, {:error, e}, s}
+
+  def handle_call({:handoff, owner}, _from, s) do
+    Port.connect(s.port, owner)
+    Process.unlink(s.port)
+    {:stop, :normal, {:ok, s.port, s.os_pid}, %{s | err: :handed_off, os_pid: nil}}
+  end
+
   def handle_call({:send, _id, _body}, _from, %{err: e} = s) when e != nil,
     do: {:reply, {:error, e}, s}
 

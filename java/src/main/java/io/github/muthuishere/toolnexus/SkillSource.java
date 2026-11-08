@@ -122,14 +122,28 @@ public final class SkillSource {
         }
     }
 
+    /**
+     * A kept skill the host should look at (SPEC.md §3, #84): today only an oversized
+     * description. The description itself is never modified; {@code chars} counts Unicode
+     * code points.
+     */
+    public record SkillWarning(String location, String reason, int chars) {
+        public static final String OVERSIZED_DESCRIPTION = "oversized-description";
+    }
+
+    /** Descriptions longer than this many code points are warned (exactly this many is not). */
+    public static final int MAX_DESCRIPTION_CHARS = 1024;
+
     /** Result of a list-only validate pass (S3). */
     public static final class SkillInventory {
         public final List<SkillInfo> skills;
         public final List<SkillSkip> skipped;
+        public final List<SkillWarning> warnings;
 
-        SkillInventory(List<SkillInfo> skills, List<SkillSkip> skipped) {
+        SkillInventory(List<SkillInfo> skills, List<SkillSkip> skipped, List<SkillWarning> warnings) {
             this.skills = skills;
             this.skipped = skipped;
+            this.warnings = warnings;
         }
     }
 
@@ -150,11 +164,19 @@ public final class SkillSource {
     private final Map<String, SkillInfo> skills;
     private final Tool tool;
     private final List<SkillSkip> skipped;
+    private final List<SkillWarning> warnings;
 
-    private SkillSource(Map<String, SkillInfo> skills, Tool tool, List<SkillSkip> skipped) {
+    private SkillSource(Map<String, SkillInfo> skills, Tool tool, List<SkillSkip> skipped,
+                        List<SkillWarning> warnings) {
         this.skills = skills;
         this.tool = tool;
         this.skipped = skipped == null ? List.of() : List.copyOf(skipped);
+        this.warnings = warnings == null ? List.of() : List.copyOf(warnings);
+    }
+
+    /** #84: warnings over the EXPOSED skills (after the allowlist), in discovery order. */
+    public List<SkillWarning> warnings() {
+        return warnings;
     }
 
     /**
@@ -350,7 +372,27 @@ public final class SkillSource {
      */
     public static SkillInventory listSkills(LoadOptions opts) {
         Merged merged = mergeCandidates(collectCandidates(opts));
-        return new SkillInventory(new ArrayList<>(merged.skills.values()), merged.skipped);
+        return new SkillInventory(new ArrayList<>(merged.skills.values()), merged.skipped,
+                descriptionWarnings(merged.skills));
+    }
+
+    /**
+     * #84: one warning per kept skill whose description exceeds {@link #MAX_DESCRIPTION_CHARS}
+     * Unicode code points, in discovery order; each is also printed to stderr (the same
+     * channel as the duplicate-name warning). The description is never touched.
+     */
+    private static List<SkillWarning> descriptionWarnings(Map<String, SkillInfo> skills) {
+        List<SkillWarning> out = new ArrayList<>();
+        for (SkillInfo s : skills.values()) {
+            if (s.description == null) continue;
+            int chars = s.description.codePointCount(0, s.description.length());
+            if (chars > MAX_DESCRIPTION_CHARS) {
+                System.err.println("[toolnexus] skill \"" + s.name + "\" (" + s.location
+                        + ") description is " + chars + " characters, over " + MAX_DESCRIPTION_CHARS);
+                out.add(new SkillWarning(s.location, SkillWarning.OVERSIZED_DESCRIPTION, chars));
+            }
+        }
+        return out;
     }
 
     /** Discover skills (dirs and/or data) and build the `skill` loader tool. */
@@ -358,7 +400,7 @@ public final class SkillSource {
         Merged merged = mergeCandidates(collectCandidates(opts));
         Map<String, SkillInfo> resolved = applyFilter(merged.skills, opts.filter);
         Tool tool = new SkillTool(resolved, opts.sampleLimit);
-        return new SkillSource(resolved, tool, merged.skipped);
+        return new SkillSource(resolved, tool, merged.skipped, descriptionWarnings(resolved));
     }
 
     private static final class SkillTool implements Tool {

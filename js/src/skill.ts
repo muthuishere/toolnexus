@@ -12,9 +12,18 @@
 import { readFileSync, readdirSync, realpathSync, statSync } from "node:fs"
 import path from "node:path"
 import { pathToFileURL } from "node:url"
-import { parse as parseYaml } from "yaml"
+import { createRequire } from "node:module"
 import { compareCodePoints, compareDiscovery, sortEntriesByName } from "./order.js"
 import type { Tool, ToolResult } from "./types.js"
+
+// yaml is required on the first frontmatter parse, not at import, so a host with no skills never
+// loads it. `require` keeps the parse synchronous (listSkills/loadSkills are sync); yaml's Node
+// entry is CommonJS, so this is the same module instance an `import` would get.
+let yamlParse: ((src: string) => unknown) | undefined
+function parseYaml(src: string): unknown {
+  yamlParse ??= (createRequire(import.meta.url)("yaml") as typeof import("yaml")).parse
+  return yamlParse(src)
+}
 
 export const SKILL_TOOL_DESCRIPTION = `Load a specialized skill when the task at hand matches one of the skills listed in the system prompt.
 
@@ -68,10 +77,25 @@ export interface SkillSkip {
   detail?: string
 }
 
+/** Why a KEPT skill carries a warning (SPEC.md §3, #84). The skill still loads unchanged. */
+export type SkillWarningReason = "oversized-description"
+
+/** Maximum skill `description` length, in Unicode code points, before a warning (SPEC.md §3). */
+export const SKILL_DESCRIPTION_MAX_CHARS = 1024
+
+export interface SkillWarning {
+  location: string
+  reason: SkillWarningReason
+  /** Description length in Unicode CODE POINTS (not bytes, not UTF-16 units). */
+  chars: number
+}
+
 /** Result of a list-only validate pass (SPEC.md §3, S3). */
 export interface SkillInventory {
   skills: SkillInfo[]
   skipped: SkillSkip[]
+  /** Kept skills that load but carry a warning (oversized description), in discovery order. */
+  warnings: SkillWarning[]
 }
 
 /** Options for loadSkills / listSkills (SPEC.md §3, S1/S2/S5). */
@@ -353,6 +377,26 @@ function collectCandidates(opts: LoadSkillsOptions): RawCandidate[] {
   return cands
 }
 
+/**
+ * Warn — never modify — skills whose description exceeds SKILL_DESCRIPTION_MAX_CHARS code
+ * points (SPEC.md §3, #84). Each warning is also sent to the same channel as the
+ * duplicate-name warning. Order follows the given skills (discovery order).
+ */
+function describeWarnings(skills: SkillInfo[]): SkillWarning[] {
+  const out: SkillWarning[] = []
+  for (const s of skills) {
+    if (s.description === undefined) continue
+    const chars = [...s.description].length
+    if (chars > SKILL_DESCRIPTION_MAX_CHARS) {
+      console.warn(
+        `[toolnexus] skill "${s.name}" (${s.location}) description is ${chars} chars, over ${SKILL_DESCRIPTION_MAX_CHARS} — kept unmodified`,
+      )
+      out.push({ location: s.location, reason: "oversized-description", chars })
+    }
+  }
+  return out
+}
+
 /** Dedupe candidates by name (first-wins); later duplicates become skips. */
 function mergeCandidates(cands: RawCandidate[]): { skills: Record<string, SkillInfo>; skipped: SkillSkip[] } {
   const skills: Record<string, SkillInfo> = {}
@@ -409,6 +453,8 @@ export interface SkillSource {
    * that stops being reported is indistinguishable from something that was finished.
    */
   skipped: SkillSkip[]
+  /** Exposed (post-allowlist) skills whose description is oversized; never modified (#84). */
+  warnings: SkillWarning[]
 }
 
 /**
@@ -420,7 +466,8 @@ export function listSkills(input: string | string[] | LoadSkillsOptions): SkillI
   const opts: LoadSkillsOptions =
     typeof input === "string" || Array.isArray(input) ? { dirs: input } : input
   const merged = mergeCandidates(collectCandidates(opts))
-  return { skills: Object.values(merged.skills), skipped: merged.skipped }
+  const list = Object.values(merged.skills)
+  return { skills: list, skipped: merged.skipped, warnings: describeWarnings(list) }
 }
 
 /** Discover skills (dirs and/or data) and build the `skill` loader tool. */
@@ -432,6 +479,7 @@ export function loadSkills(input: string | string[] | LoadSkillsOptions): SkillS
   const skills = applySkillsFilter(merged.skills, opts.filter)
 
   const skipped = merged.skipped
+  const warnings = describeWarnings(Object.values(skills))
   const tool: Tool = {
     name: "skill",
     description: SKILL_TOOL_DESCRIPTION,
@@ -499,6 +547,7 @@ export function loadSkills(input: string | string[] | LoadSkillsOptions): SkillS
     skills,
     tool,
     skipped,
+    warnings,
     prompt() {
       const described = Object.values(skills)
         .filter((s) => s.description !== undefined)

@@ -425,8 +425,8 @@ public final class OneShot {
 }
 ```
 ```java title="Main.java"
-// run (Java 22+, multi-file source launcher): java -cp 'lib/*' Main.java python3 fake_cli.py
-//      (lib/ = toolnexus-0.26.0.jar + its runtime deps; OneShot.java sits next to this file)
+// run (Java 22+, multi-file source launcher): java -cp 'lib/*' Main.java python3 tools/mock-llm/fake_cli.py
+//      (lib/ = toolnexus-0.27.0.jar + its runtime deps; OneShot.java sits next to this file)
 import io.github.muthuishere.toolnexus.LlmClient;
 import io.github.muthuishere.toolnexus.NativeTool;
 import io.github.muthuishere.toolnexus.Toolkit;
@@ -636,7 +636,7 @@ end
 ```
 ```elixir title="main.exs"
 # usage: elixir main.exs <cli> [args...]    (oneshot.exs sits next to this file)
-Mix.install([{:toolnexus, "~> 0.26"}])
+Mix.install([{:toolnexus, "~> 0.27"}])
 Code.require_file("oneshot.exs", __DIR__)
 
 add =
@@ -708,7 +708,7 @@ koine's JSON writer sorts object keys, so the rendered tool schemas differ in ke
                   (parse (:out r))))}))
 ```
 ```clojure title="main.clj"
-;; deps.edn: {:paths ["."] :deps {net.clojars.muthuishere/toolnexus {:mvn/version "0.26.0"}}}
+;; deps.edn: {:paths ["."] :deps {net.clojars.muthuishere/toolnexus {:mvn/version "0.27.0"}}}
 ;; run:      clojure -M -m main claude -p        (any CLI that reads a prompt on stdin)
 (ns main
   (:require [koine.json :as json]
@@ -831,7 +831,7 @@ pub fn one_shot_client(command: String, args: Vec<String>) -> Client {
 //   toolnexus = "0.25"
 //   tokio = { version = "1", features = ["full"] }
 //   serde_json = "1"
-// run: cargo run -- python3 fake_cli.py      (any CLI that reads stdin and prints a reply)
+// run: cargo run -- python3 tools/mock-llm/fake_cli.py      (any CLI that reads stdin and prints a reply)
 mod oneshot;
 
 use serde_json::json;
@@ -860,7 +860,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 | | how |
 |---|---|
-| all eight recipes | compiled and run on toolnexus 0.25.0 against a fake CLI ([`fake_cli.py`](https://github.com/muthuishere/toolnexus/blob/main/site/recipes/in-process-client/fakes/fake_cli.py): replies with a `tool_calls` object, then with `content` once it sees `[tool add] …` in the prompt). Each made one `add(19, 23)` call and answered "The sum is 42." The Java prompt was diffed against the JavaScript one: identical |
+| all eight recipes | compiled and run on toolnexus 0.25.0 against a fake CLI ([`fake_cli.py`](https://github.com/muthuishere/toolnexus/blob/main/tools/mock-llm/fake_cli.py): replies with a `tool_calls` object, then with `content` once it sees `[tool add] …` in the prompt). Each made one `add(19, 23)` call and answered "The sum is 42." The Java prompt was diffed against the JavaScript one: identical |
 | Go, live (0.25.0) | `claude -p` with the lean flags above: called `add(19, 23)` through toolnexus, answered "The sum of 19 and 23 is 42." |
 | JavaScript, Python, live (0.24.0) | `claude -p` with the lean flags above (Claude Code 2.1.318), same call and answer in ~5 s; JavaScript also with `codex exec` (codex-cli 0.160.0): "The sum is 42." in ~15 s |
 

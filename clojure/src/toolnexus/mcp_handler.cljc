@@ -189,10 +189,10 @@
 (defn- check-session
   "[:ok ctx sid] or [:fail ring-response] — MCP-Protocol-Version, then (stateful)
   Mcp-Session-Id presence (400) and validity (404)."
-  [{:keys [cfg ids legacy]} ctx req]
+  [{:keys [cfg ids versions]} ctx req]
   (let [v (header req "mcp-protocol-version")]
     (cond
-      (and (seq v) (not (some #{v} legacy)))
+      (and (seq v) (not (some #{v} versions)))
       [:fail (text-response 400 "Bad Request: unsupported MCP-Protocol-Version")]
 
       (:stateless cfg) [:ok ctx ""]
@@ -601,7 +601,6 @@
     :else
     (let [hv (str (or (header req "mcp-protocol-version") ""))]
       (cond
-        (= hv protocol-2026) true
         (and (seq hv) (some #{hv} (:legacy h))) false
         :else (or (= "server/discover" method)
                   (seq (header req "mcp-method"))

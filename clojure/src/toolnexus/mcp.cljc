@@ -948,11 +948,15 @@
 
       :else
       (let [transport (try
-                        (if (= "remote" (:kind server))
+                        (cond
+                          ;; §2.2a: a stdio discover probe that got a fast
+                          ;; reply hands its LIVE child over — no respawn.
+                          (::probe-transport conn-opts) (::probe-transport conn-opts)
+                          (= "remote" (:kind server))
                           ;; conn-opts carries the §10 waitFor to BOTH legs now —
                           ;; the elicitation bridge is no longer stdio-only.
                           (http-transport server conn-opts)
-                          (stdio-transport server conn-opts))
+                          :else (stdio-transport server conn-opts))
                         (catch Throwable e
                           {:spawn-error (or (ex-message e) (str e))}))]
         (if (:spawn-error transport)
@@ -1314,7 +1318,7 @@
                                        conn-opts)
                        server conn-opts))
           (fail "server/discover" nil disc)))
-      (let [raw (try (stdio-transport server nil)
+      (let [raw (try (stdio-transport server conn-opts)
                      (catch Throwable e {:spawn-error (or (ex-message e) (str e))}))]
         (if (:spawn-error raw)
           (fail "connect" nil {:error "transport" :transport-error "spawn-failed" :message (:spawn-error raw)})
@@ -1323,12 +1327,20 @@
             (if (= :2026 (m26/discover-outcome disc))
               (finish-2026 server t nil (:wait-for conn-opts) timeout-ms (get-in disc [:ok :result])
                            (fn [phase f] (fail phase t f)) (:disable-tools conn-opts))
-              ;; §2.2a: the probe child is terminated and the frozen path starts
-              ;; its own process. A child that died before replying is ALSO
-              ;; routed here: the frozen path re-observes the death and reports
-              ;; it as the load failure it is, with its exit status and stderr.
-              (do ((:close! raw))
-                  (frozen-with-search (connect-frozen server conn-opts) server conn-opts)))))))))
+              ;; §2.2a (amended): a fast JSON-RPC reply (an error, or a result
+              ;; without 2026-07-28) means the old server wrote exactly one line
+              ;; and is now waiting on stdin — the SAME child continues into
+              ;; `initialize` on the frozen path; the reader only demuxes by id,
+              ;; so nothing is owed or stolen. Only on silence (timeout) is the
+              ;; probe child terminated and a fresh one spawned. A child that
+              ;; died before replying is ALSO respawned: the frozen path
+              ;; re-observes the death and reports it as the load failure it
+              ;; is, with its exit status and stderr.
+              (if (or (:ok disc) (= "rpc-error" (:error disc)))
+                (frozen-with-search (connect-frozen server (assoc conn-opts ::probe-transport raw))
+                                    server conn-opts)
+                (do ((:close! raw))
+                    (frozen-with-search (connect-frozen server conn-opts) server conn-opts))))))))))
 
 (defn connect
   "SPEC §2 — connect one server: `server/discover` first (§2.2), the 2026 path

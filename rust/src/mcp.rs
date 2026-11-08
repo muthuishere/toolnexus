@@ -437,9 +437,9 @@ pub async fn load_mcp_with(config: &McpConfig, opts: McpLoadOptions) -> McpSourc
         set.spawn(async move {
             let r = match direct::probe(&name, &cfg, &ctx).await {
                 Ok(direct::Probe::Direct(c)) => Ok(Loaded::Direct(c)),
-                Ok(direct::Probe::Fallback { bearer }) => tokio::time::timeout(
+                Ok(direct::Probe::Fallback { bearer, stdio }) => tokio::time::timeout(
                     cfg.timeout(),
-                    connect_and_list(&name, &cfg, bridge, bearer),
+                    connect_and_list(&name, &cfg, bridge, bearer, stdio),
                 )
                 .await
                 .unwrap_or_else(|_| Err(format!("timed out after {}ms", cfg.timeout().as_millis())))
@@ -518,6 +518,33 @@ pub async fn load_mcp_with(config: &McpConfig, opts: McpLoadOptions) -> McpSourc
     }
 }
 
+/// The handed-over probe stdout, owning the child so the child lives exactly
+/// as long as the SDK transport (and is killed with it: `kill_on_drop`).
+struct HandedStdout {
+    stdout: direct::StdoutReader,
+    _child: tokio::process::Child,
+}
+
+impl tokio::io::AsyncRead for HandedStdout {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.stdout).poll_read(cx, buf)
+    }
+}
+
+impl Drop for HandedStdout {
+    fn drop(&mut self) {
+        // the probe child leads its own process group: take its children too
+        #[cfg(unix)]
+        if let Some(pid) = self._child.id() {
+            unsafe { libc::killpg(pid as i32, libc::SIGKILL) };
+        }
+    }
+}
+
 enum Loaded {
     Direct(direct::Connected),
     Sdk(Client, Vec<rmcp::model::Tool>),
@@ -528,8 +555,19 @@ async fn connect_and_list(
     cfg: &ServerConfig,
     bridge: elicit::Bridge,
     bearer: String,
+    stdio: Option<Box<direct::StdioHandoff>>,
 ) -> Result<(Client, Vec<rmcp::model::Tool>), String> {
-    let client = if cfg.is_remote() {
+    let client = if let Some(h) = stdio.map(|b| *b) {
+        // SPEC §2.2a: the probe child answered discover; continue on it
+        let read = HandedStdout {
+            stdout: h.stdout,
+            _child: h.child,
+        };
+        bridge
+            .serve((read, h.stdin))
+            .await
+            .map_err(|e| e.to_string())?
+    } else if cfg.is_remote() {
         #[cfg(not(feature = "mcp-http"))]
         let _ = bearer;
         #[cfg(not(feature = "mcp-http"))]
