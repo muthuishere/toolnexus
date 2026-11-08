@@ -820,4 +820,140 @@ defmodule Toolnexus.ClassifierBackendsTest do
       end
     end
   end
+
+  test "openai-decisions.json: the Decisions wire (#157)" do
+    fx = fixture("openai-decisions.json")
+    qs = questions(fx["questions"])
+    ok_reply = Jason.encode!(hd(fx["replyCases"])["reply"])
+
+    for rc <- fx["requestCases"] do
+      {transport, log} = fake(fn _, _ -> {200, ok_reply} end)
+
+      opts = [backend: "openai", base_url: "http://h/v1", transport: transport, retries: 0]
+      opts = if rc["model"], do: [{:model, rc["model"]} | opts], else: opts
+      {:ok, c} = Classifier.create(opts)
+
+      assert {:ok, _} = Classifier.evaluate(c, state(rc["state"]), qs), rc["name"]
+      assert [req] = log.()
+      assert req.body == rc["expect"]["body"], rc["name"]
+      assert req.url == "http://h/v1/decisions"
+
+      refute Enum.any?(req.headers, fn {k, _} ->
+               String.downcase(to_string(k)) == "typesafe-danger-zone-images"
+             end)
+    end
+
+    for rc <- fx["replyCases"] do
+      expect = rc["expect"]
+
+      if expect["normalized"] do
+        assert {:ok, expect["normalized"]} ==
+                 Toolnexus.Classifier.Decisions.reply(Jason.encode!(rc["reply"]), qs)
+      end
+
+      {transport, _} = fake(fn _, _ -> {200, Jason.encode!(rc["reply"])} end)
+
+      {:ok, c} =
+        Classifier.create(
+          backend: "openai",
+          base_url: "http://h",
+          transport: transport,
+          retries: 0
+        )
+
+      case expect do
+        %{"error" => e} ->
+          assert {:error, ^e} = Classifier.evaluate(c, "x", qs), rc["name"]
+
+        _ ->
+          assert {:ok, %Decision{} = d} = Classifier.evaluate(c, "x", qs)
+          assert d.model == expect["model"]
+          assert d.calibrated == expect["calibrated"]
+          for {k, v} <- expect["noul"], do: assert({:ok, %{noul: ^v}} = Decision.noul(d, k))
+          for {k, v} <- expect["choice"], do: assert({:ok, %{choice: ^v}} = Decision.choice(d, k))
+          for {k, v} <- expect["score"], do: assert({:ok, %{score: ^v}} = Decision.score(d, k))
+      end
+    end
+
+    for ec <- fx["errorCases"] do
+      {transport, log} = fake(fn _, _ -> {200, ok_reply} end)
+
+      {:ok, c} =
+        Classifier.create(
+          backend: "openai",
+          base_url: "http://h",
+          transport: transport,
+          retries: 0
+        )
+
+      assert {:error, err} = Classifier.evaluate(c, "x", questions(ec["questions"]))
+      assert to_string(err) == ec["expect"]["error"], ec["name"]
+      assert match?(%Unsupported{}, err) == (ec["expect"]["unsupported"] == true), ec["name"]
+      assert log.() == [], ec["name"]
+    end
+
+    for cc <- fx["captureCases"] do
+      saved = for {k, _} <- cc["env"], do: {k, System.get_env(k)}
+      for {k, v} <- cc["env"], do: System.put_env(k, v)
+
+      try do
+        {:ok, pid} =
+          Bandit.start_link(
+            plug: {AuthCapture, %{owner: self(), reply: ok_reply}},
+            port: 0,
+            ip: {127, 0, 0, 1}
+          )
+
+        {:ok, {_, port}} = ThousandIsland.listener_info(pid)
+        opts = [backend: "openai", base_url: "http://127.0.0.1:#{port}/v1", retries: 0]
+        opts = if cc["apiKeyEnv"], do: [{:api_key_env, cc["apiKeyEnv"]} | opts], else: opts
+        {:ok, c} = Classifier.create(opts)
+        assert {:ok, _} = Classifier.evaluate(c, "x", qs), cc["name"]
+        assert_received {:auth, got}
+        want = if cc["expectAuthorization"], do: [cc["expectAuthorization"]], else: []
+        assert got == want, cc["name"]
+        Process.exit(pid, :normal)
+      after
+        for {k, v} <- saved, do: if(v, do: System.put_env(k, v), else: System.delete_env(k))
+      end
+    end
+
+    # Edge shapes: boolean / numeric choice values become §8B keys; a non-object
+    # answer is malformed.
+    bq = %{
+      "c" => %Choice{instructions: "y", criteria: %{"true" => "", "false" => ""}},
+      "s" => %Score{instructions: "y", criteria: ["a", "b"]}
+    }
+
+    reply = %{
+      "model" => "m",
+      "answers" => [
+        %{
+          "type" => "choice",
+          "choice" => true,
+          "probabilities" => [%{"value" => false, "probability" => 0.5}]
+        },
+        %{
+          "type" => "score",
+          "score" => 1,
+          "probabilities" => [
+            %{"value" => 1.0, "probability" => 1},
+            %{"value" => 0.5, "probability" => 0}
+          ]
+        }
+      ]
+    }
+
+    assert {:ok, body} = Toolnexus.Classifier.Decisions.reply(reply, bq)
+    assert body =~ ~s("choice":"true")
+    assert body =~ ~s("false":0.5)
+    assert body =~ ~s("1":1)
+    assert body =~ ~s("0.5":0)
+
+    assert {:error, "classifier: decisions: malformed reply"} =
+             Toolnexus.Classifier.Decisions.reply(%{"answers" => [1, 2]}, bq)
+
+    assert {:error, "classifier: decisions: malformed reply"} =
+             Toolnexus.Classifier.Decisions.reply("not json", bq)
+  end
 end

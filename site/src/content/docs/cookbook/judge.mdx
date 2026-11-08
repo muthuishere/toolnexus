@@ -785,6 +785,222 @@ hands over the conclusion rather than shipping raw numbers.
 each, the degenerate-criteria warning the library emits when you get this wrong, and the precise
 limits of `nearUniform`, confidence and `calibrated` as health signals.
 
+## Recipe: the same questions on OpenAI's Decisions API
+
+<Aside type="tip" title="Why you need this">
+Your host already holds an `OPENAI_API_KEY` and no System One credential, and you want typed
+answers — a yes/no, a pick-one, a score — rather than prose to parse. `backend: "openai"` sends the
+same questions to OpenAI's Decisions API (`POST https://api.openai.com/v1/decisions`, model
+`gpt-6-luna`) and returns the same `Decision`, so switching backends is one option, not a rewrite.
+</Aside>
+
+The key is read from `OPENAI_API_KEY` at call time and is sent **only** to `api.openai.com` over
+https. Decisions from this backend report **`calibrated: false`**, so a threshold tuned on Jev does
+not carry over — the snippets below check it before comparing a number. A `refusal` comes back as an
+error, never as a "no". These snippets call the live API, so they need the key; the details are on
+the [backends page](/toolnexus/judge/backends/#openai-decisions-api).
+
+<Tabs syncKey="lang">
+<TabItem label="JavaScript">
+```js
+import { createClassifier, noul, choice, score } from "toolnexus"
+
+const judge = createClassifier({ backend: "openai" }) // OPENAI_API_KEY, gpt-6-luna
+
+const d = await judge.evaluate("The package arrived with a broken screen.", {
+  damaged: noul("Does the customer report a damaged item?"),
+  team: choice("Which team should handle this?", {
+    shipping: "lost, late or damaged parcels",
+    billing: "refunds and payments",
+  }),
+  upset: score("How upset is the customer?", ["calm", "annoyed", "furious"]),
+})
+
+console.log(d.noul("damaged"), d.choice("team"), d.score("upset"))
+if (!d.calibrated) console.log("calibrated: false — re-tune thresholds for this backend")
+```
+</TabItem>
+<TabItem label="Python">
+```python
+from toolnexus import ChoiceQuestion, NoulQuestion, ScoreQuestion, create_classifier
+
+judge = create_classifier(backend="openai")  # OPENAI_API_KEY, gpt-6-luna
+
+d = await judge.evaluate(
+    "The package arrived with a broken screen.",
+    {
+        "damaged": NoulQuestion("Does the customer report a damaged item?"),
+        "team": ChoiceQuestion(
+            "Which team should handle this?",
+            {"shipping": "lost, late or damaged parcels", "billing": "refunds and payments"},
+        ),
+        "upset": ScoreQuestion("How upset is the customer?", ["calm", "annoyed", "furious"]),
+    },
+)
+
+print(d.noul("damaged"), d.choice("team"), d.score("upset"))
+if not d.calibrated:
+    print("calibrated: false — re-tune thresholds for this backend")
+```
+</TabItem>
+<TabItem label="Go">
+```go
+judge, err := toolnexus.CreateClassifier(toolnexus.ClassifierOptions{
+	Backend: toolnexus.BackendOpenAI, // OPENAI_API_KEY, gpt-6-luna
+})
+if err != nil {
+	log.Fatal(err)
+}
+
+d, err := judge.Evaluate(context.Background(), "The package arrived with a broken screen.",
+	map[string]toolnexus.Question{
+		"damaged": toolnexus.NoulQuestion{Instructions: "Does the customer report a damaged item?"},
+		"team": toolnexus.ChoiceQuestion{
+			Instructions: "Which team should handle this?",
+			Criteria: map[string]string{
+				"shipping": "lost, late or damaged parcels",
+				"billing":  "refunds and payments",
+			},
+		},
+		"upset": toolnexus.ScoreQuestion{
+			Instructions: "How upset is the customer?",
+			Criteria:     []string{"calm", "annoyed", "furious"},
+		},
+	})
+if err != nil {
+	log.Fatal(err)
+}
+
+damaged, _ := d.Noul("damaged")
+team, _ := d.Choice("team")
+upset, _ := d.Score("upset")
+fmt.Println(damaged, team, upset, "calibrated:", d.Calibrated)
+```
+</TabItem>
+<TabItem label="Java">
+```java
+Classifier judge = Classifier.create(new Classifier.Options()
+        .backend(Classifier.BACKEND_OPENAI)); // OPENAI_API_KEY, gpt-6-luna
+
+Classifier.Decision d = judge.evaluate("The package arrived with a broken screen.", Map.of(
+        "damaged", new Classifier.NoulQuestion("Does the customer report a damaged item?"),
+        "team", new Classifier.ChoiceQuestion("Which team should handle this?", Map.of(
+                "shipping", "lost, late or damaged parcels",
+                "billing", "refunds and payments")),
+        "upset", new Classifier.ScoreQuestion("How upset is the customer?",
+                List.of("calm", "annoyed", "furious"))));
+
+System.out.println(d.noul("damaged") + " " + d.choice("team") + " " + d.score("upset"));
+if (!d.calibrated()) System.out.println("calibrated: false — re-tune thresholds for this backend");
+```
+</TabItem>
+<TabItem label="C#">
+```csharp
+var judge = Classifier.Create(new ClassifierOptions
+{
+    Backend = ClassifierBackend.OpenAI, // OPENAI_API_KEY, gpt-6-luna
+});
+
+var d = await judge.EvaluateAsync("The package arrived with a broken screen.", new Dictionary<string, Question>
+{
+    ["damaged"] = new NoulQuestion { Instructions = "Does the customer report a damaged item?" },
+    ["team"] = new ChoiceQuestion
+    {
+        Instructions = "Which team should handle this?",
+        Criteria = new Dictionary<string, string>
+        {
+            ["shipping"] = "lost, late or damaged parcels",
+            ["billing"] = "refunds and payments",
+        },
+    },
+    ["upset"] = new ScoreQuestion
+    {
+        Instructions = "How upset is the customer?",
+        Criteria = new[] { "calm", "annoyed", "furious" },
+    },
+});
+
+Console.WriteLine($"{d.Noul("damaged")} {d.Choice("team")} {d.Score("upset")}");
+if (!d.Calibrated) Console.WriteLine("calibrated: false — re-tune thresholds for this backend");
+```
+</TabItem>
+<TabItem label="Elixir">
+```elixir
+alias Toolnexus.Classifier
+alias Toolnexus.Classifier.{Choice, Decision, Noul, Score}
+
+{:ok, judge} = Classifier.create(backend: "openai") # OPENAI_API_KEY, gpt-6-luna
+
+{:ok, d} =
+  Classifier.evaluate(judge, "The package arrived with a broken screen.", %{
+    "damaged" => %Noul{instructions: "Does the customer report a damaged item?"},
+    "team" => %Choice{
+      instructions: "Which team should handle this?",
+      criteria: %{"shipping" => "lost, late or damaged parcels", "billing" => "refunds and payments"}
+    },
+    "upset" => %Score{instructions: "How upset is the customer?", criteria: ["calm", "annoyed", "furious"]}
+  })
+
+{:ok, damaged} = Decision.noul(d, "damaged")
+{:ok, team} = Decision.choice(d, "team")
+{:ok, upset} = Decision.score(d, "upset")
+IO.inspect({damaged, team, upset, d.calibrated})
+```
+</TabItem>
+<TabItem label="Clojure">
+```clojure
+(require '[toolnexus.classifier :as jev])
+
+(def judge (jev/create-classifier {:backend "openai"})) ; OPENAI_API_KEY, gpt-6-luna
+
+(let [d (jev/evaluate judge "The package arrived with a broken screen."
+                      {"damaged" (jev/noul-question "Does the customer report a damaged item?")
+                       "team"    (jev/choice-question "Which team should handle this?"
+                                                      {"shipping" "lost, late or damaged parcels"
+                                                       "billing"  "refunds and payments"})
+                       "upset"   (jev/score-question "How upset is the customer?"
+                                                     ["calm" "annoyed" "furious"])})]
+  (println (jev/noul d "damaged") (jev/choice d "team") (jev/score d "upset")
+           "calibrated:" (:calibrated d)))
+```
+</TabItem>
+<TabItem label="Rust">
+```rust
+use toolnexus::classifier::{ChoiceQuestion, ClassifierBackend, NoulQuestion, ScoreQuestion};
+use toolnexus::{ClassifierOptions, Question, Questions, create_classifier};
+
+let judge = create_classifier(ClassifierOptions {
+    backend: ClassifierBackend::OpenAi, // OPENAI_API_KEY, gpt-6-luna
+    ..Default::default()
+})?;
+
+let questions: Questions = [
+    ("damaged".to_string(), Question::Noul(NoulQuestion {
+        instructions: "Does the customer report a damaged item?".into(),
+        ..Default::default()
+    })),
+    ("team".to_string(), Question::Choice(ChoiceQuestion {
+        instructions: "Which team should handle this?".into(),
+        criteria: [("shipping", "lost, late or damaged parcels"), ("billing", "refunds and payments")]
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .into(),
+    })),
+    ("upset".to_string(), Question::Score(ScoreQuestion {
+        instructions: "How upset is the customer?".into(),
+        criteria: vec!["calm".into(), "annoyed".into(), "furious".into()],
+    })),
+]
+.into();
+
+let d = judge.evaluate(json!("The package arrived with a broken screen."), &questions).await?;
+println!("{:?} {:?} {:?} calibrated: {}", d.noul("damaged")?, d.choice("team")?, d.score("upset")?, d.calibrated);
+```
+</TabItem>
+</Tabs>
+
+A `choice` here needs **at least two options** — the Decisions wire takes 2–255, and a one-option
+choice fails before any request is made, as does a raw question type such as `box`.
+
 ## Where to go next
 
 | page | what it answers |

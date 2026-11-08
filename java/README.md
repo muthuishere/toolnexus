@@ -142,7 +142,9 @@ List<Classifier.BatchResult> rs = c.states("a", "b").evaluate(noul("q", "…"));
 
 - `backend`: `typesafe` (default) · `openrouter` (`typesafe/jev-1.14`) · `cloudflare` (`/ai/run`
   envelope; `${CLOUDFLARE_ACCOUNT_ID}` in the URL expands at call time, errors name it unexpanded)
-  · `vercel` · `custom` (requires `baseUrl` and `supports`). The table is data:
+  · `vercel` · `openai` (OpenAI Decisions API, `POST {baseUrl}/decisions`, `gpt-6-luna`,
+  `OPENAI_API_KEY`; raw questions throw `ClassifierUnsupported`, answers report `calibrated: false`)
+  · `custom` (requires `baseUrl` and `supports`). The table is data:
   `Classifier.BACKENDS`; `.supports(new Classifier.Supports(true))` overrides it per classifier.
 - Images (style `systemone` only): `ContentPart` images in the state are lifted into `assets`
   (cloudflare: data URLs). PNG/JPEG, 280–1568 px a side, ≤ 16 MiB each and 32 MiB per request —
