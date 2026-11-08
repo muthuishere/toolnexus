@@ -134,6 +134,56 @@ defmodule Toolnexus.AcpSeamTest do
     assert Map.take(rec["session/set_model"], ["modelId"]) == fb["expectSetModel"]
   end
 
+  test "liveSwitch: set_mode and set_model on a running client, no restart" do
+    fx = cases()["liveSwitch"]
+    pid = connect!([])
+
+    assert :ok = Acp.set_mode(pid, fx["mode"])
+    assert :ok = Acp.set_model(pid, fx["model"])
+    rec = recorded(pid)
+
+    assert Map.take(rec["session/set_mode"], ["modeId"]) == fx["expectSetMode"]
+    assert rec["session/set_mode"]["sessionId"] == "sess-1"
+
+    assert Map.take(rec["session/set_config_option"], ["configId", "value"]) ==
+             fx["expectSetConfigOption"]
+
+    assert rec["session/set_config_option"]["sessionId"] == "sess-1"
+    assert rec["_counts"]["initialize"] == fx["expectInitializeCount"]
+    assert rec["_counts"]["session/new"] == fx["expectSessionNewCount"]
+  end
+
+  test "liveSwitch: set_model falls back to set_model on a running client" do
+    fx = cases()["liveSwitch"]
+    pid = connect!(env: fx["fallback"]["fakeEnv"])
+
+    assert :ok = Acp.set_model(pid, fx["model"])
+    rec = recorded(pid)
+    assert Map.take(rec["session/set_model"], ["modelId"]) == fx["fallback"]["expectSetModel"]
+  end
+
+  test "liveSwitch: both model requests rejected fails the call only" do
+    pid = connect!(env: %{"TN_FAKE_NO_CONFIG_OPTION" => "1", "TN_FAKE_NO_SET_MODEL" => "1"})
+    assert {:error, {:set_model, "m-2", _e1, _e2}} = Acp.set_model(pid, "m-2")
+    assert {:ok, _} = Acp.prompt(pid, "q")
+  end
+
+  test "liveSwitch: a rejected mode fails only that call" do
+    fx = cases()["liveSwitch"]
+    pid = connect!(env: fx["reject"]["fakeEnv"])
+
+    assert {:error, err} = Acp.set_mode(pid, fx["mode"])
+    assert inspect(err) =~ fx["reject"]["expectErrorContains"]
+    assert {:ok, _} = Acp.prompt(pid, "q")
+  end
+
+  test "liveSwitch: a closed client refuses" do
+    pid = connect!([])
+    Acp.close(pid)
+    assert {:error, _} = Acp.set_mode(pid, "plan")
+    assert {:error, _} = Acp.set_model(pid, "m")
+  end
+
   test "passthrough: bare — mcpServers [] and no _meta keys" do
     bare = cases()["passthrough"]["bareExpect"]
     rec = connect!([]) |> recorded()

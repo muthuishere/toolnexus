@@ -4,7 +4,7 @@
 Records every received request as one JSON line ``{"method", "params"}`` to the file
 named by ``TN_FAKE_REC``. Flags (env): ``TN_FAKE_TOOLUPDATE`` (replay stream.acpToolUpdate.updates), ``TN_FAKE_DRIP`` (thought + chunks spaced in
 time), ``TN_FAKE_NO_CONFIG_OPTION`` (reject session/set_config_option),
-``TN_FAKE_EXIT_ON_PROMPT`` (exit without replying to session/prompt),
+``TN_FAKE_REJECT_MODE`` (reject session/set_mode), ``TN_FAKE_EXIT_ON_PROMPT`` (exit without replying to session/prompt),
 ``TN_FAKE_FS_REQUEST`` (send fs/read_text_file first and require a -32601 reply).
 """
 from __future__ import annotations
@@ -50,6 +50,11 @@ def main() -> None:
                 send({"jsonrpc": "2.0", "id": mid, "result": {}})
         elif method == "session/set_model":
             send({"jsonrpc": "2.0", "id": mid, "result": {}})
+        elif method == "session/set_mode":
+            if os.environ.get("TN_FAKE_REJECT_MODE") == "1":
+                send({"jsonrpc": "2.0", "id": mid, "error": {"code": -32602, "message": "unknown mode"}})
+            else:
+                send({"jsonrpc": "2.0", "id": mid, "result": {}})
         elif method == "session/prompt":
             if os.environ.get("TN_FAKE_EXIT_ON_PROMPT") == "1":
                 sys.exit(0)

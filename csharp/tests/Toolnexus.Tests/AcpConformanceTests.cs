@@ -231,6 +231,82 @@ public class AcpConformanceTests
         finally { File.Delete(rec); }
     }
 
+    // ------------------------------------------------------------------ liveSwitch (#197)
+
+    [Fact]
+    public async Task LiveSwitchChangesModeAndModelWithoutRestart()
+    {
+        var cs = Case("liveSwitch");
+        var mode = cs.GetProperty("mode").GetString()!;
+        var model = cs.GetProperty("model").GetString()!;
+        var rec = Path.GetTempFileName();
+        try
+        {
+            using (var acp = await Start(new() { ["TN_FAKE_REC"] = rec }))
+            {
+                await acp.SetModeAsync(mode);
+                await acp.SetModelAsync(model);
+                // This fake echoes rather than answering "hello"; the turn answering on the
+                // same session (sessionNewCalls=1) is what the case pins.
+                Assert.StartsWith("sessionNewCalls=1;", await acp.PromptAsync("q"));
+            }
+            var recs = Records(rec);
+            Assert.Equal(cs.GetProperty("expectInitializeCount").GetInt32(),
+                recs.Count(r => r["method"]!.GetValue<string>() == "initialize"));
+            Assert.Equal(cs.GetProperty("expectSessionNewCount").GetInt32(),
+                recs.Count(r => r["method"]!.GetValue<string>() == "session/new"));
+            var sm = Params(recs, "session/set_mode")!.AsObject();
+            foreach (var p in cs.GetProperty("expectSetMode").EnumerateObject())
+                Assert.True(DeepEq(p.Value, sm[p.Name]), sm.ToJsonString());
+            Assert.Equal("sess-1", sm["sessionId"]!.GetValue<string>());
+            var sco = Params(recs, "session/set_config_option")!.AsObject();
+            foreach (var p in cs.GetProperty("expectSetConfigOption").EnumerateObject())
+                Assert.True(DeepEq(p.Value, sco[p.Name]), sco.ToJsonString());
+            Assert.Equal("sess-1", sco["sessionId"]!.GetValue<string>());
+            Assert.Null(Params(recs, "session/set_model"));
+        }
+        finally { File.Delete(rec); }
+    }
+
+    [Fact]
+    public async Task LiveSwitchModelFallsBackToSetModel()
+    {
+        var cs = Case("liveSwitch");
+        var fb = cs.GetProperty("fallback");
+        var rec = Path.GetTempFileName();
+        try
+        {
+            var env = Env(fb.GetProperty("fakeEnv"));
+            env["TN_FAKE_REC"] = rec;
+            using (var acp = await Start(env)) await acp.SetModelAsync(cs.GetProperty("model").GetString()!);
+            var sm = Params(Records(rec), "session/set_model")!.AsObject();
+            foreach (var p in fb.GetProperty("expectSetModel").EnumerateObject())
+                Assert.True(DeepEq(p.Value, sm[p.Name]), sm.ToJsonString());
+            Assert.Equal("sess-1", sm["sessionId"]!.GetValue<string>());
+        }
+        finally { File.Delete(rec); }
+    }
+
+    [Fact]
+    public async Task LiveSwitchRejectedModeKeepsClientUsable()
+    {
+        var cs = Case("liveSwitch");
+        var rj = cs.GetProperty("reject");
+        using var acp = await Start(Env(rj.GetProperty("fakeEnv")));
+        var ex = await Assert.ThrowsAnyAsync<Exception>(() => acp.SetModeAsync(cs.GetProperty("mode").GetString()!));
+        Assert.Contains(rj.GetProperty("expectErrorContains").GetString()!, ex.Message);
+        Assert.StartsWith("sessionNewCalls=1;", await acp.PromptAsync("q"));
+    }
+
+    [Fact]
+    public async Task LiveSwitchOnClosedClientFails()
+    {
+        var acp = await Start();
+        acp.Dispose();
+        await Assert.ThrowsAsync<ObjectDisposedException>(() => acp.SetModeAsync("plan"));
+        await Assert.ThrowsAsync<ObjectDisposedException>(() => acp.SetModelAsync("m"));
+    }
+
     // ------------------------------------------------------------------ agentExit / unknownRequest
 
     [Fact]

@@ -21,6 +21,7 @@
 // Conformance flags (conformance/acp-client/cases.json, SPEC §8C), read from the environment
 // and applied on top of any scenario:
 //   TN_FAKE_REC=<file>         append one JSON line {method, params} per received request
+//   TN_FAKE_REJECT_MODE=1      reject session/set_mode (-32602 "unknown mode")
 //   TN_FAKE_NO_CONFIG_OPTION=1 reject session/set_config_option (-32601) so set_model is used
 //   TN_FAKE_DRIP=1             on session/prompt: a thought, then three chunks 200ms apart
 //   TN_FAKE_TOOLUPDATE=1       on session/prompt: stream.acpToolUpdate's updates (tool_call, then
@@ -257,7 +258,13 @@ while ((line = await reader.ReadLineAsync().ConfigureAwait(false)) is not null)
                 break;
 
             case "session/set_mode":
-                Reply(IdValue(idEl), new Dictionary<string, object?>());
+                if (Flag("TN_FAKE_REJECT_MODE"))
+                    Send(new Dictionary<string, object?>
+                    {
+                        ["jsonrpc"] = "2.0", ["id"] = IdValue(idEl),
+                        ["error"] = new Dictionary<string, object?> { ["code"] = -32602, ["message"] = "unknown mode" },
+                    });
+                else Reply(IdValue(idEl), new Dictionary<string, object?>());
                 break;
 
             case "session/set_config_option":

@@ -8,6 +8,16 @@ GitHub Releases `vX.Y.Z` via `release.yml` (see `PUBLISHING.md`).
 
 ## Unreleased
 
+**Change an ACP agent's mode or model without restarting it (#197).** A running ACP client now has
+`setMode(mode)` and `setModel(model)` (Go `SetMode(ctx, mode)` / `SetModel(ctx, model)`, Python
+`set_mode` / `set_model`, C# `SetModeAsync` / `SetModelAsync`, Clojure `set-mode!` / `set-model!`).
+Before, the only way to switch mode (e.g. a shift+tab plan/act toggle) was to close the agent and
+`loadACP` again, which is slow and loses the session. `setMode` sends `session/set_mode`; `setModel`
+does exactly what the load-time `model` option does — `session/set_config_option {configId:"model"}`,
+then `session/set_model` if the agent rejects that. Same process, same session; values pass through
+unvalidated and no vendor is named. If the agent rejects the change, only that call fails and the
+client keeps working. All eight ports; SPEC §8C, conformance `liveSwitch`.
+
 **ACP tool rows now show their arguments and full title (#188).** Agents such as the Claude ACP
 adapter send a tool's `rawInput` (file path, command) and its full title only on a later
 `tool_call_update`; toolnexus read `rawInput` only from the first `tool_call`, so a host saw bare

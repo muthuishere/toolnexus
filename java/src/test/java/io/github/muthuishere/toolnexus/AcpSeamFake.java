@@ -16,7 +16,7 @@ import java.util.Map;
  * The fake ACP agent {@code AcpSeamConformanceTest} spawns (SPEC §8C,
  * {@code conformance/acp-client/cases.json}). Records each received request as
  * {@code <method> <params-json>} lines to {@code TN_FAKE_REC} and honours TN_FAKE_DRIP,
- * TN_FAKE_TOOLUPDATE, TN_FAKE_NO_CONFIG_OPTION, TN_FAKE_EXIT_ON_PROMPT and TN_FAKE_FS_REQUEST.
+ * TN_FAKE_TOOLUPDATE, TN_FAKE_NO_CONFIG_OPTION, TN_FAKE_REJECT_MODE, TN_FAKE_EXIT_ON_PROMPT and TN_FAKE_FS_REQUEST.
  */
 public final class AcpSeamFake {
     private AcpSeamFake() {}
@@ -81,6 +81,13 @@ public final class AcpSeamFake {
                     }
                 }
                 case "session/set_model" -> reply(id, Map.of());
+                case "session/set_mode" -> {
+                    if (on("TN_FAKE_REJECT_MODE")) {
+                        send(obj("jsonrpc", "2.0", "id", id, "error", obj("code", -32602, "message", "unknown mode")));
+                    } else {
+                        reply(id, Map.of());
+                    }
+                }
                 case "session/prompt" -> {
                     if (on("TN_FAKE_EXIT_ON_PROMPT")) System.exit(3);
                     if (on("TN_FAKE_DRIP")) {

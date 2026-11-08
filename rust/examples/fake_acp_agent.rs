@@ -12,6 +12,7 @@
 //! session/new rejects a relative cwd with -32602.
 //! Conformance flags (conformance/acp-client/cases.json), read from the env:
 //!   TN_FAKE_RECORD=<file>     append every received request as `{method,params}` JSON lines
+//!   TN_FAKE_REJECT_MODE       reject session/set_mode with -32602 "unknown mode"
 //!   TN_FAKE_NO_CONFIG_OPTION  reject session/set_config_option (set_model is accepted)
 //!   TN_FAKE_EXIT_ON_PROMPT    exit without replying on session/prompt
 //!   TN_FAKE_FS_REQUEST        on session/prompt ask fs/read_text_file first; answer "ok"
@@ -147,6 +148,9 @@ fn main() {
                     );
                 }
             }
+            "session/set_mode" if flag("TN_FAKE_REJECT_MODE") => send(
+                serde_json::json!({"jsonrpc":"2.0","id":id,"error":{"code":-32602,"message":"unknown mode"}}),
+            ),
             "session/set_mode" => send(serde_json::json!({"jsonrpc":"2.0","id":id,"result":{}})),
             "session/prompt" => {
                 let text = msg

@@ -3744,6 +3744,22 @@ written by the caller on top of them. No public API names a vendor. Status: **al
   {sessionId, modelId}`; both failing fails `loadACP`. toolnexus never lists or validates models.
 - `args` and `env` reach the spawned agent untouched; `env` values are never logged.
 
+Changing mode or model on a **running** client (#197) — no restart, same process, same `sessionId`:
+
+- **`setMode(mode)`** — sends `session/set_mode {sessionId, modeId: mode}` (the same request the
+  `mode` option sends once at load). The agent's error fails the call; the client stays usable.
+- **`setModel(model)`** — exactly the `model` option's logic: `session/set_config_option
+  {sessionId, configId:"model", value: model}`, and if the agent rejects that, `session/set_model
+  {sessionId, modelId: model}`; both failing fails the call (both errors in the message), the client
+  stays usable.
+- Values pass through unchanged — toolnexus never lists or validates modes or models. The request is
+  sent at once, not queued behind a running turn; when the change takes effect is the agent's call.
+  On a closed client both fail with the closed-client error.
+- Idiom: golang `SetMode(ctx, mode)` / `SetModel(ctx, model)`; js `setMode` / `setModel` (async);
+  python `set_mode` / `set_model` (sync, like its `generate`); java `setMode` / `setModel`; csharp `SetModeAsync` /
+  `SetModelAsync`; elixir `set_mode/2` / `set_model/2` (`:ok | {:error, reason}`); clojure
+  `set-mode!` / `set-model!`; rust `set_mode` / `set_model` (async, `Result`).
+
 Wire behaviour:
 
 - `initialize` sends `clientCapabilities {fs:{readTextFile:false,writeTextFile:false},terminal:false}`
@@ -3783,7 +3799,7 @@ transports and reply parsing, prompt preambles or system hints, permission allow
 vendor tool titles, isolation flags, stdio↔HTTP bridges, model lists.
 
 Conformance: `conformance/acp-client/cases.json` — `stream.inProcess`, `stream.acpDrip`,
-`passthrough`, `agentExit`, `unknownRequest`, `asMcpServer`.
+`passthrough`, `liveSwitch`, `agentExit`, `unknownRequest`, `asMcpServer`.
 
 ## 9. Go CLI (`toolnexus`)
 

@@ -26,7 +26,7 @@
 #   seam        - conformance/acp-client/cases.json: records the params of
 #                 initialize / session/new / set_config_option / set_model and
 #                 replies to a prompt with them as JSON, honouring the fakeEnv
-#                 flags TN_FAKE_DRIP, TN_FAKE_NO_CONFIG_OPTION,
+#                 flags TN_FAKE_DRIP, TN_FAKE_NO_CONFIG_OPTION, TN_FAKE_REJECT_MODE,
 #                 TN_FAKE_EXIT_ON_PROMPT and TN_FAKE_FS_REQUEST.
 #
 # Launch (Jason comes from the project's build):
@@ -74,7 +74,16 @@ defmodule FakeAcpServer do
   end
 
   defp handle("seam", %{"method" => "session/set_model", "id" => id} = msg, state) do
-    reply(id, %{})
+    if System.get_env("TN_FAKE_NO_SET_MODEL") == "1" do
+      send_msg(%{
+        "jsonrpc" => "2.0",
+        "id" => id,
+        "error" => %{"code" => -32601, "message" => "Method not found"}
+      })
+    else
+      reply(id, %{})
+    end
+
     record(state, "session/set_model", msg)
   end
 
@@ -84,9 +93,18 @@ defmodule FakeAcpServer do
     %{state | new_count: state.new_count + 1, new_params: msg["params"] || %{}}
   end
 
-  defp handle(_scenario, %{"method" => "session/set_mode", "id" => id}, state) do
-    reply(id, %{})
-    state
+  defp handle(_scenario, %{"method" => "session/set_mode", "id" => id} = msg, state) do
+    if System.get_env("TN_FAKE_REJECT_MODE") == "1" do
+      send_msg(%{
+        "jsonrpc" => "2.0",
+        "id" => id,
+        "error" => %{"code" => -32602, "message" => "unknown mode"}
+      })
+    else
+      reply(id, %{})
+    end
+
+    record(state, "session/set_mode", msg)
   end
 
   defp handle(scenario, %{"method" => "session/prompt", "id" => id, "params" => params}, state) do
@@ -108,7 +126,11 @@ defmodule FakeAcpServer do
 
   defp handle(_scenario, _msg, state), do: state
 
-  defp record(state, method, msg), do: %{state | rec: Map.put(state.rec, method, msg["params"])}
+  # Last params per method, plus "_counts" — how many times each was received.
+  defp record(state, method, msg) do
+    counts = Map.update(state.rec["_counts"] || %{}, method, 1, &(&1 + 1))
+    %{state | rec: state.rec |> Map.put(method, msg["params"]) |> Map.put("_counts", counts)}
+  end
 
   # ---- scenarios --------------------------------------------------------
 
