@@ -2,7 +2,7 @@
 //   toolnexus = "0.25"
 //   tokio = { version = "1", features = ["full"] }
 //   serde_json = "1"
-// run: cargo run -- python3 fake_cli.py      (any CLI that reads stdin and prints a reply)
+// run: cargo run -- python3 tools/mock-llm/fake_cli.py      (any CLI that reads stdin and prints a reply)
 mod oneshot;
 
 use serde_json::json;
