@@ -522,7 +522,7 @@ export const A2E_STYLE: MediaStyle & { _doc?: string } = {
 
 /**
  * Built-in CLI presets for {@link loadMediaStyle} (ADR 0042): media through a locally installed,
- * logged-in CLI on the user's own subscription, no API key. The `*Mock` twins behave the same
+ * logged-in CLI: the vendor's official CLI in its documented headless mode, signed in by the user; the provider's terms apply. The `*Mock` twins behave the same
  * (name, verbs, args, prompt folding, errors) but never start a process and return a fixed file.
  */
 export const MediaStyle = {

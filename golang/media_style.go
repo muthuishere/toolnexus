@@ -82,7 +82,7 @@ type MediaPoll struct {
 }
 
 // Built-in CLI presets for LoadMediaStyle (ADR 0042): media through a locally
-// installed, logged-in CLI on the user's own subscription, no API key.
+// installed CLI: the vendor's official CLI in its documented headless mode, signed in by the user; the provider's terms apply.
 const (
 	// MediaStyleXaiGrokCli drives the `grok` CLI: image and video.
 	MediaStyleXaiGrokCli = "xai-grok-cli"

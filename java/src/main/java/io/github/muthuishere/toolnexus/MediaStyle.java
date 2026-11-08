@@ -4,7 +4,7 @@ import java.util.Map;
 
 /**
  * Built-in CLI presets for {@link Media#loadMediaStyle(String, Media.Config)} (ADR 0042): media
- * through a locally installed, logged-in CLI on the user's own subscription, no API key. The
+ * through a locally installed, logged-in CLI: the vendor's official CLI in its documented headless mode, signed in by the user; the provider's terms apply. The
  * string values are the cross-language contract.
  */
 public final class MediaStyle {

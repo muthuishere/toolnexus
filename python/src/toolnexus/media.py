@@ -894,8 +894,8 @@ class MediaStyle(dict):
     given to :func:`load_media_style` configures the client behind it (model, command, loop,
     gather).
 
-    Built-in CLI presets (ADR 0042) — media through a locally installed, logged-in CLI on the
-    user's own subscription, no API key:
+    Built-in CLI presets (ADR 0042) — media through the vendor's official CLI in its documented
+    headless mode, installed and signed in by the user; the provider's terms apply:
 
     - ``MediaStyle.XAI_GROK_CLI`` (``"xai-grok-cli"``): the ``grok`` CLI, image and video;
     - ``MediaStyle.OPENAI_CODEX_CLI`` (``"openai-codex-cli"``): the ``codex`` CLI, image;
