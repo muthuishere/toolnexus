@@ -113,6 +113,7 @@ pub type UpdateHandler = Arc<dyn Fn(&Value) + Send + Sync>;
 /// One event of a streamed turn ([`AcpClient::generate_stream`]). Tool events
 /// carry `via: "acp"`: the AGENT ran these tools, a host loop must not.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum AcpStreamEvent {
     /// A reply text delta (`agent_message_chunk` only).
     Text { delta: String },
