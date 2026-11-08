@@ -180,7 +180,7 @@ public static class Home
 
     /// <summary>A valid note slug: lowercase, digits, '.', '_', '-'; no separators; no "..".</summary>
     public static bool IsValidNoteSlug(string slug)
-        => System.Text.RegularExpressions.Regex.IsMatch(slug, "^[a-z0-9][a-z0-9._-]{0,63}$")
+        => System.Text.RegularExpressions.Regex.IsMatch(slug, @"\A[a-z0-9][a-z0-9._-]{0,63}\z")
            && !slug.Contains("..", StringComparison.Ordinal);
 
     /// <summary>Per resolved absolute path: one lock, so read-modify-write never interleaves in-process.</summary>
@@ -292,10 +292,18 @@ public static class Home
                 var name = Path.GetFileName(path);
                 if (!name.EndsWith(".md", StringComparison.Ordinal)) continue;
                 var slug = name[..^3];
-                if (!IsValidNoteSlug(slug) || !File.Exists(path)) continue;
-                var fi = new FileInfo(path);
-                if (fi.Attributes.HasFlag(FileAttributes.Directory)) continue;
-                rows.Add((slug, fi.Length));
+                if (!IsValidNoteSlug(slug)) continue;
+                // Only REGULAR files, judged without following symlinks (lstat): a symlink (to a
+                // file, or dangling) and a directory are skipped, never an error (§7E).
+                try
+                {
+                    var fi = new FileInfo(path);
+                    if (!fi.Exists || fi.LinkTarget != null
+                        || (fi.Attributes & (FileAttributes.Directory | FileAttributes.ReparsePoint)) != 0) continue;
+                    rows.Add((slug, fi.Length));
+                }
+                catch (IOException) { }
+                catch (UnauthorizedAccessException) { }
             }
         }
         rows.Sort((x, y) => string.CompareOrdinal(x.Slug, y.Slug));
@@ -309,7 +317,7 @@ public static class Home
     /// </summary>
     private static ToolResult? ReadModifyWrite(string file, string action, string text, string? with)
     {
-        var key = Path.GetFullPath(file);
+        var key = RealPath(file);
         lock (PathLocks.GetOrAdd(key, _ => new object()))
         {
             var cur = File.Exists(file) ? File.ReadAllText(file) : "";
@@ -333,6 +341,34 @@ public static class Home
             AtomicWrite(file, next);
             return null;
         }
+    }
+
+    /// <summary>
+    /// The lock key (§7E): the REAL path — every symlink along it resolved, component by component;
+    /// components that do not exist yet (the file, or its directories) are appended as-is to the
+    /// nearest existing, resolved ancestor.
+    /// </summary>
+    internal static string RealPath(string path, int depth = 0)
+    {
+        var full = Path.GetFullPath(path);
+        if (depth > 32) return full;
+        var root = Path.GetPathRoot(full) ?? "";
+        var cur = root;
+        foreach (var part in full[root.Length..].Split(new[] { Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar }, StringSplitOptions.RemoveEmptyEntries))
+        {
+            var next = Path.Combine(cur, part);
+            try
+            {
+                FileSystemInfo fi = new FileInfo(next);
+                if (fi.LinkTarget == null && Directory.Exists(next)) fi = new DirectoryInfo(next);
+                if (fi.LinkTarget != null && fi.ResolveLinkTarget(returnFinalTarget: true) is { } target)
+                    next = RealPath(target.FullName, depth + 1);
+            }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+            cur = next;
+        }
+        return cur;
     }
 
     /// <summary>Atomic replace: temp file in the same dir, flushed to disk (fsync), renamed over the
@@ -595,6 +631,9 @@ public static class Home
     {
         Dreams.TryGetValue(agent, out var dream);
         var registry = agent.Registry();
+        // Checked BEFORE anything is spawned or scheduled: a merge would silently shadow one agent.
+        if (dream != null && registry.ContainsKey(dream.Item1.Name))
+            throw new InvalidOperationException($"startAgent: dreamer name collision: {dream.Item1.Name} is already registered");
         if (dream != null)
         {
             var merged = dream.Item1.Registry();
@@ -608,7 +647,12 @@ public static class Home
         if (dream != null)
         {
             var ds = runtime.Spawn(runtime.Root, dream.Item1.Name);
-            if (ds.Error != null) throw new InvalidOperationException(ds.Error);
+            if (ds.Error != null)
+            {
+                // No heartbeat is armed yet (StartedAgent arms it); close the runtime so nothing leaks.
+                runtime.CloseAsync(runtime.Root).GetAwaiter().GetResult();
+                throw new InvalidOperationException(ds.Error);
+            }
             dreamHandle = ds.Handle;
         }
         var clock = rtOpts.Clock ?? TimeProvider.System;

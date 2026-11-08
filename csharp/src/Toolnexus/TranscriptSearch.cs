@@ -61,9 +61,10 @@ public static class TranscriptSearch
             var query = args.TryGetValue("query", out var q) && q is string qs ? Normalize(qs) : "";
             if (query.Length == 0) return ToolResult.Error("query is required");
             var limit = maxResults;
-            if (args.TryGetValue("limit", out var l) && l != null)
+            if (args.TryGetValue("limit", out var l))
             {
-                if (!TryInteger(l, out var n) || n < 1) return ToolResult.Error("limit must be an integer >= 1");
+                // Present-but-null is an error, not "absent" (§7E).
+                if (l == null || !TryInteger(l, out var n) || n < 1) return ToolResult.Error("limit must be an integer >= 1");
                 limit = (int)Math.Min(n, maxResults);
             }
             List<string> ids = args.TryGetValue("conversationId", out var c) && c is string cid
@@ -127,7 +128,11 @@ public static class TranscriptSearch
             var type = part.TryGetValue("type", out var t) ? t as string : null;
             if (type == "text" && part.TryGetValue("text", out var tx) && tx is string txs) outp.Add(txs);
             else if (type == "tool_use")
-                outp.Add(Json.Stringify(SortKeys(Json.ParseLoose(Json.Stringify(part.TryGetValue("input", out var inp) && inp != null ? inp : new Dictionary<string, object?>())))));
+                {
+                var sb = new System.Text.StringBuilder();
+                WriteJson(sb, SortKeys(Json.ParseLoose(Json.Stringify(part.TryGetValue("input", out var inp) && inp != null ? inp : new Dictionary<string, object?>()))));
+                outp.Add(sb.ToString());
+            }
             else if (type == "tool_result") outp.AddRange(PartsText(part.TryGetValue("content", out var rc) ? rc : null));
         }
         return outp;
@@ -151,6 +156,72 @@ public static class TranscriptSearch
             return a;
         }
         return v;
+    }
+
+    /// <summary>
+    /// Compact JSON with JSON.stringify's string escaping (§7E): only <c>"</c>, <c>\\</c> and
+    /// control characters are escaped — non-ASCII, U+2028/U+2029 and <c>&lt; &gt; &amp;</c> are
+    /// emitted as-is (System.Text.Json's encoders escape some of these).
+    /// </summary>
+    private static void WriteJson(System.Text.StringBuilder sb, object? v)
+    {
+        switch (v)
+        {
+            case string s:
+                WriteString(sb, s);
+                break;
+            case IDictionary<string, object?> d:
+                sb.Append('{');
+                var first = true;
+                foreach (var (k, x) in d)
+                {
+                    if (!first) sb.Append(',');
+                    first = false;
+                    WriteString(sb, k);
+                    sb.Append(':');
+                    WriteJson(sb, x);
+                }
+                sb.Append('}');
+                break;
+            case IList<object?> l:
+                sb.Append('[');
+                for (var i = 0; i < l.Count; i++)
+                {
+                    if (i > 0) sb.Append(',');
+                    WriteJson(sb, l[i]);
+                }
+                sb.Append(']');
+                break;
+            default:
+                sb.Append(Json.Stringify(v)); // numbers, booleans, null
+                break;
+        }
+    }
+
+    private static void WriteString(System.Text.StringBuilder sb, string s)
+    {
+        sb.Append('"');
+        for (var i = 0; i < s.Length; i++)
+        {
+            var c = s[i];
+            switch (c)
+            {
+                case '"': sb.Append("\\\""); break;
+                case '\\': sb.Append("\\\\"); break;
+                case '\b': sb.Append("\\b"); break;
+                case '\f': sb.Append("\\f"); break;
+                case '\n': sb.Append("\\n"); break;
+                case '\r': sb.Append("\\r"); break;
+                case '\t': sb.Append("\\t"); break;
+                default:
+                    if (c < 0x20) sb.Append("\\u").Append(((int)c).ToString("x4"));
+                    else if (char.IsHighSurrogate(c) && i + 1 < s.Length && char.IsLowSurrogate(s[i + 1])) { sb.Append(c).Append(s[++i]); }
+                    else if (char.IsSurrogate(c)) sb.Append("\\u").Append(((int)c).ToString("x4")); // lone surrogate, as JSON.stringify
+                    else sb.Append(c);
+                    break;
+            }
+        }
+        sb.Append('"');
     }
 
     private static int ByCodePoint(string a, string b)

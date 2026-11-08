@@ -290,7 +290,11 @@ public class MemoryHierarchyTests
         var opts = new TranscriptSearch.Options();
         if (c["options"]?["snippetChars"] is { } sc) opts.SnippetChars = sc.GetValue<int>();
         if (c["options"]?["maxResults"] is { } mr) opts.MaxResults = mr.GetValue<int>();
-        var r = await TranscriptSearch.Tool(MhStore(), opts).ExecuteAsync(Args(c["args"]!));
+        var store = c["emptyStore"]?.GetValue<bool>() == true ? new StubStore(new JsonArray()) : MhStore();
+        var args = Args(c["args"]!);
+        if (c["args"]!.AsObject().ContainsKey("limit") && c["args"]!["limit"] == null)
+            Assert.True(args.ContainsKey("limit") && args["limit"] == null, "null-limit must pass a real null");
+        var r = await TranscriptSearch.Tool(store, opts).ExecuteAsync(args);
         Assert.Equal((c["expect"]!["output"]!.GetValue<string>(), c["expect"]!["isError"]!.GetValue<bool>()), (r.Output, r.IsError));
     }
 
@@ -335,6 +339,52 @@ public class MemoryHierarchyTests
             var lines = File.ReadAllText(Path.Combine(dir, "MEMORY.md")).TrimEnd().Split('\n');
             Assert.Equal(w["expectEntries"]!.GetValue<int>(), lines.Length);
             Assert.Equal(w["expectEntries"]!.GetValue<int>(), lines.Distinct().Count());
+        }
+        finally { Directory.Delete(dir, true); }
+    }
+
+    [Fact]
+    public async Task G4_ConcurrentAddsViaSymlinkKeepEveryEntry()
+    {
+        var w = MH["writeSafety"]!["concurrentAddsViaSymlink"]!;
+        var addsEach = w["addsEach"]!.GetValue<int>();
+        var dir = MkHome(new Dictionary<string, string>());
+        var link = dir + "-link";
+        try
+        {
+            try { Directory.CreateSymbolicLink(link, dir); }
+            catch (Exception) { return; } // symlinks unavailable: skip
+            var tools = new[] { Home.MemoryTool(link), Home.MemoryTool(dir) };
+            await Task.WhenAll(tools.SelectMany((t, wi) => Enumerable.Range(0, addsEach)
+                .Select(n => Task.Run(() => t.ExecuteAsync(new Dictionary<string, object?> { ["action"] = "add", ["text"] = $"w{wi}-{n}" })))));
+            var lines = File.ReadAllText(Path.Combine(dir, w["file"]!.GetValue<string>())).TrimEnd().Split('\n');
+            Assert.Equal(w["expectEntries"]!.GetValue<int>(), lines.Distinct().Count());
+            Assert.Equal(w["expectEntries"]!.GetValue<int>(), lines.Length);
+        }
+        finally
+        {
+            if (Directory.Exists(link) || new DirectoryInfo(link).LinkTarget != null) Directory.Delete(link);
+            Directory.Delete(dir, true);
+        }
+    }
+
+    [Fact]
+    public async Task G2_ListSkipsNonRegular()
+    {
+        var f = MH["memoryTool"]!["listSkipsNonRegular"]!;
+        var dir = MkHome(Files(f["regular"]));
+        try
+        {
+            try
+            {
+                foreach (var (l, target) in f["symlinks"]!.AsObject())
+                    File.CreateSymbolicLink(Path.Combine(dir, l), target!.GetValue<string>());
+            }
+            catch (Exception) { return; } // symlinks unavailable: skip
+            foreach (var d in f["dirs"]!.AsArray()) Directory.CreateDirectory(Path.Combine(dir, d!.GetValue<string>()));
+            var r = await Home.MemoryTool(dir, notes: true).ExecuteAsync(new Dictionary<string, object?> { ["action"] = "list" });
+            Assert.False(r.IsError, r.Output);
+            Assert.Equal(f["expectList"]!.GetValue<string>(), r.Output);
         }
         finally { Directory.Delete(dir, true); }
     }
@@ -478,6 +528,23 @@ public class MemoryHierarchyTests
             await started.StopAsync();
             lock (onBeat) Assert.Empty(onBeat);
             Assert.Empty(started.Beats);
+        }
+        finally { Directory.Delete(home, true); }
+    }
+
+    [Fact]
+    public void D6_DreamerNameCollisionThrowsBeforeSpawning()
+    {
+        var e = DR["expect"]!["D6_dreamerNameCollision"]!;
+        var name = e["personaName"]!.GetValue<string>();
+        var h = new DreamMockHandler(DR["mockLLM"]!["scripts"]!);
+        var home = MkHome(Files(DR["home"]));
+        try
+        {
+            var persona = Home.FromDir(home, new Home.FromDirOptions { Name = name, Model = "m-quiet", Dream = new Home.DreamOptions { EveryMs = 50, Store = DrStore() } });
+            persona.Spec.Team = new List<Toolnexus.Agents.Agent> { new($"{name}-dreamer", new AgentSpec { Does = "a team member" }) };
+            var ex = Assert.Throws<InvalidOperationException>(() => Home.StartAgent(persona, DrOpts(h, new VirtualClock()), everyMs: 50));
+            Assert.Equal(e["error"]!.GetValue<string>(), ex.Message);
         }
         finally { Directory.Delete(home, true); }
     }
