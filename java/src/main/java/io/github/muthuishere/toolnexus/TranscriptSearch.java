@@ -72,7 +72,7 @@ public final class TranscriptSearch {
                 if (query.isEmpty()) return ToolResult.error("query is required");
                 int limit = maxResults;
                 Object lv = args.get("limit");
-                if (lv != null) {
+                if (args.containsKey("limit")) { // present-but-null is an error, not "absent" (§7E)
                     if (!(lv instanceof Number n) || n.doubleValue() != Math.rint(n.doubleValue())
                             || n.doubleValue() < 1) {
                         return ToolResult.error("limit must be an integer >= 1");

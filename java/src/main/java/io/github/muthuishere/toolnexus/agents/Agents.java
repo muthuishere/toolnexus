@@ -450,15 +450,23 @@ public final class Agents {
             WRITE_LOCKS = new java.util.concurrent.ConcurrentHashMap<>();
 
     private static java.util.concurrent.locks.ReentrantLock lockFor(Path file) {
+        return WRITE_LOCKS.computeIfAbsent(lockKey(file), k -> new java.util.concurrent.locks.ReentrantLock());
+    }
+
+    /** The lock key (SPEC §7E): the file's REAL path (symlinks resolved). When the file does not
+     * exist yet, the nearest existing ancestor is resolved and the rest appended; the normalized
+     * absolute path is the last resort. */
+    static Path lockKey(Path file) {
         Path abs = file.toAbsolutePath().normalize();
-        Path parent = abs.getParent();
         try {
-            // resolve symlinks in the directory when it exists, so two spellings share one lock
-            if (parent != null && Files.exists(parent)) abs = parent.toRealPath().resolve(abs.getFileName());
+            if (Files.exists(abs)) return abs.toRealPath();
+            Path anc = abs.getParent();
+            while (anc != null && !Files.exists(anc)) anc = anc.getParent();
+            if (anc != null) return anc.toRealPath().resolve(anc.relativize(abs));
         } catch (IOException ignored) {
             // fall back to the normalized absolute path
         }
-        return WRITE_LOCKS.computeIfAbsent(abs, k -> new java.util.concurrent.locks.ReentrantLock());
+        return abs;
     }
 
     /** Replace the FIRST occurrence of {@code find} (SPEC §7E) — never all of them. */
@@ -639,8 +647,17 @@ public final class Agents {
                     String n = p.getFileName().toString();
                     if (!n.endsWith(".md")) continue;
                     String slug = n.substring(0, n.length() - 3);
-                    if (!validSlug(slug) || !Files.isRegularFile(p)) continue;
-                    rows.add(Map.entry(slug, Files.size(p)));
+                    if (!validSlug(slug)) continue;
+                    // lstat: a symlink (dangling or not) or a directory is skipped, never an error (§7E)
+                    java.nio.file.attribute.BasicFileAttributes at;
+                    try {
+                        at = Files.readAttributes(p, java.nio.file.attribute.BasicFileAttributes.class,
+                                java.nio.file.LinkOption.NOFOLLOW_LINKS);
+                    } catch (IOException e) {
+                        continue;
+                    }
+                    if (!at.isRegularFile()) continue;
+                    rows.add(Map.entry(slug, at.size()));
                 }
             } catch (IOException e) {
                 throw new UncheckedIOException(e);
@@ -751,6 +768,11 @@ public final class Agents {
                                           Consumer<String> onReport) {
         Map<String, AgentDef> registry;
         if (a.dreamer != null) {
+            // checked before anything is spawned or scheduled: never let one shadow the other
+            if (a.registry().containsKey(a.dreamer.name)) {
+                throw new IllegalStateException("startAgent: dreamer name collision: " + a.dreamer.name
+                        + " is already registered");
+            }
             registry = a.dreamer.registry();
             registry.putAll(a.registry());
         } else {
@@ -766,7 +788,18 @@ public final class Agents {
             // fromDir(…, dream): the dreamer runs on the SAME runtime on its own interval. Its
             // replies are housekeeping — they never reach onReport; what it did is in memory/log.md.
             AgentRuntime.Spawn dsp = rt.spawn(rt.root, a.dreamer.name);
-            if (dsp.error() != null) throw new IllegalStateException(dsp.error());
+            if (dsp.error() != null) {
+                // never leak the persona's heartbeat when the dreamer cannot start
+                for (AutoCloseable c : beats) {
+                    try {
+                        c.close();
+                    } catch (Exception ignored) {
+                        // keep closing
+                    }
+                }
+                rt.close(rt.root);
+                throw new IllegalStateException(dsp.error());
+            }
             beats.add(heartbeat(rt, dsp.handle(), a.dreamEveryMs, null));
         }
         AutoCloseable all = beats.isEmpty() ? null : () -> {

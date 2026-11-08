@@ -244,6 +244,23 @@ class MemoryHierarchyTest {
     }
 
     @Test
+    void g2ListSkipsNonRegular() throws IOException {
+        Map<String, Object> cfg = m(m(MH, "memoryTool"), "listSkipsNonRegular");
+        Path dir = mkHome(m(cfg, "regular"));
+        try {
+            for (Map.Entry<String, Object> e : m(cfg, "symlinks").entrySet()) {
+                Files.createSymbolicLink(dir.resolve(e.getKey()), Path.of((String) e.getValue()));
+            }
+        } catch (UnsupportedOperationException | IOException e) {
+            org.junit.jupiter.api.Assumptions.abort("symlinks unavailable: " + e);
+        }
+        for (Object d : l(cfg, "dirs")) Files.createDirectories(dir.resolve((String) d));
+        ToolResult r = memoryTool(dir, true).execute(Map.of("action", "list"), null);
+        assertFalse(r.isError(), r.output());
+        assertEquals(s(cfg, "expectList"), r.output());
+    }
+
+    @Test
     void g2FromDirNotesWiresNotesTool() throws IOException {
         Path dir = mkHome(Map.of("SOUL.md", "S"));
         Tool mem = agentFromDir(dir, new Agents.AgentSpec().notes(true)).spec.tools.stream()
@@ -277,8 +294,11 @@ class MemoryHierarchyTest {
                     if (co.get("maxResults") != null) opts = opts.maxResults(((Number) co.get("maxResults")).intValue());
                     if (co.get("snippetChars") != null) opts = opts.snippetChars(((Number) co.get("snippetChars")).intValue());
                 }
-                Tool t = TranscriptSearch.transcriptSearchTool(new StubStore(mhConversations()), opts);
-                assertEquals(m(c, "expect"), res(t.execute(m(c, "args"), null)));
+                List<Object> convs = Boolean.TRUE.equals(c.get("emptyStore")) ? List.of() : mhConversations();
+                Tool t = TranscriptSearch.transcriptSearchTool(new StubStore(convs), opts);
+                // the parsed fixture keeps a JSON null as a present key (null-limit case)
+                Map<String, Object> args = new LinkedHashMap<>(m(c, "args"));
+                assertEquals(m(c, "expect"), res(t.execute(args, null)));
             });
         });
     }
@@ -338,6 +358,44 @@ class MemoryHierarchyTest {
         String[] lines = Files.readString(dir.resolve("MEMORY.md")).stripTrailing().split("\n");
         assertEquals(expect, lines.length);
         assertEquals(expect, new HashSet<>(List.of(lines)).size());
+    }
+
+    @Test
+    void g4ConcurrentAddsViaSymlink() throws Exception {
+        Map<String, Object> cfg = m(m(MH, "writeSafety"), "concurrentAddsViaSymlink");
+        int writers = ((Number) cfg.get("writers")).intValue();
+        int adds = ((Number) cfg.get("addsEach")).intValue();
+        int expect = ((Number) cfg.get("expectEntries")).intValue();
+        Path dir = mkHome(Map.of());
+        Path link = dir.resolveSibling(dir.getFileName() + "-link");
+        try {
+            Files.createSymbolicLink(link, dir);
+        } catch (UnsupportedOperationException | IOException e) {
+            org.junit.jupiter.api.Assumptions.abort("symlinks unavailable: " + e);
+        }
+        List<Tool> tools = List.of(memoryTool(link), memoryTool(dir));
+        CountDownLatch go = new CountDownLatch(1);
+        List<Thread> threads = new ArrayList<>();
+        for (int w = 0; w < writers; w++) {
+            for (int n = 0; n < adds; n++) {
+                Tool t = tools.get(w % tools.size());
+                String text = "w" + w + "-" + n;
+                threads.add(Thread.startVirtualThread(() -> {
+                    try {
+                        go.await();
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                    }
+                    t.execute(Map.of("action", "add", "text", text), null);
+                }));
+            }
+        }
+        go.countDown();
+        for (Thread th : threads) th.join();
+        String[] lines = Files.readString(dir.resolve("MEMORY.md")).stripTrailing().split("\n");
+        assertEquals(expect, lines.length);
+        assertEquals(expect, new HashSet<>(List.of(lines)).size());
+        Files.delete(link);
     }
 
     @Test
@@ -574,6 +632,21 @@ class MemoryHierarchyTest {
         assertFalse(started.rt.trace().stream().anyMatch(x -> x.contains("dreamer")));
     }
 
+    @Test
+    void d6DreamerNameCollision() throws IOException {
+        Map<String, Object> e = m(m(DR, "expect"), "D6_dreamerNameCollision");
+        String name = s(e, "personaName");
+        Path home = mkHome(m(DR, "home"));
+        VirtualClock clock = new VirtualClock();
+        Agents.Agent clash = Agents.agent(name + "-dreamer", new Agents.AgentSpec().does("team member"));
+        Agents.Agent persona = agentFromDir(home, new Agents.AgentSpec().name(name).model("m-quiet")
+                .team(clash).dream(new Agents.Dream(50, store())));
+        IllegalStateException err = assertThrows(IllegalStateException.class,
+                () -> startAgent(persona, rt().clock(clock), 50L, null));
+        assertEquals(s(e, "error"), err.getMessage());
+        assertEquals(0, clock.scheduledCount(), "nothing scheduled");
+    }
+
     static void waitUntil(BooleanSupplier cond, long timeoutMs) {
         long deadline = System.currentTimeMillis() + timeoutMs;
         while (System.currentTimeMillis() < deadline && !cond.getAsBoolean()) {
@@ -594,6 +667,8 @@ class MemoryHierarchyTest {
         private final AtomicLong ids = new AtomicLong();
 
         @Override public long millis() { return now.get(); }
+
+        long scheduledCount() { return ids.get(); }
 
         @Override public AutoCloseable schedule(long everyMs, Runnable task) {
             long id = ids.incrementAndGet();
