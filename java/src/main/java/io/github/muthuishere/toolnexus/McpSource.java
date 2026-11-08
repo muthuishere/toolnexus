@@ -4,8 +4,6 @@ import io.modelcontextprotocol.client.McpClient;
 import io.modelcontextprotocol.client.McpSyncClient;
 import io.modelcontextprotocol.client.transport.HttpClientSseClientTransport;
 import io.modelcontextprotocol.client.transport.HttpClientStreamableHttpTransport;
-import io.modelcontextprotocol.client.transport.ServerParameters;
-import io.modelcontextprotocol.client.transport.StdioClientTransport;
 import io.modelcontextprotocol.json.McpJsonDefaults;
 import io.modelcontextprotocol.json.McpJsonMapper;
 import io.modelcontextprotocol.json.schema.JsonSchemaValidator;
@@ -123,7 +121,29 @@ public final class McpSource implements AutoCloseable {
 
     private final List<Tool> tools;
     private final Map<String, String> status; // server -> "connected" | "disabled" | "failed"
-    private final List<McpSyncClient> clients;
+    private final List<McpSession> clients;
+
+    /**
+     * The calls McpSource makes on a connected frozen-path server: the in-house {@link StdioMcpClient}
+     * for local stdio servers, the SDK's {@link McpSyncClient} for remote HTTP/SSE ones.
+     */
+    interface McpSession {
+        McpSchema.ListToolsResult listTools(String cursor);
+        McpSchema.CallToolResult callTool(McpSchema.CallToolRequest req);
+        McpSchema.ListResourcesResult listResources();
+        McpSchema.ReadResourceResult readResource(McpSchema.ReadResourceRequest req);
+        void closeGracefully();
+
+        static McpSession of(McpSyncClient c) {
+            return new McpSession() {
+                @Override public McpSchema.ListToolsResult listTools(String cursor) { return c.listTools(cursor); }
+                @Override public McpSchema.CallToolResult callTool(McpSchema.CallToolRequest req) { return c.callTool(req); }
+                @Override public McpSchema.ListResourcesResult listResources() { return c.listResources(); }
+                @Override public McpSchema.ReadResourceResult readResource(McpSchema.ReadResourceRequest req) { return c.readResource(req); }
+                @Override public void closeGracefully() { c.closeGracefully(); }
+            };
+        }
+    }
 
     /**
      * §2 Gap 3: a cooperative cancellation signal for {@link #load} / {@link #listMcpTools}. Java's
@@ -191,12 +211,12 @@ public final class McpSource implements AutoCloseable {
     /** The connected clients by server name, for {@link #resourceTools()}. */
     private final Map<String, ServerConn> servers;
 
-    private record ServerConn(McpSyncClient client, long timeout) {}
+    private record ServerConn(McpSession client, long timeout) {}
 
     /** Servers connected on the MCP 2026-07-28 path (§2.2). */
     private final List<Mcp2026.Conn> conns;
 
-    private McpSource(List<Tool> tools, Map<String, String> status, List<McpSyncClient> clients,
+    private McpSource(List<Tool> tools, Map<String, String> status, List<McpSession> clients,
                       Map<String, ServerConn> servers, List<Mcp2026.Conn> conns) {
         this.tools = tools;
         this.status = status;
@@ -286,7 +306,7 @@ public final class McpSource implements AutoCloseable {
                 // best-effort teardown
             }
         }
-        for (McpSyncClient c : clients) {
+        for (McpSession c : clients) {
             try {
                 c.closeGracefully();
             } catch (Exception ignored) {
@@ -512,7 +532,7 @@ public final class McpSource implements AutoCloseable {
         Map<String, Object> config = parseConfig(input);
         List<Tool> tools = new ArrayList<>();
         Map<String, String> status = new LinkedHashMap<>();
-        List<McpSyncClient> clients = new ArrayList<>();
+        List<McpSession> clients = new ArrayList<>();
         Map<String, ServerConn> servers = new LinkedHashMap<>();
         List<Mcp2026.Conn> conns = new ArrayList<>();
         // The token store only serves remote servers; a stdio-only config never builds one.
@@ -544,7 +564,7 @@ public final class McpSource implements AutoCloseable {
                     return;
                 }
                 long timeout = timeoutOf(cfg);
-                McpSyncClient client = null;
+                McpSession client = null;
                 Mcp2026.Conn conn = null;
                 try {
                     // §2.2 discover first; an old server ⇒ the frozen SDK path below (§2.2a / §2.F).
@@ -567,33 +587,39 @@ public final class McpSource implements AutoCloseable {
                         report.accept(new ServerResult(name, "connected", List.copyOf(converted), null));
                         return;
                     }
-                    McpClientTransport transport = isRemote(cfg)
-                            ? buildRemoteTransport(cfg, fallbackAuth)
-                            : probeChild != null ? new ProcessStdioTransport(probeChild, jsonMapper())
-                            : buildLocalTransport(name, cfg);
-                    // §2 idle timeout: the SDK's requestTimeout is a hard per-request deadline, so it
-                    // is lifted out of the way and the budget is enforced by us — tools/list keeps a
-                    // per-phase `timeout` deadline (bounded()), tools/call an idle one (progress-reset).
+                    // §2 idle timeout: tools/list keeps a per-phase `timeout` deadline (bounded()),
+                    // tools/call an idle one (progress-reset) — no hard per-request deadline below us.
                     ProgressRegistry progress = new ProgressRegistry();
-                    McpClient.SyncSpec spec = McpClient.sync(transport)
-                            .requestTimeout(UNBOUNDED_REQUEST)
-                            .jsonSchemaValidator(LAZY_SCHEMA_VALIDATOR)
-                            .progressConsumer(progress::onProgress)
-                            .initializationTimeout(Duration.ofMillis(timeout))
-                            .clientInfo(new McpSchema.Implementation("toolnexus", "0.1.0"));
-                    // Advertise elicitation + register the bridge ONLY when a waitFor exists to
-                    // satisfy it — a waitFor-less host degrades cleanly (the server won't elicit).
-                    // (§10 elicitation bridge) form mode → kind:"input"; URL mode → kind:"authorization".
-                    if (waitFor != null) {
-                        spec.capabilities(McpSchema.ClientCapabilities.builder().elicitation(true, true).build())
-                                .elicitation(req -> answerToElicitResult(waitFor.apply(elicitationToRequest(req))))
-                                .urlElicitation(req -> answerToElicitResult(waitFor.apply(elicitationToRequest(req))));
+                    if (!isRemote(cfg)) {
+                        // Local stdio: the in-house client on the probe child (or a fresh one).
+                        StdioMcpClient sc = StdioMcpClient.attach(
+                                probeChild != null ? probeChild : spawnLocal(name, cfg), jsonMapper(), progress::onToken, waitFor);
+                        client = sc;
+                        sc.initialize(timeout);
+                    } else {
+                        McpClientTransport transport = buildRemoteTransport(cfg, fallbackAuth);
+                        // The SDK's requestTimeout is a hard per-request deadline, so it is lifted out of the way.
+                        McpClient.SyncSpec spec = McpClient.sync(transport)
+                                .requestTimeout(UNBOUNDED_REQUEST)
+                                .jsonSchemaValidator(LAZY_SCHEMA_VALIDATOR)
+                                .progressConsumer(progress::onProgress)
+                                .initializationTimeout(Duration.ofMillis(timeout))
+                                .clientInfo(new McpSchema.Implementation("toolnexus", "0.1.0"));
+                        // Advertise elicitation + register the bridge ONLY when a waitFor exists to
+                        // satisfy it — a waitFor-less host degrades cleanly (the server won't elicit).
+                        // (§10 elicitation bridge) form mode → kind:"input"; URL mode → kind:"authorization".
+                        if (waitFor != null) {
+                            spec.capabilities(McpSchema.ClientCapabilities.builder().elicitation(true, true).build())
+                                    .elicitation(req -> answerToElicitResult(waitFor.apply(elicitationToRequest(req))))
+                                    .urlElicitation(req -> answerToElicitResult(waitFor.apply(elicitationToRequest(req))));
+                        }
+                        McpSyncClient sdk = spec.build();
+                        client = McpSession.of(sdk);
+                        sdk.initialize();
                     }
-                    client = spec.build();
-                    client.initialize();
                     // §2 Gap 7: apply the per-server tool allowlist (keyed on ORIGINAL name) to the
                     // listed defs BEFORE sanitize/prefix, same semantics as the builtins/skills filter.
-                    final McpSyncClient listing = client;
+                    final McpSession listing = client;
                     List<McpSchema.Tool> defs = applyToolsFilter(name,
                             bounded(() -> paginateTools(listing), timeout), toolsFilterOf(cfg));
                     List<Tool> converted = new ArrayList<>();
@@ -631,7 +657,7 @@ public final class McpSource implements AutoCloseable {
         } catch (java.util.concurrent.CancellationException ce) {
             // Parent-ctx cancel: release any already-connected clients before surfacing (ADR A1).
             synchronized (lock) {
-                for (McpSyncClient c : clients) {
+                for (McpSession c : clients) {
                     try {
                         c.closeGracefully();
                     } catch (Exception ignored) {
@@ -678,7 +704,7 @@ public final class McpSource implements AutoCloseable {
                     return;
                 }
                 long timeout = timeoutOf(cfg);
-                McpSyncClient client = null;
+                McpSession client = null;
                 try {
                     io.github.muthuishere.toolnexus.mcp.OAuth fallbackAuth = null;
                     Process probeChild = null; // §2.2a: fast discover reply ⇒ continue on the same child
@@ -701,17 +727,22 @@ public final class McpSource implements AutoCloseable {
                         probeChild = fb.proc;
                         if (isRemote(cfg)) fallbackAuth = Mcp2026.oauthFor(name, cfg, lo, store.get());
                     }
-                    McpClientTransport transport = isRemote(cfg)
-                            ? buildRemoteTransport(cfg, fallbackAuth)
-                            : probeChild != null ? new ProcessStdioTransport(probeChild, jsonMapper())
-                            : buildLocalTransport(name, cfg);
-                    client = McpClient.sync(transport)
-                            .requestTimeout(Duration.ofMillis(timeout))
-                            .jsonSchemaValidator(LAZY_SCHEMA_VALIDATOR)
-                            .initializationTimeout(Duration.ofMillis(timeout))
-                            .clientInfo(new McpSchema.Implementation("toolnexus", "0.1.0"))
-                            .build();
-                    client.initialize();
+                    if (!isRemote(cfg)) {
+                        StdioMcpClient sc = StdioMcpClient.attach(
+                                probeChild != null ? probeChild : spawnLocal(name, cfg), jsonMapper(), null, null);
+                        sc.requestTimeoutMs = timeout;
+                        client = sc;
+                        sc.initialize(timeout);
+                    } else {
+                        McpSyncClient sdk = McpClient.sync(buildRemoteTransport(cfg, fallbackAuth))
+                                .requestTimeout(Duration.ofMillis(timeout))
+                                .jsonSchemaValidator(LAZY_SCHEMA_VALIDATOR)
+                                .initializationTimeout(Duration.ofMillis(timeout))
+                                .clientInfo(new McpSchema.Implementation("toolnexus", "0.1.0"))
+                                .build();
+                        client = McpSession.of(sdk);
+                        sdk.initialize();
+                    }
                     List<McpSchema.Tool> defs = paginateTools(client);
                     List<ToolInfo> infos = new ArrayList<>();
                     for (McpSchema.Tool def : defs) {
@@ -825,40 +856,26 @@ public final class McpSource implements AutoCloseable {
         }
     }
 
+    /**
+     * Spawn a local stdio server (the §2.2a respawn after a silent discover). The configured
+     * {@code environment}/{@code env} is laid over the process environment; stderr passes through.
+     */
     @SuppressWarnings("unchecked")
-    private static McpClientTransport buildLocalTransport(String server, Map<String, Object> cfg) {
+    private static Process spawnLocal(String server, Map<String, Object> cfg) throws java.io.IOException {
         if (cfg.get("command") == null) {
             throw new IllegalArgumentException("local server has no command");
         }
-        List<String> argv = commandArgv(server, cfg);
-        String cmd = argv.get(0);
-        List<String> args = new ArrayList<>(argv.subList(1, argv.size()));
-
-        Map<String, String> env = new HashMap<>();
-        // merge process env + configured environment/env
-        env.putAll(System.getenv());
+        ProcessBuilder pb = new ProcessBuilder(commandArgv(server, cfg));
         Map<String, Object> extra = (Map<String, Object>) cfg.get("environment");
         if (extra == null) extra = (Map<String, Object>) cfg.get("env");
         if (extra != null) {
             for (Map.Entry<String, Object> e : extra.entrySet()) {
-                env.put(e.getKey(), String.valueOf(e.getValue()));
+                pb.environment().put(e.getKey(), String.valueOf(e.getValue()));
             }
         }
-
-        ServerParameters.Builder pb = ServerParameters.builder(cmd).args(args).env(env);
-        ServerParameters params = pb.build();
-
-        final Object cwd = cfg.get("cwd");
-        if (cwd == null) {
-            return new StdioClientTransport(params, jsonMapper());
-        }
-        // getProcessBuilder() is protected; subclass to set the working directory.
-        return new StdioClientTransport(params, jsonMapper()) {
-            @Override
-            protected ProcessBuilder getProcessBuilder() {
-                return super.getProcessBuilder().directory(new java.io.File(String.valueOf(cwd)));
-            }
-        };
+        if (cfg.get("cwd") != null) pb.directory(new java.io.File(String.valueOf(cfg.get("cwd"))));
+        pb.redirectError(ProcessBuilder.Redirect.INHERIT);
+        return pb.start();
     }
 
     /** A remote server's {@code headers} with {@code ${ENV_VAR}} expanded (values never logged); null if none. */
@@ -930,7 +947,7 @@ public final class McpSource implements AutoCloseable {
         }
     }
 
-    private static List<McpSchema.Tool> paginateTools(McpSyncClient client) {
+    private static List<McpSchema.Tool> paginateTools(McpSession client) {
         List<McpSchema.Tool> result = new ArrayList<>();
         Set<String> seen = new HashSet<>();
         String cursor = null;
@@ -977,8 +994,12 @@ public final class McpSource implements AutoCloseable {
                 new java.util.concurrent.ConcurrentHashMap<>();
 
         void onProgress(McpSchema.ProgressNotification n) {
-            if (n == null || n.progressToken() == null) return;
-            java.util.concurrent.atomic.AtomicLong last = live.get(String.valueOf(n.progressToken()));
+            if (n != null) onToken(n.progressToken());
+        }
+
+        void onToken(Object token) {
+            if (token == null) return;
+            java.util.concurrent.atomic.AtomicLong last = live.get(String.valueOf(token));
             if (last != null) last.set(System.nanoTime());
         }
 
@@ -1087,7 +1108,7 @@ public final class McpSource implements AutoCloseable {
      * {@code callTool} — the same interrupt {@code FutureTask.cancel(true)} sent before. If the reply
      * and a trip race, the reply wins.
      */
-    static McpSchema.CallToolResult callWithIdleTimeout(McpSyncClient client, String mcpName,
+    static McpSchema.CallToolResult callWithIdleTimeout(McpSession client, String mcpName,
                                                         Map<String, Object> args, long timeoutMs,
                                                         ProgressRegistry progress, ToolContext ctx) throws Exception {
         String token = "toolnexus-" + java.util.UUID.randomUUID();
@@ -1128,7 +1149,7 @@ public final class McpSource implements AutoCloseable {
                 : new RuntimeException("MCP tool call timed out after " + timeoutMs + "ms without progress");
     }
 
-    private static Tool convertTool(String server, McpSchema.Tool def, McpSyncClient client, long timeout,
+    private static Tool convertTool(String server, McpSchema.Tool def, McpSession client, long timeout,
                                     ProgressRegistry progress) {
         final Map<String, Object> inputSchema = normalizeSchema(def);
         final String description = def.description() == null ? "" : def.description();

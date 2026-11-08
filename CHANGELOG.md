@@ -8,6 +8,24 @@ GitHub Releases `vX.Y.Z` via `release.yml` (see `PUBLISHING.md`).
 
 ## Unreleased
 
+**Java: local MCP servers run on an in-house stdio client** (java only). Pre-2026 stdio servers no longer
+go through the official MCP Java SDK session. That covers nearly every local server in use today: those
+that answer `server/discover` as an old server, plus the child respawned after a silent discover. The SDK
+put a Reactor chain and scheduler hops on every request, and built a JSON tree for every line. The new
+client writes each request straight to the child's stdin. One reader thread routes replies by id and
+hands their raw bytes to the waiting caller, which parses them straight into the same `McpSchema` result
+types. That is the shape LangChain4j and our Rust port use. Server→client requests (ping, elicitation,
+roots) are answered off the reader thread, so a server that floods requests while not reading stdin
+cannot deadlock a call. Measured on the mock-LLM benchmark (same machine, runs interleaved, medians of 7):
+cold init went from 184 ms to 148 ms, and per-request p50 went from 2.02 ms to 1.76 ms. LangChain4j's
+MCP client on the same harness: 240 ms init, 1.96 ms p50. A raw `tools/call` round trip went from ~40 µs
+to ~20 µs. Behaviour is unchanged: the same protocol versions are offered (2025-11-25, down to
+2024-11-05), with the same error texts, idle timeout, cancellation and content mapping.
+**Not changed:** remote HTTP/SSE servers and `serve` still use the SDK. 2026-07-28 servers were already
+in-house (`Mcp2026`). One visible difference: a respawned child's stderr now passes through to the host's
+stderr, as the probe child's already did, instead of going to SLF4J. Tracked in
+`openspec/changes/java-inhouse-stdio-mcp`.
+
 **Classifier: an `openai` backend on OpenAI's Decisions API** (issue #157). `createClassifier({backend:
 "openai"})` sends the same noul / choice / score questions to `POST https://api.openai.com/v1/decisions`
 (`gpt-6-luna`) and returns the same `Decision` as every other backend. A front end such as jevx can now

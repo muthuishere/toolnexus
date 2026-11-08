@@ -11,7 +11,8 @@ client at any OpenAI- or Anthropic-style endpoint and run.
 > or take only the adapters and drive your own.
 
 The Java port of [toolnexus](https://github.com/muthuishere/toolnexus) — the same library,
-byte-identical, also in **JavaScript, Python, Go, C#, Elixir, Clojure and Rust**. Built on the official
+byte-identical, also in **JavaScript, Python, Go, C#, Elixir, Clojure and Rust**. Local (stdio) MCP
+servers run on an in-house client; remote HTTP/SSE servers and the serve side use the official
 **MCP Java SDK** (`io.modelcontextprotocol.sdk:mcp`). Requires **Java 21+**.
 
 ## Install
