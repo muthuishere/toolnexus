@@ -112,6 +112,11 @@ export interface ClientOptions {
    * today. A "retry" is always bounded by `retries`; the classifier cannot loop unbounded.
    * There is no "suspend" tier — suspension (§10) stays a user-action pause, not an error path. */
   onError?: (info: ErrorInfo) => ErrorTier
+  /** §8 Resilience. Ordered fallback model ids tried, with a fresh retry budget each, when the
+   * current model's retry budget ends on an overload (`503`/`529`). Chain = [turnModel, ...these];
+   * empty/duplicate entries skipped. `TOOLNEXUS_DISABLE_MODEL_FALLBACK=1|true` disables it.
+   * `stream` emits `{ type: "fallback", from, to }` before switching. Omit ⇒ byte-identical. */
+  fallbackModels?: readonly string[]
   /** §1B. Reject a content part carrying more than this many **decoded** bytes (never the
    * +33% base64 string). Unset ⇒ no limit, as today. */
   maxPartBytes?: number
@@ -401,6 +406,8 @@ export type StreamEvent =
   | { type: "tool_call"; id: string; name: string; args: Record<string, unknown>; via?: "call_tool" | "acp" }
   | { type: "tool_result"; id: string; name: string; output: string; isError: boolean; metadata?: Record<string, unknown>; via?: "call_tool" | "acp" }
   | { type: "usage"; usage: Usage }
+  /** Only with `fallbackModels`: switching from model `from` to `to` after overload (§8). */
+  | { type: "fallback"; from: string; to: string }
   | { type: "pending"; request: Request }
   | { type: "done"; result: RunResult }
 
@@ -717,17 +724,18 @@ export class Client {
 
     const signal = this.makeSignal(req.signal)
     try {
-      const data = await this.llmCallJson(
-        `${this.opts.baseUrl.replace(/\/$/, "")}/chat/completions`,
-        {
+      const r = await this.llmCallJson(
+        (m) => [`${this.opts.baseUrl.replace(/\/$/, "")}/chat/completions`, {
           method: "POST",
           headers: { "content-type": "application/json", authorization: `Bearer ${key}`, ...this.opts.headers },
-          body: JSON.stringify(this.finalizeBody(body)),
-        },
+          body: JSON.stringify(this.finalizeBody({ ...body, model: m })),
+        }],
         signal,
         "openai",
         turnModel,
       )
+      const data = r.data
+      turnModel = r.model
       if (this.opts.hooks?.afterLLM) await this.opts.hooks.afterLLM({ response: data, model: turnModel, turn: 0 })
       const usage: Usage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 }
       addUsage(usage, data.usage, "openai")
@@ -784,9 +792,8 @@ export class Client {
 
     const signal = this.makeSignal(req.signal)
     try {
-      const data = await this.llmCallJson(
-        endpoint,
-        {
+      const r = await this.llmCallJson(
+        (m) => [endpoint, {
           method: "POST",
           headers: {
             "content-type": "application/json",
@@ -794,12 +801,14 @@ export class Client {
             "anthropic-version": "2023-06-01",
             ...this.opts.headers,
           },
-          body: JSON.stringify(this.finalizeBody(body)),
-        },
+          body: JSON.stringify(this.finalizeBody({ ...body, model: m })),
+        }],
         signal,
         "anthropic",
         turnModel,
       )
+      const data = r.data
+      turnModel = r.model
       if (this.opts.hooks?.afterLLM) await this.opts.hooks.afterLLM({ response: data, model: turnModel, turn: 0 })
       const usage: Usage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 }
       addUsage(usage, data.usage, "anthropic")
@@ -948,7 +957,7 @@ export class Client {
   /** fetch with retry + exponential backoff on the default retryable set (429/500/502/503/504/529)
    * plus network errors and anything `retryableStatuses` added, honoring Retry-After; aborts via signal.
    * The retry-vs-fail decision is the host's `onError` (default: retryable-within-budget ⇒ retry). */
-  private async llmFetch(url: string, init: RequestInit, signal: AbortSignal): Promise<Response> {
+  private async llmFetch(url: string, init: RequestInit, signal: AbortSignal, out?: { failed?: boolean }): Promise<Response> {
     const retries = this.opts.retries ?? 2
     const base = this.opts.retryBaseMs ?? 500
     // Default classifier = today's behavior, expressed as an onError. A "retry" is always
@@ -961,7 +970,10 @@ export class Client {
         if (res.ok) return res
         const retryable = isRetryableStatus(res.status, this.opts.retryableStatuses)
         const tier = classify({ status: res.status, attempt, retryable })
-        if (tier === "fail" || attempt === retries) return res // caller surfaces the non-ok status
+        if (tier === "fail" || attempt === retries) {
+          if (out) out.failed = tier === "fail"
+          return res // caller surfaces the non-ok status
+        }
         const ra = retryAfterMs(res.headers.get("retry-after"))
         // `?? `, not `|| `: Retry-After: 0 means "retry now", not "no opinion".
         await delay(ra ?? base * 2 ** attempt + Math.random() * 100, signal)
@@ -974,6 +986,34 @@ export class Client {
       }
     }
     throw lastErr
+  }
+
+  /** §8 fallbackModels: the per-call model chain — [turnModel, ...fallbackModels], empty and
+   * duplicate entries skipped; just [turnModel] when the option is absent or the kill switch is set. */
+  private modelChain(turnModel: string): string[] {
+    const fb = this.opts.fallbackModels
+    if (!fb || fb.length === 0) return [turnModel]
+    const kill = (typeof process !== "undefined" ? process.env?.TOOLNEXUS_DISABLE_MODEL_FALLBACK : undefined)?.trim().toLowerCase()
+    if (kill === "1" || kill === "true") return [turnModel]
+    const chain: string[] = [turnModel]
+    for (const m of fb) if (m && !chain.includes(m)) chain.push(m)
+    return chain
+  }
+
+  /** llmFetch over the model chain: each model spends the full retry budget; only a budget that
+   * ends on 503/529 (not an onError "fail") advances to the next model. Returns the response and
+   * the model that produced it. `build` rebuilds the same request for a model. */
+  private async llmFetchChain(model: string, build: (m: string) => [string, RequestInit], signal: AbortSignal, onSwitch?: (from: string, to: string) => void): Promise<{ res: Response; model: string }> {
+    const chain = this.modelChain(model)
+    for (let i = 0; ; i++) {
+      const m = chain[i]
+      const [url, init] = build(m)
+      const out: { failed?: boolean } = {}
+      const res = await this.llmFetch(url, init, signal, out)
+      if (res.ok || out.failed || i + 1 >= chain.length || (res.status !== 503 && res.status !== 529)) return { res, model: m }
+      try { await res.body?.cancel() } catch { /* ignore */ }
+      onSwitch?.(m, chain[i + 1])
+    }
   }
 
   /** Run one tool through beforeTool/afterTool hooks (mutate args, short-circuit, transform result). */
@@ -1122,15 +1162,18 @@ export class Client {
   }
 
   /** One non-streaming LLM call, with an `llm` metric event (ok/error + per-call tokens + ms). */
-  private async llmCallJson(url: string, init: RequestInit, signal: AbortSignal, style: ClientStyle, model: string): Promise<any> {
+  private async llmCallJson(build: (m: string) => [string, RequestInit], signal: AbortSignal, style: ClientStyle, turnModel: string): Promise<{ data: any; model: string }> {
     const t0 = Date.now()
+    let model = turnModel
     try {
-      const res = await this.llmFetch(url, init, signal)
+      const r = await this.llmFetchChain(turnModel, build, signal)
+      model = r.model
+      const res = r.res
       if (!res.ok) throw await llmHttpError(res)
       const data: any = await res.json()
       const tok = perCall(data.usage, style)
       this.emit({ event: "llm", model, status: "ok", ms: Date.now() - t0, promptTokens: tok.prompt, completionTokens: tok.completion })
-      return data
+      return { data, model }
     } catch (e) {
       this.emit({ event: "llm", model, status: "error", ms: Date.now() - t0, promptTokens: 0, completionTokens: 0 })
       throw e
@@ -1205,11 +1248,13 @@ export class Client {
           if (ov?.model) turnModel = ov.model
         }
         lastModel = turnModel
-        const data: any = await this.llmCallJson(`${this.opts.baseUrl.replace(/\/$/, "")}/chat/completions`, {
+        const r = await this.llmCallJson((m) => [`${this.opts.baseUrl.replace(/\/$/, "")}/chat/completions`, {
           method: "POST",
           headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json", ...this.opts.headers },
-          body: JSON.stringify(this.openaiBody(messages, tools, false, turnModel)),
-        }, signal, "openai", turnModel)
+          body: JSON.stringify(this.openaiBody(messages, tools, false, m)),
+        }], signal, "openai", turnModel)
+        const data: any = r.data
+        turnModel = lastModel = r.model
         addUsage(usage, data.usage, "openai")
         if (this.opts.hooks?.afterLLM) await this.opts.hooks.afterLLM({ response: data, model: turnModel, turn })
         const msg = data.choices[0].message
@@ -1316,7 +1361,7 @@ export class Client {
           if (ov?.model) turnModel = ov.model
         }
         lastModel = turnModel
-        const data: any = await this.llmCallJson(endpoint, {
+        const r = await this.llmCallJson((m) => [endpoint, {
           method: "POST",
           headers: {
             "x-api-key": key,
@@ -1324,8 +1369,10 @@ export class Client {
             "Content-Type": "application/json",
             ...this.opts.headers,
           },
-          body: JSON.stringify(this.anthropicBody(system, messages, tools, false, turnModel)),
-        }, signal, "anthropic", turnModel)
+          body: JSON.stringify(this.anthropicBody(system, messages, tools, false, m)),
+        }], signal, "anthropic", turnModel)
+        const data: any = r.data
+        turnModel = lastModel = r.model
         addUsage(usage, data.usage, "anthropic")
         if (this.opts.hooks?.afterLLM) await this.opts.hooks.afterLLM({ response: data, model: turnModel, turn })
         messages.push({ role: "assistant", content: data.content })
@@ -1406,11 +1453,15 @@ export class Client {
         let content = ""
         const acc = new Map<number, { id: string; name: string; args: string }>()
         try {
-          const res = await this.llmFetch(`${this.opts.baseUrl.replace(/\/$/, "")}/chat/completions`, {
+          const switches: StreamEvent[] = []
+          const r = await this.llmFetchChain(turnModel, (m) => [`${this.opts.baseUrl.replace(/\/$/, "")}/chat/completions`, {
             method: "POST",
             headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json", ...this.opts.headers },
-            body: JSON.stringify(this.openaiBody(messages, tools, true, turnModel)),
-          }, signal)
+            body: JSON.stringify(this.openaiBody(messages, tools, true, m)),
+          }], signal, (from, to) => switches.push({ type: "fallback", from, to }))
+          const res = r.res
+          turnModel = lastModel = r.model
+          yield* switches
           if (!res.ok || !res.body) throw await llmHttpError(res)
           for await (const line of sseLines(res.body)) {
             if (!line.startsWith("data:")) continue
@@ -1519,11 +1570,15 @@ export class Client {
         const blocks = new Map<number, { type: string; text?: string; id?: string; name?: string; json?: string }>()
         let stopReason = ""
         try {
-          const res = await this.llmFetch(endpoint, {
+          const switches: StreamEvent[] = []
+          const r = await this.llmFetchChain(turnModel, (m) => [endpoint, {
             method: "POST",
             headers: { "x-api-key": key, "anthropic-version": "2023-06-01", "Content-Type": "application/json", ...this.opts.headers },
-            body: JSON.stringify(this.anthropicBody(system, messages, tools, true, turnModel)),
-          }, signal)
+            body: JSON.stringify(this.anthropicBody(system, messages, tools, true, m)),
+          }], signal, (from, to) => switches.push({ type: "fallback", from, to }))
+          const res = r.res
+          turnModel = lastModel = r.model
+          yield* switches
           if (!res.ok || !res.body) throw await llmHttpError(res)
           for await (const line of sseLines(res.body)) {
             if (!line.startsWith("data:")) continue
