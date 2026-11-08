@@ -54,6 +54,10 @@ whether a prompt fits, and one huge tool result can push a turn over between est
   `stream`, both styles, and the resume paths. SPEC §7F.1; fixture
   `conformance/reactive_compaction/cases.json`; change `openspec/changes/add-reactive-compaction`.
 - Not done: no per-agent (`AgentDef`) option; a §7D agent run uses its client's option.
+- Not done: the single-call `translate` paths do not react to an overflow (they are not
+  loops). Resume paths are covered because they run through the same loops, but no port has a
+  dedicated resume test. In golang, `ContextOverflowError` unwraps to the last `*ProviderError`;
+  elixir and rust carry it as a separate error type, with no unwrap equivalent.
 
 ### Memory hierarchy and dreaming
 

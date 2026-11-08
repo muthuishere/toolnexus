@@ -7,16 +7,16 @@
 
 ## 2. Ports (run + stream, both styles, resume paths; tests replay the shared fixture)
 
-- [ ] 2.1 js
-- [ ] 2.2 python
-- [ ] 2.3 golang
-- [ ] 2.4 java
-- [ ] 2.5 csharp
-- [ ] 2.6 elixir (coverage ≥ 95%)
-- [ ] 2.7 clojure (JVM + cljgo where CI runs it)
-- [ ] 2.8 rust
+- [x] 2.1 js
+- [x] 2.2 python
+- [x] 2.3 golang
+- [x] 2.4 java
+- [x] 2.5 csharp
+- [x] 2.6 elixir (coverage ≥ 95%)
+- [x] 2.7 clojure (JVM + cljgo where CI runs it)
+- [x] 2.8 rust
 
 ## 3. Ship
 
-- [ ] 3.1 CHANGELOG `## Unreleased` entry.
+- [x] 3.1 CHANGELOG `## Unreleased` entry.
 - [ ] 3.2 All eight suites green in CI.
