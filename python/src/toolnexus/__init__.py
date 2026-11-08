@@ -159,6 +159,7 @@ from .builtin import (
 from .http import DEFAULT_TIMEOUT as HTTP_DEFAULT_TIMEOUT
 from .http import http_tool
 from .native import define_tool, tool
+from .transcript_search import TRANSCRIPT_SEARCH_DESCRIPTION, transcript_search_tool
 from .media import (
     Media,
     MediaError,
@@ -427,6 +428,8 @@ __all__ = [
     # native tools
     "tool",
     "define_tool",
+    "TRANSCRIPT_SEARCH_DESCRIPTION",
+    "transcript_search_tool",
     # http tools
     "http_tool",
     "HTTP_DEFAULT_TIMEOUT",
