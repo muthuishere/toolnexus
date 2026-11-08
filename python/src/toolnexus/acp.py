@@ -427,14 +427,21 @@ class ACPClient:
                 {"type": "tool_call", "id": call_id, "name": name, "args": update.get("rawInput"), "via": "acp"},
             )
         elif kind == "tool_call_update":
-            status = update.get("status")
-            if emit is None or status not in ("completed", "failed"):
-                return
             call_id = update.get("toolCallId") or ""
+            title = update.get("title")
             with self._state_lock:
+                # A non-empty title is remembered as the call's name for later events (#188).
+                if title:
+                    self._tool_names[call_id] = title
                 name = self._tool_names.get(call_id, "")
-            if update.get("title"):
-                name = update["title"]
+            if emit is None:
+                return
+            raw = update.get("rawInput")
+            if isinstance(raw, dict) and raw:
+                _safe_emit(emit, {"type": "tool_call_args", "id": call_id, "name": name, "args": raw, "via": "acp"})
+            status = update.get("status")
+            if status not in ("completed", "failed"):
+                return
             _safe_emit(
                 emit,
                 {

@@ -737,8 +737,10 @@ public sealed partial class LlmClient
     // ---------------------------------------------------------------- streaming events
 
     /// <summary>Stream event kinds. <c>Thought</c> is a model's reasoning as reported by its source
-    /// (e.g. an ACP agent's <c>agent_thought_chunk</c>): surfaced live, never part of the answer.</summary>
-    public enum StreamKind { Text, ToolCall, ToolResult, Usage, Pending, Done, Thought }
+    /// (e.g. an ACP agent's <c>agent_thought_chunk</c>): surfaced live, never part of the answer.
+    /// <c>ToolCallArgs</c> is a call's input an ACP agent reported on a <c>tool_call_update</c>
+    /// after the call began (<c>Id</c>, <c>Name</c>, <c>Args</c>, <c>Via</c>; SPEC §8C, issue #188).</summary>
+    public enum StreamKind { Text, ToolCall, ToolResult, Usage, Pending, Done, Thought, ToolCallArgs }
 
     public sealed record StreamEvent(
         StreamKind Type, string? Delta = null, string? Id = null, string? Name = null,

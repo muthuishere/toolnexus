@@ -219,6 +219,42 @@ async fn stream_acp_drip_is_incremental() {
 }
 
 #[tokio::test]
+async fn stream_acp_tool_update_emits_args_and_title() {
+    let case = cases()["stream"]["acpToolUpdate"].clone();
+    let acp = Arc::new(AcpClient::load(opts(&case["fakeEnv"])).await.unwrap());
+    let c = create_in_process_client(InProcessOptions {
+        generate_stream: Some(acp_generate_stream(acp.clone())),
+        ..Default::default()
+    });
+    let mut rx = c.stream("go", &empty_tk().await).unwrap();
+    let (mut events, mut done) = (Vec::new(), None);
+    while let Some(ev) = rx.recv().await {
+        match ev.kind.as_str() {
+            "text" | "usage" => {}
+            "done" => done = ev.result,
+            "error" => panic!("{:?}", ev.error),
+            k => {
+                let mut m = json!({"type": k, "id": ev.id, "name": ev.name, "via": ev.via});
+                if k == "tool_call_args" {
+                    m["args"] = ev.args.clone();
+                }
+                if k == "tool_result" {
+                    m["output"] = json!(ev.output);
+                    m["isError"] = json!(ev.is_error);
+                }
+                events.push(m);
+            }
+        }
+    }
+    assert_eq!(json!(events), case["expectEvents"]);
+    assert_eq!(
+        done.expect("done").text,
+        case["expectDoneText"].as_str().unwrap()
+    );
+    acp.close().await;
+}
+
+#[tokio::test]
 async fn plain_generate_still_refuses_stream() {
     assert_eq!(
         cases()["stream"]["inProcess"]["plainGenerateStillRefuses"],

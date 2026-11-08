@@ -343,7 +343,8 @@ public final class AcpClient implements Closeable, Function<InProcess.Request, I
      * {@link #generate}, reporting the turn as it happens: each {@code session/update} is turned
      * into a {@link LlmClient.StreamEvent} and handed to {@code emit} from the read loop the moment
      * it arrives — {@code agent_message_chunk} → text, {@code agent_thought_chunk} → thought (never
-     * part of the answer), {@code tool_call} → tool_call (name = title, args = rawInput) and a
+     * part of the answer), {@code tool_call} → tool_call (name = title, args = rawInput), a {@code tool_call_update}
+     * with a non-empty rawInput → tool_call_args (its title, when set, renames the call) and a
      * completed/failed {@code tool_call_update} → tool_result; every non-text event carries
      * {@code via = "acp"}. Plugs straight into {@link InProcess.Options#generateStream}.
      * A null {@code emit} reports nothing.
@@ -446,9 +447,15 @@ public final class AcpClient implements Closeable, Function<InProcess.Request, I
                 Map<String, Object> args = upd.get("rawInput") instanceof Map<?, ?> ri ? (Map<String, Object>) ri : null;
                 emit.accept(LlmClient.StreamEvent.toolCall(callId, name, args).withVia("acp"));
             } else if ("tool_call_update".equals(kind)) {
+                // A title is remembered as the call's name for every later event of this id;
+                // a non-empty rawInput is the call's input arriving late (#188).
+                if (!title.isEmpty()) toolNames.put(callId, title);
+                String name = toolNames.getOrDefault(callId, "");
+                if (upd.get("rawInput") instanceof Map<?, ?> ri && !ri.isEmpty()) {
+                    emit.accept(LlmClient.StreamEvent.toolCallArgs(callId, name, (Map<String, Object>) ri, "acp"));
+                }
                 Object status = upd.get("status");
                 if (!"completed".equals(status) && !"failed".equals(status)) return;
-                String name = !title.isEmpty() ? title : toolNames.getOrDefault(callId, "");
                 emit.accept(LlmClient.StreamEvent.toolResult(callId, name, toolContentText(upd.get("content")),
                         "failed".equals(status)).withVia("acp"));
             }

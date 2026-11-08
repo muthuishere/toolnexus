@@ -165,6 +165,20 @@
   (fake-chunk! ctx sid "agent_message_chunk" "drip-3")
   (fake-reply! ctx id {:stopReason "end_turn"}))
 
+(defn- fake-handle-tool-update!
+  "conformance/acp-client stream.acpToolUpdate (#188): the case's updates in
+  order (the final agent_message_chunk included), then end_turn."
+  [ctx id sid]
+  (doseq [u [{:sessionUpdate "tool_call" :toolCallId "t1" :title "Write" :kind "edit" :status "pending"}
+             {:sessionUpdate "tool_call_update" :toolCallId "t1" :status "in_progress"
+              :title "Write /tmp/a.txt" :rawInput {:file_path "/tmp/a.txt" :content "hi"}}
+             {:sessionUpdate "tool_call_update" :toolCallId "t1" :status "in_progress"}
+             {:sessionUpdate "tool_call_update" :toolCallId "t1" :status "completed"
+              :content [{:type "content" :content {:type "text" :text "wrote"}}]}]]
+    (fake-notify! ctx "session/update" {:sessionId sid :update u}))
+  (fake-chunk! ctx sid "agent_message_chunk" "done")
+  (fake-reply! ctx id {:stopReason "end_turn"}))
+
 (defn- fake-handle-fs-request!
   "conformance/acp-client unknownRequest: ask the client for something it does
   not implement, record the answer, then finish the turn with \"ok\"."
@@ -179,6 +193,7 @@
 (defn- fake-handle-prompt! [scenario ctx id sid text]
   (cond
     (= "1" (env/get-env "TN_FAKE_DRIP"))       (fake-handle-drip! ctx id sid)
+    (= "1" (env/get-env "TN_FAKE_TOOLUPDATE")) (fake-handle-tool-update! ctx id sid)
     (= "1" (env/get-env "TN_FAKE_FS_REQUEST")) (fake-handle-fs-request! ctx id sid)
     :else
   (case scenario
@@ -540,6 +555,24 @@
         (is (>= (- done-t first-t) (:minLeadMs cs))
             (str "first text delta only " (- done-t first-t) "ms before done"))
         (is (= (:expectDoneText cs) (:text (client/run c "again" {:toolkit tk})))))
+      (finally (acp/close a)))))
+
+(deftest conformance-stream-acp-tool-update
+  (let [cs  (get-in (cases) [:stream :acpToolUpdate])
+        a   (connect-with! (:fakeEnv cs) {})
+        c   (client/create-in-process-client {:model "m" :generate-stream (acp/generate-stream a)})
+        evs (atom [])]
+    (try
+      (let [r     (client/run c "q" {:toolkit (toolnexus/build {:builtins false})
+                                     :on-event #(swap! evs conj %)})
+            tools (filterv #(contains? #{"tool_call" "tool_call_args" "tool_result"} (:type %)) @evs)
+            got   (mapv (fn [e]
+                          (if (= "tool_call" (:type e))
+                            (select-keys e [:type :id :name :via])
+                            (select-keys e [:type :id :name :args :output :isError :via])))
+                        tools)]
+        (is (= (:expectEvents cs) got))
+        (is (= (:expectDoneText cs) (:text (:result (last @evs))) (:text r))))
       (finally (acp/close a)))))
 
 (deftest conformance-passthrough

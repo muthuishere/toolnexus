@@ -1065,6 +1065,8 @@ public final class LlmClient {
      *       {@code isError}, {@code metadata} set).</li>
      *   <li>{@code THOUGHT} — a model's reasoning delta reported by an in-process/ACP model
      *       ({@code delta}, {@code via} set). Never part of the answer or {@link RunResult#text}.</li>
+     *   <li>{@code TOOL_CALL_ARGS} — an ACP agent reported a call's input after the call began
+     *       ({@code id}, {@code name}, {@code args}, {@code via} set; SPEC §8C, issue #188).</li>
      *   <li>{@code USAGE} — token usage so far ({@code usage} set).</li>
      *   <li>{@code DONE} — terminal event carrying the final {@link RunResult} ({@code result} set).</li>
      * </ul>
@@ -1074,7 +1076,7 @@ public final class LlmClient {
                               Usage usage, RunResult result, Request request,
                               List<Map<String, Object>> parts, Map<String, Object> metadata,
                               String via) {
-        public enum Kind { TEXT, TOOL_CALL, TOOL_RESULT, USAGE, PENDING, DONE, THOUGHT }
+        public enum Kind { TEXT, TOOL_CALL, TOOL_RESULT, USAGE, PENDING, DONE, THOUGHT, TOOL_CALL_ARGS }
 
         /** Without {@code via} (every event that is not a tool-tiers {@code call_tool} call). */
         public StreamEvent(Kind type, String delta, String id, String name,
@@ -1099,6 +1101,11 @@ public final class LlmClient {
         /** A reasoning delta from a streaming in-process model; passed to the consumer, never answer text. */
         public static StreamEvent thought(String delta, String via) {
             return new StreamEvent(Kind.THOUGHT, delta, null, null, null, null, false, null, null, null, null, null, via);
+        }
+
+        /** A call's input, reported by an ACP agent's {@code tool_call_update} after the call began. */
+        public static StreamEvent toolCallArgs(String id, String name, Map<String, Object> args, String via) {
+            return new StreamEvent(Kind.TOOL_CALL_ARGS, null, id, name, args, null, false, null, null, null, null, null, via);
         }
 
         public static StreamEvent text(String delta) {

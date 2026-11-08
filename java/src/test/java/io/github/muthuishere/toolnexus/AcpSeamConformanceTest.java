@@ -121,6 +121,60 @@ class AcpSeamConformanceTest {
         }
     }
 
+    // ---- stream.acpToolUpdate (issue #188) -------------------------------------------------
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void streamAcpToolUpdate() throws Exception {
+        Map<String, Object> c = sub(cases(), "stream", "acpToolUpdate");
+        try (AcpClient acp = AcpClient.start(new AcpClient.Options().command(AcpSeamFake.command())
+                .env(env((Map<String, Object>) c.get("fakeEnv"), null)).timeoutMs(10_000))) {
+            LlmClient client = InProcess.createClient(new InProcess.Options().model("acp")
+                    .generateStream((req, emit) -> {
+                        try {
+                            return acp.generateStream(req, emit);
+                        } catch (java.io.IOException e) {
+                            throw new RuntimeException(e);
+                        }
+                    }));
+            List<Map<String, Object>> events = new ArrayList<>();
+            AtomicReference<LlmClient.RunResult> done = new AtomicReference<>();
+            try (Toolkit tk = Toolkit.create(new Toolkit.Options())) {
+                client.stream("go", tk, ev -> {
+                    Map<String, Object> e = new LinkedHashMap<>();
+                    switch (ev.type()) {
+                        case TOOL_CALL -> {
+                            e.put("type", "tool_call");
+                            e.put("id", ev.id());
+                            e.put("name", ev.name());
+                            e.put("via", ev.via());
+                        }
+                        case TOOL_CALL_ARGS -> {
+                            e.put("type", "tool_call_args");
+                            e.put("id", ev.id());
+                            e.put("name", ev.name());
+                            e.put("args", ev.args());
+                            e.put("via", ev.via());
+                        }
+                        case TOOL_RESULT -> {
+                            e.put("type", "tool_result");
+                            e.put("id", ev.id());
+                            e.put("name", ev.name());
+                            e.put("output", ev.output());
+                            e.put("isError", ev.isError());
+                            e.put("via", ev.via());
+                        }
+                        case DONE -> done.set(ev.result());
+                        default -> { }
+                    }
+                    if (!e.isEmpty()) events.add(e);
+                });
+            }
+            assertEquals(c.get("expectEvents"), events);
+            assertEquals(c.get("expectDoneText"), done.get().text);
+        }
+    }
+
     // ---- passthrough ---------------------------------------------------------------------
 
     @Test

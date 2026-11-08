@@ -64,6 +64,42 @@ defmodule Toolnexus.AcpSeamTest do
     assert Client.run(client, "again", bare_toolkit()).text == fx["expectDoneText"]
   end
 
+  # -- stream.acpToolUpdate (#188) ---------------------------------------------
+
+  test "stream.acpToolUpdate: rawInput emits tool_call_args, title is remembered" do
+    fx = cases()["stream"]["acpToolUpdate"]
+    pid = connect!(env: fx["fakeEnv"])
+    client = Client.create_in_process(model: "acp", generate_stream: Acp.generate_stream(pid))
+
+    events = client |> Client.stream("q", bare_toolkit()) |> Enum.to_list()
+
+    tool_events =
+      Enum.filter(events, &(&1.type in ["tool_call", "tool_call_args", "tool_result"]))
+
+    got =
+      Enum.map(tool_events, fn
+        %{type: "tool_call"} = e ->
+          %{"type" => e.type, "id" => e.id, "name" => e.name, "via" => e.via}
+
+        %{type: "tool_call_args"} = e ->
+          %{"type" => e.type, "id" => e.id, "name" => e.name, "args" => e.args, "via" => e.via}
+
+        %{type: "tool_result"} = e ->
+          %{
+            "type" => e.type,
+            "id" => e.id,
+            "name" => e.name,
+            "output" => e.output,
+            "isError" => e.is_error,
+            "via" => e.via
+          }
+      end)
+
+    assert got == fx["expectEvents"]
+    assert %{type: "done", result: done} = List.last(events)
+    assert done.text == fx["expectDoneText"]
+  end
+
   # -- passthrough ---------------------------------------------------------------
 
   test "passthrough: mcpServers verbatim and in order, sessionMeta, clientCapsMeta, model" do

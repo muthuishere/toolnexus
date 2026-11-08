@@ -14,7 +14,9 @@ adapter send a tool's `rawInput` (file path, command) and its full title only on
 rows like `Write` or `Terminal`. A streaming ACP generate now emits
 `{type:"tool_call_args", id, name, args, via:"acp"}` when an update brings `rawInput`, and an
 update's title is kept, so the later `tool_result` carries `Write /tmp/a.txt` rather than `Write`.
-Additive: a consumer that ignores unknown event types sees no change. All eight ports; SPEC §8,
+Additive: a consumer that ignores unknown event types sees no change. **BREAKING (rust only):**
+`AcpStreamEvent` gains a `ToolCallArgs` variant, so an exhaustive `match` needs a new arm; Java
+(`StreamEvent.Kind.TOOL_CALL_ARGS`) and C# (`StreamKind.ToolCallArgs`) gain an enum member. All eight ports; SPEC §8,
 conformance `stream.acpToolUpdate`.
 
 ### Memory hierarchy and dreaming

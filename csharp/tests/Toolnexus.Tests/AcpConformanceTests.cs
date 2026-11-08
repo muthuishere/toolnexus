@@ -116,6 +116,52 @@ public class AcpConformanceTests
         Assert.Equal(cs.GetProperty("expectDoneText").GetString(), res.Text);
     }
 
+    // ------------------------------------------------------------------ stream.acpToolUpdate (#188)
+
+    [Fact]
+    public async Task StreamAcpToolUpdate()
+    {
+        var cs = Case("stream", "acpToolUpdate");
+        using var acp = await Start(Env(cs.GetProperty("fakeEnv")));
+        var client = InProcess.CreateClient(new InProcess.Options
+        {
+            Model = "acp",
+            GenerateStream = (req, emit, ct) => acp.GenerateStreamAsync(req, emit, ct),
+        });
+
+        var events = new JsonArray();
+        LlmClient.RunResult? doneResult = null;
+        await client.StreamAsync("go", null, ev =>
+        {
+            lock (events)
+            {
+                switch (ev.Type)
+                {
+                    case LlmClient.StreamKind.ToolCall:
+                        events.Add(new JsonObject { ["type"] = "tool_call", ["id"] = ev.Id, ["name"] = ev.Name, ["via"] = ev.Via });
+                        break;
+                    case LlmClient.StreamKind.ToolCallArgs:
+                        events.Add(new JsonObject
+                        {
+                            ["type"] = "tool_call_args", ["id"] = ev.Id, ["name"] = ev.Name,
+                            ["args"] = JsonSerializer.SerializeToNode(ev.Args), ["via"] = ev.Via,
+                        });
+                        break;
+                    case LlmClient.StreamKind.ToolResult:
+                        events.Add(new JsonObject
+                        {
+                            ["type"] = "tool_result", ["id"] = ev.Id, ["name"] = ev.Name,
+                            ["output"] = ev.Output, ["isError"] = ev.IsError, ["via"] = ev.Via,
+                        });
+                        break;
+                    case LlmClient.StreamKind.Done: doneResult = ev.Result; break;
+                }
+            }
+        });
+        Assert.True(DeepEq(cs.GetProperty("expectEvents"), events), events.ToJsonString());
+        Assert.Equal(cs.GetProperty("expectDoneText").GetString(), doneResult!.Text);
+    }
+
     // ------------------------------------------------------------------ passthrough
 
     [Fact]

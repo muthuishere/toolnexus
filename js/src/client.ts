@@ -399,6 +399,9 @@ export type StreamEvent =
   | { type: "thought"; delta: string; via?: "acp" }
   /** `via: "acp"` marks a tool the ACP agent ran itself: reported, never executed by the loop. */
   | { type: "tool_call"; id: string; name: string; args: Record<string, unknown>; via?: "call_tool" | "acp" }
+  /** An ACP agent's `tool_call_update` carrying `rawInput`: the call's arguments, known after
+   *  the initial `tool_call` (#188). Reported only; never executed by the loop. */
+  | { type: "tool_call_args"; id: string; name: string; args: Record<string, unknown>; via: "acp" }
   | { type: "tool_result"; id: string; name: string; output: string; isError: boolean; metadata?: Record<string, unknown>; via?: "call_tool" | "acp" }
   | { type: "usage"; usage: Usage }
   | { type: "pending"; request: Request }
