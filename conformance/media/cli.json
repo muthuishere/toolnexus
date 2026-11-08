@@ -225,7 +225,7 @@
       ],
       "expectArgv": [
         "-p",
-        "Generate exactly one short video with your video generation tool, shortest duration available: an apple rotates. Do not write code. Reply only with the file path.",
+        "Generate exactly one video with your video generation tool: an apple rotates. Do not write code. Reply only with the file path.",
         "--cwd",
         "{cwd}",
         "--output-format",
@@ -1002,7 +1002,7 @@
       ],
       "expectArgv": [
         "-p",
-        "Generate exactly one short video with your video generation tool, shortest duration available: an apple rotates (about 6 seconds long, aspect ratio 9:16). Do not write code. Reply only with the file path.",
+        "Generate exactly one video with your video generation tool: an apple rotates (about 6 seconds long, aspect ratio 9:16). Do not write code. Reply only with the file path.",
         "--cwd",
         "{cwd}",
         "--output-format",
@@ -1284,7 +1284,7 @@
         ],
         "jobId": "mock",
         "status": "completed",
-        "text": "Generate exactly one short video with your video generation tool, shortest duration available: waves (about 5 seconds long). Do not write code. Reply only with the file path."
+        "text": "Generate exactly one video with your video generation tool: waves (about 5 seconds long). Do not write code. Reply only with the file path."
       },
       "tool": {
         "name": "generate_video",

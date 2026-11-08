@@ -2009,7 +2009,7 @@ const GROK_SPEC: CliSpec = {
   command: "grok",
   templates: {
     image: "Generate exactly one image with your image generation tool: {prompt}. Do not write code. Reply only with the file path.",
-    video: "Generate exactly one short video with your video generation tool, shortest duration available: {prompt}. Do not write code. Reply only with the file path.",
+    video: "Generate exactly one video with your video generation tool: {prompt}. Do not write code. Reply only with the file path.",
   },
   argv: (prompt, cwd, model) => [
     "-p", prompt, "--cwd", cwd, "--output-format", "streaming-json", "--yolo", "--no-auto-update",

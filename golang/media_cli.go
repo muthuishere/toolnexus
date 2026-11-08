@@ -349,7 +349,7 @@ func NewGrokMediaClient(cfg MediaConfig) *GrokMediaClient {
 		Env:            []string{`GROK_CONFIG={"features":{"image_gen":true,"video_gen":true}}`},
 		Templates: map[string]string{
 			"image": "Generate exactly one image with your image generation tool: {prompt}. Do not write code. Reply only with the file path.",
-			"video": "Generate exactly one short video with your video generation tool, shortest duration available: {prompt}. Do not write code. Reply only with the file path.",
+			"video": "Generate exactly one video with your video generation tool: {prompt}. Do not write code. Reply only with the file path.",
 		}}
 	c.Argv = func(verb, prompt, cwd string) []string {
 		a := []string{"-p", prompt, "--cwd", cwd, "--output-format", "streaming-json", "--yolo", "--no-auto-update"}

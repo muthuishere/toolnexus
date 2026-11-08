@@ -359,7 +359,7 @@ defmodule Toolnexus.Media.Grok do
     "image" =>
       "Generate exactly one image with your image generation tool: {prompt}. Do not write code. Reply only with the file path.",
     "video" =>
-      "Generate exactly one short video with your video generation tool, shortest duration available: {prompt}. Do not write code. Reply only with the file path."
+      "Generate exactly one video with your video generation tool: {prompt}. Do not write code. Reply only with the file path."
   }
 
   @impl CliClient
