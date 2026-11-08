@@ -26,7 +26,8 @@ and media engine against it, in its normal test command. Docs: cookbook "Run wit
 - **Not done:** the ports' suites test the System One and Cloudflare classifier wires only; the
   OpenAI Decisions wire is served and self-tested, but the `openai` backend lives on the #157
   branch, so port-level Decisions cases land with that change. The existing in-process unit fakes
-  stay as they are. The benchmark's own mock (`benchmarks/mock_llm.py`) is unchanged.
+  stay as they are. ACP cancel is not exercised in elixir (#169) or clojure (#170), which lack it;
+  clojure has no network streaming, so its suite has no streaming case. The benchmark's own mock (`benchmarks/mock_llm.py`) is unchanged.
 
 **Rust: an ACP turn the agent never ends now fails after `permission_timeout`** (rust only, #124).
 Every other port bounds the whole `session/prompt` turn by the permission timeout, as SPEC §7 says
