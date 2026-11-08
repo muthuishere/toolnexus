@@ -2902,6 +2902,29 @@ fall-through between CLI presets is not advertised.
 Conformance: `cli.json` cases with `style`, `oneShot`, and `verbCases` (verbs, tool names and the
 unsupported-verb error for each preset, mock and an HTTP style mixed with presets).
 
+### 7G.10b Availability, file names, who served it
+
+- **`style.available()`** (idiomatic: `Available(ctx)`, `available()`, `AvailableAsync`) answers
+  `{installed, loggedIn, reason}` in well under a second, generating nothing and reading no
+  secret. CLI preset: `installed` = the command (config `command[0]`, else the CLI name) is found
+  (on `PATH`, or as a path); `loggedIn` = the CLI's own login file **exists** — grok
+  `~/.grok/auth.json`, codex `$CODEX_HOME/auth.json` (default `~/.codex/auth.json`), agy
+  `~/.gemini/antigravity-cli/antigravity-oauth-token`. Reasons, byte-exact:
+  `<label>: "<cmd>" not found on PATH` · `<label>: installed, not logged in (<file> missing)` ·
+  `<label>: installed, logged in (<file> present)`. Mock preset: `{true, true, "<label>: mock"}`,
+  or `{false, false, "<label>: mock set unavailable by TOOLNEXUS_MEDIA_MOCK_AVAILABLE=0"}` when that
+  env var is `0`. HTTP style: `installed` true; `loggedIn` = config `key` set (`<name>: key from
+  config`) or every `${VAR}` in its headers set (`<name>: env present`), else
+  `<name>: <VAR> is not set` (first missing, sorted). `<name>` = the style's `name`, else `style`.
+- **`gather.name`** — when set, saved files are `<slug><ext>`, then `<slug>-2<ext>`, `<slug>-3<ext>`…
+  (the first name not already in the folder). `slug` = the name with every byte outside
+  `[A-Za-z0-9._-]` replaced by `-`, then leading `.` and `-` removed; empty ⇒ the default naming.
+- **`MediaResult.style`** — who served the call: the preset id (`xai-grok-cli`, …) for a preset,
+  the style's `name` (else `style`) for an HTTP style, the client's `name` for any other client.
+  **`MediaResult.model`** — the configured model for the verb (`models[verb]`, else `model`) of a
+  loaded style, when set; omitted otherwise, never guessed. **`usage`** stays exactly what the
+  provider or CLI reported (D21); no price is ever estimated.
+
 ### 7G.11 Hermetic conformance
 
 - **API cases** (`cases.json`, `clients.json`, `routing.json`): an in-process fake HTTP server
