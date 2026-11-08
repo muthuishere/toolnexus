@@ -3756,7 +3756,7 @@ Changing mode or model on a **running** client (#197) — no restart, same proce
   sent at once, not queued behind a running turn; when the change takes effect is the agent's call.
   On a closed client both fail with the closed-client error.
 - Idiom: golang `SetMode(ctx, mode)` / `SetModel(ctx, model)`; js `setMode` / `setModel` (async);
-  python `await set_mode` / `set_model`; java `setMode` / `setModel`; csharp `SetModeAsync` /
+  python `set_mode` / `set_model` (sync, like its `generate`); java `setMode` / `setModel`; csharp `SetModeAsync` /
   `SetModelAsync`; elixir `set_mode/2` / `set_model/2` (`:ok | {:error, reason}`); clojure
   `set-mode!` / `set-model!`; rust `set_mode` / `set_model` (async, `Result`).
 

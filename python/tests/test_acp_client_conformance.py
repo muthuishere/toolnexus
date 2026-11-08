@@ -97,6 +97,47 @@ def test_passthrough_bare(tmp_path):
         client.close()
 
 
+def test_live_switch(tmp_path):
+    case = CASES["liveSwitch"]
+    msg = {"messages": [{"role": "user", "content": "q"}]}
+    client, rec = _load(tmp_path)
+    client.set_mode(case["mode"])
+    client.set_model(case["model"])
+    assert client.generate(msg)["content"] == case["expectText"]
+    client.close()
+    assert len(_recorded(rec, "initialize")) == case["expectInitializeCount"]
+    assert len(_recorded(rec, "session/new")) == case["expectSessionNewCount"]
+    (sm,) = _recorded(rec, "session/set_mode")
+    assert sm == {"sessionId": "s1", **case["expectSetMode"]}
+    (sco,) = _recorded(rec, "session/set_config_option")
+    assert sco == {"sessionId": "s1", **case["expectSetConfigOption"]}
+    with pytest.raises(ACPError, match="closed"):
+        client.set_mode(case["mode"])
+
+
+def test_live_switch_model_fallback(tmp_path):
+    case = CASES["liveSwitch"]
+    client, rec = _load(tmp_path, fake_env=case["fallback"]["fakeEnv"])
+    try:
+        client.set_model(case["model"])
+        (sm,) = _recorded(rec, "session/set_model")
+        assert sm == {"sessionId": "s1", **case["fallback"]["expectSetModel"]}
+    finally:
+        client.close()
+
+
+def test_live_switch_rejected_mode(tmp_path):
+    case = CASES["liveSwitch"]
+    rej = case["reject"]
+    client, _ = _load(tmp_path, fake_env=rej["fakeEnv"])
+    try:
+        with pytest.raises(ACPError, match=re.escape(rej["expectErrorContains"])):
+            client.set_mode(case["mode"])
+        assert client.generate({"messages": [{"role": "user", "content": "q"}]})["content"] == rej["expectText"]
+    finally:
+        client.close()
+
+
 def test_agent_exit_fails_promptly(tmp_path):
     case = CASES["agentExit"]
     client, _ = _load(tmp_path, fake_env=case["fakeEnv"])
