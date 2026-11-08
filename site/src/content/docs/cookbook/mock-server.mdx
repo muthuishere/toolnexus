@@ -1,0 +1,85 @@
+---
+title: "Run without a model: the mock server"
+description: A deterministic, key-free local fake for every wire toolnexus speaks — chat, streaming, tool calls, attachments, classifiers, media and faults.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<Aside type="tip" title="Why you need this">
+Tests, demos and CI should not need an API key, a network or a bill. The mock server answers
+every request toolnexus sends with a plausible, **deterministic** reply, so a client run, a
+classifier decision or a media job can be asserted exactly. It is what every toolnexus port's
+own integration suite runs against.
+</Aside>
+
+`tools/mock-llm/mock_llm.py` in the repo is one file, Python standard library only. Copy it
+anywhere and run it:
+
+```bash
+python3 tools/mock-llm/mock_llm.py --port 8787
+# toolnexus mock model at http://127.0.0.1:8787/v1
+```
+
+Flags: `--host`, `--port` (`0` picks a free one), `--script replies.json`, `--quiet`. Any API
+key is accepted and headers are never logged. It is also importable:
+`srv, base = mock_llm.start(port=0)`.
+
+## What it answers
+
+| Route | Wire | Reply |
+|---|---|---|
+| `POST /v1/chat/completions` | OpenAI chat, SSE with `stream: true` | Tools offered and no tool result yet: one call to the first tool, arguments built from its schema. Otherwise a final text. |
+| `POST /v1/messages` | Anthropic messages, SSE | Same behaviour. |
+| `POST /v1/systemone` | System One classifier (`typesafe`, `openrouter`, `vercel`, `custom`) | noul `0.95`; choice picked by `sha256(state + instructions)`, probabilities summing to 1; score inside the rubric. |
+| `POST …/ai/run` | Cloudflare classifier envelope | The same answers inside `{success, result}`. |
+| `POST /v1/decisions` | OpenAI Decisions (`openai` backend) | Positional answers: `predicate` / `choice` / `score`, same picks as System One. |
+| `GET /v1/_mock/media-style.json` | Media style (§7G) | A style whose `baseUrl` is the mock, declaring all six verbs. Image, video and talking are async jobs. |
+| `GET /v1/models`, `/health` | | Model list, liveness. |
+
+Images sent as attachments are echoed back as `Received 1 image(s): image/png 82 bytes
+sha256=…`, so a test proves the bytes arrived intact. To exercise retries, send the header
+`X-Mock-Fault: 429` (plus `X-Mock-Retry-After: 0`), or queue faults with
+`POST /v1/_mock/faults {"path": "/chat/completions", "status": 429, "times": 1}`.
+`GET /v1/_mock/requests` returns per-route request counts.
+
+## Point a client at it
+
+Use base URL `http://127.0.0.1:8787/v1` with any key. The key must be passed explicitly, because
+toolnexus only reads a provider's key env var for that provider's own host.
+
+| Language | Client options |
+|---|---|
+| JavaScript | `createClient({ baseUrl: "http://127.0.0.1:8787/v1", style: "openai", model: "mock-model", apiKey: "mock" })` |
+| Python | `create_client(base_url="http://127.0.0.1:8787/v1", style="openai", model="mock-model", api_key="mock")` |
+| Go | `toolnexus.CreateClient(toolnexus.ClientOptions{BaseURL: "http://127.0.0.1:8787/v1", Style: toolnexus.StyleOpenAI, Model: "mock-model", APIKey: "mock"})` |
+| Java | `LlmClient.create(new LlmClient.Options().baseUrl("http://127.0.0.1:8787/v1").style("openai").model("mock-model").apiKey("mock"))` |
+| C# | `LlmClient.Create(new LlmClient.Options { BaseUrl = "http://127.0.0.1:8787/v1", Style = "openai", Model = "mock-model", ApiKey = "mock" })` |
+| Elixir | `Toolnexus.Client.create(base_url: "http://127.0.0.1:8787/v1", style: "openai", model: "mock-model", api_key: "mock")` |
+| Clojure | `(client/create-client {:base-url "http://127.0.0.1:8787/v1" :style "openai" :model "mock-model" :api-key "mock"})` |
+| Rust | `create_client(ClientOptions { base_url: "http://127.0.0.1:8787/v1".into(), style: Style::OpenAI, model: "mock-model".into(), api_key: "mock".into(), ..Default::default() })` |
+
+Use `style: "anthropic"` with the same base URL for the Anthropic wire. For a classifier, use the
+`custom` backend with the same base URL (`/systemone` is appended). For Cloudflare use
+`http://127.0.0.1:8787/v1/accounts/any/ai/run`. For media, save
+`/v1/_mock/media-style.json` to a file and load it with `loadMediaStyle`.
+
+## Scripted replies
+
+`--script replies.json` overrides any part of the default behaviour:
+
+```json
+{
+  "text": "Final answer text",
+  "toolCall": { "name": "add", "arguments": { "a": 2, "b": 2 } },
+  "answers": { "team": { "choice": "billing" }, "How upset is the customer?": { "score": 2 } },
+  "faults": [{ "path": "/chat/completions", "status": 503, "times": 2 }]
+}
+```
+
+`answers` is keyed by question key or by instructions text. Faults listed in the script are
+re-armed by `POST /v1/_mock/reset`.
+
+<Aside type="caution">
+The mock is plausible, not smart. Its picks come from a hash and say nothing about how a real
+model ranks your options. Use it to test plumbing, never to tune a threshold.
+</Aside>

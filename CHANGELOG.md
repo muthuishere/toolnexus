@@ -8,6 +8,22 @@ GitHub Releases `vX.Y.Z` via `release.yml` (see `PUBLISHING.md`).
 
 ## Unreleased
 
+**A mock model server: run any toolnexus client, classifier or media job with no key and no cost.**
+`tools/mock-llm/mock_llm.py` is one stdlib-only Python file (`python3 tools/mock-llm/mock_llm.py
+--port 8787`, base URL `http://127.0.0.1:8787/v1`, any key). It answers OpenAI chat and Anthropic
+messages (tool calls when tools are offered, then a final text; SSE streaming), echoes attachments
+back with their mime type, size and sha256 so a test can prove an image arrived, serves the System
+One, Cloudflare and OpenAI Decisions classifier wires with deterministic answers (noul 0.95, choice
+by hash, score within the rubric), serves a §7G media style covering all six verbs (async jobs with
+a poll, tiny real PNG/WAV/MP4 files), and injects 429/5xx with `Retry-After` on request. `--script`
+overrides replies. Every port now has an integration suite that runs its real client, classifier
+and media engine against it, in its normal test command. Docs: cookbook "Run without a model".
+
+- **Not done:** the ports' suites test the System One and Cloudflare classifier wires only; the
+  OpenAI Decisions wire is served and self-tested, but the `openai` backend lives on the #157
+  branch, so port-level Decisions cases land with that change. The existing in-process unit fakes
+  stay as they are. The benchmark's own mock (`benchmarks/mock_llm.py`) is unchanged.
+
 **Rust: an ACP turn the agent never ends now fails after `permission_timeout`** (rust only, #124).
 Every other port bounds the whole `session/prompt` turn by the permission timeout, as SPEC §7 says
 ("the turn's permission timeout still applies"). Rust bounded only the host's `on_permission`
