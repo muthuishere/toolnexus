@@ -13,14 +13,14 @@
 Each port: option (default off), run + stream, both styles, tests replaying
 `conformance/stop_recovery/cases.json`.
 
-- [ ] `js/`
-- [ ] `python/`
-- [ ] `golang/`
-- [ ] `java/`
-- [ ] `csharp/`
-- [ ] `elixir/`
-- [ ] `clojure/`
-- [ ] `rust/`
+- [x] `js/`
+- [x] `python/`
+- [x] `golang/`
+- [x] `java/`
+- [x] `csharp/`
+- [x] `elixir/`
+- [x] `clojure/` — run loop only: its network client has no SSE stream loop (only the in-process client streams, out of scope)
+- [x] `rust/`
 
 ## Changelog
 
