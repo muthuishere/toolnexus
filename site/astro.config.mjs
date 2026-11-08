@@ -28,6 +28,14 @@ export default defineConfig({
 	integrations: [
 		starlight({
 			title: 'Toolnexus',
+			// The mark: three tool connectors converging on one hub that points forward.
+			logo: { light: './src/assets/logo-light.svg', dark: './src/assets/logo-dark.svg' },
+			favicon: '/favicon.svg',
+			head: [
+				{ tag: 'link', attrs: { rel: 'icon', href: '/toolnexus/favicon.ico', sizes: '32x32' } },
+				{ tag: 'link', attrs: { rel: 'icon', type: 'image/png', href: '/toolnexus/favicon-32.png', sizes: '32x32' } },
+				{ tag: 'link', attrs: { rel: 'apple-touch-icon', href: '/toolnexus/apple-touch-icon.png' } },
+			],
 			// Remove the right-hand "On this page" table of contents site-wide.
 			tableOfContents: false,
 			description:

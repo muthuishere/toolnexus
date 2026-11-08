@@ -2,8 +2,14 @@
 title: Toolnexus
 description: "One vendor-neutral agent library, byte-identical in JavaScript, Python, Go, Java, C#, Elixir, Clojure and Rust: MCP client and server, agent skills, A2A and ACP agents, a typed decision classifier, image/video/speech generation, streaming, memory and resilience. Benchmarked against 21 frameworks; fastest or level in most languages."
 template: splash
+# One-word tab title on the home page, not "Toolnexus | Toolnexus".
+head:
+  - tag: title
+    content: Toolnexus
 hero:
-  tagline: "The simplest agent library, and the fastest in most languages we've measured. Build in the language you're comfortable with: JavaScript, Python, Go, Java, C#, Elixir, Clojure or Rust, with the same behaviour in each. MCP servers, agent skills, your own functions and media generation, for any LLM."
+  image:
+    html: '<svg class="tn-hero-mark" viewBox="0 0 32 32" role="img" aria-label="Toolnexus mark"><path class="tn-wire" pathLength="1" d="M4 6L14 16"/><path class="tn-wire" pathLength="1" d="M4 16H14"/><path class="tn-wire" pathLength="1" d="M4 26L14 16"/><circle cx="4" cy="6" r="2.8"/><circle cx="4" cy="16" r="2.8"/><circle cx="4" cy="26" r="2.8"/><path class="tn-head" d="M12 7.5L29 16L12 24.5L16 16Z"/></svg>'
+  tagline: "Simpler than all. Faster than most. The complete agentic backbone: MCP, skills and your own tools for any LLM, in eight languages."
   actions:
     - text: Quickstart
       link: /toolnexus/quickstart/
@@ -16,6 +22,7 @@ hero:
 
 import { Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
 
+<svg class="tn-converge not-content" viewBox="0 0 800 48" preserveAspectRatio="none" aria-hidden="true"><path pathLength="1" d="M400 2L50 46"/><path pathLength="1" d="M400 2L150 46"/><path pathLength="1" d="M400 2L250 46"/><path pathLength="1" d="M400 2L350 46"/><path pathLength="1" d="M400 2L450 46"/><path pathLength="1" d="M400 2L550 46"/><path pathLength="1" d="M400 2L650 46"/><path pathLength="1" d="M400 2L750 46"/><circle cx="400" cy="2" r="2"/></svg>
 <ul class="tn-langs not-content" aria-label="Eight languages, one contract">
 	<li><a href="/toolnexus/api/javascript/"><span class="tn-lang">JavaScript</span><span class="tn-reg">npm</span></a></li>
 	<li><a href="/toolnexus/api/python/"><span class="tn-lang">Python</span><span class="tn-reg">PyPI</span></a></li>

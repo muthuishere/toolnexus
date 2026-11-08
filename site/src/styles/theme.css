@@ -309,3 +309,77 @@ starlight-tabs [role='tab'][aria-selected='true'] {
 	border-top: 2px solid var(--tn-strong-rule);
 	background: #121212;
 }
+
+/* ── Home: the line-art mark and the language connectors ── */
+.hero .tn-hero-mark {
+	width: min(15rem, 60vw);
+	height: auto;
+	fill: var(--sl-color-accent);
+}
+.hero .tn-hero-mark .tn-wire {
+	fill: none;
+	stroke: var(--sl-color-accent);
+	stroke-width: 3;
+	stroke-linecap: round;
+}
+.tn-converge {
+	display: block;
+	width: 100%;
+	height: 3rem;
+	margin: 0 0 -1px;
+	fill: none;
+	stroke: var(--tn-rule);
+	stroke-width: 1;
+}
+.tn-converge path {
+	vector-effect: non-scaling-stroke;
+}
+.tn-converge circle {
+	fill: var(--sl-color-accent);
+	stroke: none;
+}
+.tn-langs a {
+	transition: transform 200ms ease-out;
+}
+.tn-langs .tn-lang {
+	text-decoration: underline transparent;
+	text-underline-offset: 0.25em;
+	transition: text-decoration-color 200ms ease-out, color 200ms ease-out;
+}
+.tn-langs a:hover {
+	transform: translateY(-2px);
+}
+.tn-langs a:hover .tn-lang {
+	text-decoration-color: currentColor;
+}
+
+/* ── One orchestrated load, then still. Everything ends fully visible; transform
+   and opacity only, so nothing shifts layout. No motion when the user asks. ── */
+@keyframes tn-rise {
+	from { opacity: 0; transform: translateY(8px); }
+}
+@keyframes tn-fade {
+	from { opacity: 0; }
+}
+@keyframes tn-draw {
+	from { stroke-dashoffset: 1; }
+	to { stroke-dashoffset: 0; }
+}
+@media (prefers-reduced-motion: no-preference) {
+	.hero h1 { animation: tn-rise 500ms ease-out both; }
+	.hero .tagline { animation: tn-rise 500ms ease-out 90ms both; }
+	.hero .sl-flex.actions, .hero .actions { animation: tn-rise 500ms ease-out 180ms both; }
+	.hero .tn-hero-mark .tn-wire,
+	.tn-converge path {
+		stroke-dasharray: 1;
+		animation: tn-draw 600ms ease-out both;
+	}
+	.hero .tn-hero-mark circle { animation: tn-fade 300ms ease-out both; }
+	.hero .tn-hero-mark .tn-wire:nth-of-type(2) { animation-delay: 80ms; }
+	.hero .tn-hero-mark .tn-wire:nth-of-type(3) { animation-delay: 160ms; }
+	.hero .tn-hero-mark .tn-head { animation: tn-fade 400ms ease-out 420ms both; }
+	.tn-converge path { animation-delay: 300ms; }
+	.tn-converge circle { animation: tn-fade 300ms ease-out 250ms both; }
+	.tn-langs li { animation: tn-fade 400ms ease-out 450ms both; }
+	.sl-markdown-content .expressive-code { animation: tn-fade 400ms ease-out 200ms both; }
+}
