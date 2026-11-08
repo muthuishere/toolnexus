@@ -46,24 +46,25 @@ injection view.
 - **WHEN** `MEMORY.md` is 3 MB and the agent calls `memory add`
 - **THEN** the file on disk is the original 3 MB plus the new entry
 
-### Requirement: Built-in dreaming
-The library SHALL provide `dreamOnce(dir, opts)` (one pass, returns a `DreamReport`) and
-`startDreaming(dir, opts)` (the same pass on a §7E heartbeat). The dreamer SHALL use a
-library-owned prompt identical in every port, only the `memory` and `transcript_search` tools,
-need no user-written file, and append one `memory/log.md` entry per pass that changed anything.
+### Requirement: Built-in dreamer preset
+The library SHALL provide `dreamer(dir, opts)` returning an AgentDef built from a library-owned
+`DREAM_PROMPT` identical in every port, with exactly the `memory` and `transcript_search`
+tools, needing no user-written file. `fromDir` SHALL accept an opt-in `dream: { everyMs, store }`
+that starts that dreamer on the existing heartbeat. Each pass that changes memory SHALL append
+one entry to `memory/log.md`.
 
-#### Scenario: One pass with no user-written files
-- **WHEN** `dreamOnce(dir, { client, store })` runs on a home holding only `MEMORY.md`, and the scripted model fixes one contradicted line
-- **THEN** `MEMORY.md` holds the corrected line, `memory/log.md` gains one entry naming the change, and the report lists that change
+#### Scenario: A dream pass fixes a wrong note and changes the next session
+- **WHEN** a home's `MEMORY.md` holds a note the transcript contradicts and one `dreamer` pass runs with a scripted model
+- **THEN** the note is corrected, `memory/log.md` gains one entry naming it, and a next session built with `fromDir` answers per the corrected note
 
 #### Scenario: Nothing to do is silent
-- **WHEN** the scripted model replies `HEARTBEAT_OK`
-- **THEN** no file is written, `memory/log.md` is unchanged, and the report has no changes
+- **WHEN** the dreamer's scripted model replies `HEARTBEAT_OK`
+- **THEN** no file is written and `memory/log.md` is unchanged
 
 #### Scenario: Dreamer cannot reach other tools
-- **WHEN** a dream pass runs on a persona whose own agent has shell and file tools
+- **WHEN** `dreamer` is built for a persona whose own agent has shell and file tools
 - **THEN** the dreamer's tool list is exactly `memory` and `transcript_search`
 
-#### Scenario: Scheduled dreaming coalesces
-- **WHEN** `startDreaming` runs on a virtual clock and three intervals elapse while one pass is still running
-- **THEN** exactly one further pass runs after it, never three
+#### Scenario: Absent dream option is unchanged
+- **WHEN** `fromDir` is called without `dream`
+- **THEN** no dreamer is started and behaviour is byte-identical to today

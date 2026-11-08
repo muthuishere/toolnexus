@@ -13,11 +13,11 @@
 
 ## G5 dreaming
 
-- [ ] SPEC §7E: `DREAM_PROMPT` constant (exact text), `dreamOnce` / `startDreaming` signatures,
-      `DreamReport` shape, `memory/log.md` entry format; amend "Composition, not API"
+- [ ] SPEC §7E: `DREAM_PROMPT` constant (exact text), `dreamer()` + `fromDir` `dream` option,
+      `memory/log.md` entry format; amend "Composition, not API"
 - [ ] Fixture `examples/dreaming/` (home with one contradicted line + a transcript store + a
-      scripted model) asserting the four "Built-in dreaming" scenarios in all 8 ports
-- [ ] `conformance/options_manifest.json` — `dreamOnce`, `startDreaming`
+      scripted model) asserting the four "Built-in dreamer preset" scenarios (Mt. Moon = build gate) in all 8 ports
+- [ ] `conformance/options_manifest.json` — `dreamer`, `fromDir.dream`
 
 ## Per-language parity checklist
 
@@ -44,7 +44,7 @@ byte-identity test with all options absent.
 
 ## Docs
 
-- [ ] Docs page "Dreaming" (per language) — leads with `startDreaming`, then customisation (`instructions`, `DREAM.md`), per design.md "Dreaming": Karpathy-style layout
+- [ ] Docs page "Dreaming" (per language) — leads with the `fromDir(dir, { dream })` one-liner, then customisation (`instructions`, `DREAM.md`), per design.md "Dreaming": Karpathy-style layout
       (`MEMORY.md` index / `memory/<slug>.md` pages with `[[links]]` / `memory/log.md`), shipped
       `HEARTBEAT.md` doing verify → demote → merge → repair links → log, the "when worth running"
       table, cadence guidance, and a "Further reading" link to Anthropic's "The components of agent

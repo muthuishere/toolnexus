@@ -92,35 +92,34 @@ Contract:
 - The article's "one page per writer" result is a **recipe** concern: give each writer its own
   note slug. No per-agent namespacing is added.
 
-## G5 — dreaming as a feature (owner, 2026-11-08)
+## G5 — dreaming as a feature (owner decision 2026-11-08, huddle: option C)
 
-Owner: dreaming must not need hand-written `HEARTBEAT.md` + `startAgent` wiring. So the recipe
-below becomes a library-owned preset:
+Dreaming must need no hand-written `HEARTBEAT.md`. Chosen shape — smallest surface that is one
+line for the user:
 
 ```ts
-// one pass — for cron, CI, a button, or tests
-const report = await agents.dreamOnce("./personas/ava", { client, store, model?, budget? })
-// report: { changes: [{ file, kind: "fixed"|"removed"|"demoted"|"merged"|"linked", summary }], tokens }
+// one line: dream nightly
+const ava = agents.fromDir("./personas/ava", { dream: { everyMs: 24 * 3600_000, store } })
 
-// on a clock — sugar over startAgent({ everyMs })
-const dreaming = agents.startDreaming("./personas/ava", { client, store, everyMs: 24 * 3600_000 })
-dreaming.stop()
+// or schedule it yourself (cron, CI, a button, a test) — dreamer() is a plain AgentDef
+const d = agents.dreamer("./personas/ava", { store })
+agents.startAgent(d, { client }, { everyMs: 24 * 3600_000 })   // or: run one pass on demand
 ```
 
-- The **dream prompt is a SPEC constant** (byte-identical across ports, like `HEARTBEAT_PROMPT`):
-  it states what memory is *for* and the pass order below — not rigid write rules.
-- The dreamer is a **separate, scoped agent**: tools are exactly `memory` (notes on) and
-  `transcript_search`. It never inherits the persona's shell/file tools (blast radius).
-- `opts.instructions` (optional) appends host prose to the prompt — the escape hatch for
-  goal-focused dreaming (the article's contract-terms case). A `DREAM.md` in the home dir, if
-  present, is appended the same way.
-- Overlap: a pass already running ⇒ ticks coalesce (§7E inbox rule), never parallel passes.
-- `DreamReport` is parsed from `memory/log.md`'s new entry — the log is the single record.
-
-ADR 0016/0017 tension: this IS new surface (two functions). Justified because the user-facing
-need is "turn on dreaming", the wiring is identical every time, and the prompt must be parity-
-tested to be trustworthy — a recipe each host copies drifts. It adds no loop: it is `agent()` +
-`startAgent` + two tools. SPEC §7E's "Composition, not API" dream line is amended accordingly.
+- **`DREAM_PROMPT`** is a SPEC constant, byte-identical across ports (like `HEARTBEAT_PROMPT`):
+  what memory is *for* + the pass order below, not rigid write rules.
+- **`dreamer(dir, { store, instructions? })`** returns an AgentDef whose tools are exactly
+  `memory` (notes on) and `transcript_search` — never the persona's shell/file tools.
+  `instructions` / a `DREAM.md` in the home dir append host prose (goal-focused dreaming).
+- **`fromDir(dir, { dream: { everyMs, store } })`** is opt-in sugar: it builds `dreamer(dir)`
+  and starts it on the same runtime via the existing `startAgent` heartbeat. Absent ⇒ unchanged.
+- **`memory/log.md` is mandatory**: every pass that changes anything appends one entry — the
+  user's only audit and revert trail (risk: a dreamer "tidying" good notes away).
+- No `dreamOnce` / `startDreaming`, no new loop: ADR 0016/0017 stand. SPEC §7E "Composition,
+  not API" is amended to name `dreamer()` as the one shipped preset.
+- **Build gate (Mt. Moon fixture):** a home with one wrong note + a transcript contradicting it;
+  after one dream pass the note is fixed, `log.md` names it, and a next session (scripted model
+  keyed on the soul) answers differently. No implementation merges without it passing in all 8.
 
 ## Dreaming — what each pass does
 
@@ -166,8 +165,7 @@ only when `log.md` shows most passes changing something, less when most are `HEA
 
 ## Open decisions (owner)
 
-- **D9** Dreaming as library API (`dreamOnce` / `startDreaming`) vs recipe only. [API — owner
-  asked 2026-11-08; this supersedes "Composition, not API" for dreaming only.]
+- **D9** ~~API vs recipe~~ RESOLVED 2026-11-08: option C (`dreamer()` + `fromDir` `dream` option).
 - **D10** Dreamer model default: same client as the persona, or required explicit `model`?
   [same client; recommend a cheap model in docs]
 
