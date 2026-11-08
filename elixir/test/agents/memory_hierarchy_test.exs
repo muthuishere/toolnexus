@@ -475,6 +475,31 @@ defmodule Toolnexus.Agents.MemoryHierarchyTest do
     assert snapshot(home) == frozen
   end
 
+  test "D7: the dreamer's memory tool keeps USER.md untouched and memory/log.md append-only" do
+    e = @dr["expect"]["D7_dreamGuard"]
+    home = mkhome(e["files"])
+    [mem | _] = Home.dreamer(home, store: dr_store()).spec.uses.tools
+
+    for c <- e["cases"] do
+      assert exec(mem, c["args"]) == %{"output" => c["output"], "isError" => c["isError"]},
+             c["name"]
+    end
+
+    snap = snapshot(home)
+    assert Enum.sort(Map.keys(snap)) == Enum.sort(Map.keys(e["files"]))
+    for {f, body} <- e["filesAfter"], do: assert(snap[f] == body, f)
+    p = e["plainToolStillWrites"]
+
+    assert exec(Home.memory_tool(home, notes: true), p["args"]) ==
+             %{"output" => p["output"], "isError" => p["isError"]}
+  end
+
+  test "D8: dream_prompt removes only what the transcripts contradict" do
+    e = @dr["expect"]["D8_promptKeepsUnmentionedClaims"]
+    assert Home.dream_prompt() =~ e["dreamPromptContains"]
+    refute Home.dream_prompt() =~ e["dreamPromptNotContains"]
+  end
+
   test "D3: the dreamer's tools are exactly memory (notes on) + transcript_search" do
     e = @dr["expect"]["D3_dreamerToolsExactly"]
     home = mkhome(@dr["home"])

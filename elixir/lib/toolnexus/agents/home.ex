@@ -64,7 +64,7 @@ defmodule Toolnexus.Agents.Home do
                   [
                     "You are dreaming: an offline pass over your own memory. Memory exists so that a future session decides better. MEMORY.md is a short index loaded at the start of every session; notes (memory target \"note:<slug>\") hold the detail; the transcripts (transcript_search) are the ground truth of what actually happened.",
                     "Work in this order:",
-                    "1. Verify: read MEMORY.md and the notes it points to (memory read, memory list) and check each claim against the transcripts. Fix a claim the transcripts contradict; remove one they no longer support.",
+                    "1. Verify: read MEMORY.md and the notes it points to (memory read, memory list) and check each claim against the transcripts. Fix or remove a claim only when it is contradicted by the transcripts; a claim they do not mention stays (transcripts may be pruned).",
                     "2. Demote: move detail out of MEMORY.md into a note and leave a one-line [[slug]] pointer, so the index stays short.",
                     "3. Merge: fold duplicate or conflicting notes into one.",
                     "4. Repair links: point every [[slug]] at an existing note or create it; give every note an index line.",
@@ -308,7 +308,7 @@ defmodule Toolnexus.Agents.Home do
       does: "dreams over the memory in #{dir}",
       soul: "## HEARTBEAT.md\n\n" <> Enum.join(parts, "\n\n"),
       model: opts[:model] || "inherit",
-      uses: %{tools: [memory_tool(dir, notes: true), search]}
+      uses: %{tools: [dream_guard(memory_tool(dir, notes: true)), search]}
     })
   end
 
@@ -531,15 +531,39 @@ defmodule Toolnexus.Agents.Home do
     end)
   end
 
+  # The dream guard (SPEC §7E "Dreaming"): the dreamer's memory tool refuses every action on
+  # USER.md and replace/remove on note:log before anything is read or written, so a dream
+  # never touches the user model and its audit trail is append-only.
+  defp dream_guard(%Toolnexus.Tool{execute: run} = mem) do
+    %{
+      mem
+      | execute: fn args, ctx ->
+          case {args["target"], args["action"]} do
+            {"user", _} ->
+              %Toolnexus.ToolResult{output: "dreamer: USER.md is off-limits", is_error: true}
+
+            {"note:log", a} when a in ["replace", "remove"] ->
+              %Toolnexus.ToolResult{
+                output: "dreamer: memory/log.md is append-only",
+                is_error: true
+              }
+
+            _ ->
+              run.(args, ctx)
+          end
+        end
+    }
+  end
+
   # Write to a temp file in the same directory, flush it to disk (fsync), then rename
   # over the target, so a crash mid-write cannot leave a torn file.
   defp write_atomic!(file, body) do
     File.mkdir_p!(Path.dirname(file))
-    tmp = "#{file}.tmp-#{System.unique_integer([:positive])}"
+    tmp = "#{file}.tmp-#{Base.encode16(:crypto.strong_rand_bytes(8), case: :lower)}"
 
     try do
       # a new file is created with 0666 & ~umask, the default
-      {:ok, fd} = :file.open(tmp, [:write, :binary, :raw])
+      {:ok, fd} = :file.open(tmp, [:write, :exclusive, :binary, :raw])
 
       try do
         :ok = :file.write(fd, body)
