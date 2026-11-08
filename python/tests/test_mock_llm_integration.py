@@ -121,7 +121,7 @@ QS = {
 }
 
 
-@pytest.mark.parametrize("backend,path", [("custom", ""), ("cloudflare", "/accounts/acc/ai/run")])
+@pytest.mark.parametrize("backend,path", [("custom", ""), ("cloudflare", "/accounts/acc/ai/run"), ("openai", "")])
 async def test_classifier_wires(base, backend, path):
     kw = {"supports": {"images": False}} if backend == "custom" else {}
     c = create_classifier(backend=backend, base_url=base + path, api_key_env="TN_MOCK_FAKE_KEY", **kw)
