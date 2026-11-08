@@ -79,7 +79,37 @@ func compactJSON(v any) string {
 	if err := enc.Encode(v); err != nil {
 		return ""
 	}
-	return strings.TrimSuffix(buf.String(), "\n")
+	return unescapeLineSeparators(strings.TrimSuffix(buf.String(), "\n"))
+}
+
+// unescapeLineSeparators undoes encoding/json's unconditional \u2028 / \u2029
+// escapes (SetEscapeHTML does not cover them) so they are emitted as-is (§7E).
+// An escape preceded by an odd run of backslashes is a literal "\\u2028" text
+// and is left alone.
+func unescapeLineSeparators(s string) string {
+	if !strings.Contains(s, `\u202`) {
+		return s
+	}
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		if s[i] == '\\' && i+5 < len(s) && s[i+1] == 'u' && s[i+2:i+5] == "202" && (s[i+5] == '8' || s[i+5] == '9') {
+			if s[i+5] == '8' {
+				b.WriteRune('\u2028')
+			} else {
+				b.WriteRune('\u2029')
+			}
+			i += 5
+			continue
+		}
+		if s[i] == '\\' && i+1 < len(s) {
+			b.WriteByte(s[i])
+			b.WriteByte(s[i+1])
+			i++
+			continue
+		}
+		b.WriteByte(s[i])
+	}
+	return b.String()
 }
 
 // generic turns a typed value into its JSON-generic form (map[string]any / []any).

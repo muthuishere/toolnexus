@@ -76,7 +76,9 @@ func readCapped(p string) (string, bool) {
 
 // IndexCap is the MEMORY.md index cap (SPEC §7E "Memory hierarchy"): whole
 // lines, bounded by line count and UTF-8 bytes. A zero field takes the preset's
-// value; a negative one is a construction error.
+// value (Go's zero-means-preset spelling of an absent field, a SPEC-permitted
+// difference: other ports reject 0 because they can tell absent from 0); a
+// negative one is a construction error.
 type IndexCap struct {
 	MaxLines int
 	MaxBytes int
@@ -220,14 +222,34 @@ type MemoryToolOptions struct {
 // process, so two memory tools over one home never lose an entry (SPEC §7E).
 var pathLocks sync.Map // string → *sync.Mutex
 
-func lockPath(p string) func() {
-	key, err := filepath.Abs(p)
+// realPath is the lock key: the absolute path with symlinks resolved. When the
+// file does not exist yet, the nearest existing ancestor is resolved and the
+// remaining components appended; if nothing resolves, the absolute path.
+func realPath(p string) string {
+	abs, err := filepath.Abs(p)
 	if err != nil {
-		key = p
+		abs = p
 	}
-	if dir, err := filepath.EvalSymlinks(filepath.Dir(key)); err == nil {
-		key = filepath.Join(dir, filepath.Base(key))
+	var rest []string
+	cur := abs
+	for {
+		if r, err := filepath.EvalSymlinks(cur); err == nil {
+			for i := len(rest) - 1; i >= 0; i-- {
+				r = filepath.Join(r, rest[i])
+			}
+			return r
+		}
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			return abs
+		}
+		rest = append(rest, filepath.Base(cur))
+		cur = parent
 	}
+}
+
+func lockPath(p string) func() {
+	key := realPath(p)
 	m, _ := pathLocks.LoadOrStore(key, &sync.Mutex{})
 	mu := m.(*sync.Mutex)
 	mu.Lock()
@@ -409,7 +431,8 @@ func listNotes(notesDir string) string {
 		if !validSlug(slug) {
 			continue
 		}
-		fi, err := os.Stat(filepath.Join(notesDir, name))
+		// Lstat: a symlink (dangling or not) is not a regular file — skipped (§7E).
+		fi, err := os.Lstat(filepath.Join(notesDir, name))
 		if err != nil || !fi.Mode().IsRegular() {
 			continue
 		}
@@ -664,6 +687,9 @@ func StartAgent(a *Agent, opts StartOptions) (*StartedAgent, error) {
 	ro := opts.Options
 	ro.Registry = a.Registry()
 	if a.dream != nil {
+		if _, taken := ro.Registry[a.dream.dreamer.Name]; taken {
+			return nil, fmt.Errorf("startAgent: dreamer name collision: %s is already registered", a.dream.dreamer.Name)
+		}
 		for k, v := range a.dream.dreamer.Registry() {
 			if _, taken := ro.Registry[k]; !taken {
 				ro.Registry[k] = v

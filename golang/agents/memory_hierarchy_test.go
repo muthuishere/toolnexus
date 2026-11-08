@@ -370,7 +370,11 @@ func TestMemoryHierarchyG3TranscriptSearch(t *testing.T) {
 			if v, ok := o["snippetChars"].(float64); ok {
 				opts.SnippetChars = int(v)
 			}
-			tool, err := tn.TranscriptSearchTool(newStubStore(t, convs), opts)
+			store := newStubStore(t, convs)
+			if b, _ := c["emptyStore"].(bool); b {
+				store = newStubStore(t, json.RawMessage(`[]`))
+			}
+			tool, err := tn.TranscriptSearchTool(store, opts)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -403,6 +407,12 @@ func TestMemoryHierarchyG3TranscriptSearch(t *testing.T) {
 	rm := map[string]any{"role": "assistant", "content": []any{map[string]any{"type": "tool_use", "input": json.RawMessage(`{ "q": {"z":1,"a":[{"y":1.50,"b":2}]}, "n": 2 }`)}}}
 	if got := tn.TranscriptMessageText(rm); got != `{"n":2,"q":{"a":[{"b":2,"y":1.50}],"z":1}}` {
 		t.Errorf("raw input: %q", got)
+	}
+
+	// U+2028/2029 and <>& emitted as-is; a literal backslash-u2028 text stays escaped.
+	ls := map[string]any{"role": "assistant", "content": []any{map[string]any{"type": "tool_use", "input": map[string]any{"a": "x\u2028y\u2029<&>é", "b": `\u2028`}}}}
+	if got := tn.TranscriptMessageText(ls); got != "{\"a\":\"x\u2028y\u2029<&>é\",\"b\":\"\\\\u2028\"}" {
+		t.Errorf("line separators: %q", got)
 	}
 
 	// Works over the shipped InMemoryConversationStore.
@@ -447,6 +457,62 @@ func TestMemoryHierarchyG4ConcurrentAdds(t *testing.T) {
 	}
 	if len(lines) != want || len(seen) != want {
 		t.Errorf("lost writes: %d lines, %d unique, want %d", len(lines), len(seen), want)
+	}
+}
+
+func TestMemoryHierarchyG4ConcurrentAddsViaSymlink(t *testing.T) {
+	ca := obj(obj(loadJSON(t, "memory-hierarchy")["writeSafety"])["concurrentAddsViaSymlink"])
+	writers, each, want := int(ca["writers"].(float64)), int(ca["addsEach"].(float64)), int(ca["expectEntries"].(float64))
+	dir := mkHome(t, nil)
+	link := filepath.Join(t.TempDir(), "home-link")
+	if err := os.Symlink(dir, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	var wg sync.WaitGroup
+	for w := 0; w < writers; w++ {
+		home := dir
+		if w == 0 {
+			home = link // writer 1 over the symlink, writer 2 over the real path
+		}
+		tool := MemoryTool(home)
+		for n := 0; n < each; n++ {
+			wg.Add(1)
+			go func(w, n int) {
+				defer wg.Done()
+				if r, _ := tool.Execute(map[string]any{"action": "add", "text": fmt.Sprintf("w%d-%d", w, n)}, nil); r.IsError {
+					t.Error(r.Output)
+				}
+			}(w, n)
+		}
+	}
+	wg.Wait()
+	b, _ := os.ReadFile(filepath.Join(dir, str(ca["file"])))
+	lines := strings.Split(strings.TrimRight(string(b), "\n"), "\n")
+	seen := map[string]bool{}
+	for _, l := range lines {
+		seen[l] = true
+	}
+	if len(lines) != want || len(seen) != want {
+		t.Errorf("lost writes via symlink: %d lines, %d unique, want %d", len(lines), len(seen), want)
+	}
+}
+
+func TestMemoryHierarchyG2ListSkipsNonRegular(t *testing.T) {
+	ls := obj(obj(loadJSON(t, "memory-hierarchy")["memoryTool"])["listSkipsNonRegular"])
+	dir := mkHome(t, obj(ls["regular"]))
+	for f, target := range obj(ls["symlinks"]) {
+		if err := os.Symlink(str(target), filepath.Join(dir, f)); err != nil {
+			t.Skipf("symlinks unavailable: %v", err)
+		}
+	}
+	for _, d := range arr(ls["dirs"]) {
+		if err := os.MkdirAll(filepath.Join(dir, str(d)), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	r, _ := MemoryToolWith(dir, MemoryToolOptions{Notes: true}).Execute(map[string]any{"action": "list"}, nil)
+	if r.IsError || r.Output != str(ls["expectList"]) {
+		t.Errorf("list: {%q,%v} want %q", r.Output, r.IsError, ls["expectList"])
 	}
 }
 
@@ -748,6 +814,26 @@ func TestDreamD4FromDirDreamRunsOnPersonaRuntime(t *testing.T) {
 	}
 	if !found {
 		t.Error("dreamer was not spawned on the persona's runtime")
+	}
+}
+
+func TestDreamD6DreamerNameCollision(t *testing.T) {
+	fx := loadDream(t)
+	e := obj(fx.exp["D6_dreamerNameCollision"])
+	home := mkHome(t, fx.home)
+	name := str(e["personaName"])
+	persona := FromDir(home, FromDirOptions{Name: name, Model: "m-quiet", Dream: &DreamOptions{EveryMs: 50, Store: newStubStore(t, fx.convs)}})
+	persona.Spec.Team = append(persona.Spec.Team, New(name+"-dreamer", Spec{Does: "team member"}))
+	clk := newFakeClock()
+	sa, err := StartAgent(persona, StartOptions{Options: Options{Transport: fx.mock, Clock: clk}, EveryMs: 1000})
+	if err == nil || err.Error() != str(e["error"]) {
+		t.Fatalf("got %v, want %q", err, e["error"])
+	}
+	if sa != nil {
+		t.Error("nothing may be started on a collision")
+	}
+	if n := clk.armed(); n != 0 {
+		t.Errorf("%d timers armed after a collision", n)
 	}
 }
 
