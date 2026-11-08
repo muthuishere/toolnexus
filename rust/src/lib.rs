@@ -30,6 +30,7 @@ pub mod skills;
 pub mod store;
 pub mod tool;
 pub mod toolkit;
+pub mod transcript_search;
 
 pub use adapters::{to_anthropic, to_gemini, to_openai};
 #[cfg(feature = "serve")]
@@ -51,3 +52,7 @@ pub use tool::{
     resolve_max_tool_concurrency, resolve_max_tool_concurrency_with, sanitize,
 };
 pub use toolkit::{McpConfigInput, Toolkit, ToolkitError, ToolkitOptions, create_toolkit};
+pub use transcript_search::{
+    TRANSCRIPT_SEARCH_DESCRIPTION, TranscriptSearchOptions, transcript_message_text,
+    transcript_search_tool,
+};

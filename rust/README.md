@@ -87,7 +87,7 @@ An API key from the environment is sent only to the host it belongs to: `OPENAI_
 | **Client** | OpenAI and Anthropic styles. Parallel tool calls, hooks, streaming, retries that honour `Retry-After`, conversation memory, prompt caching, tool tiers, usage metrics, and model listing. |
 | **Human in the loop** | A tool can pause the run and ask for input or authorization. With a `wait_for` handler the answer comes back inline; without one the run returns `pending` and you resume it later. |
 | **Serve** | `tk.serve(addr, ..)` publishes the toolkit as an A2A agent and/or an MCP server; `tk.mcp_handler(..)` is an MCP server to mount on your own router, with per-request hooks. |
-| **Agents** | Sub-agents, a runtime with budgets and durable resume, personas, conversation compaction, and a judge/classifier for guardrails and routing. |
+| **Agents** | Sub-agents, a runtime with budgets and durable resume, personas (with [dreaming](https://muthuishere.github.io/toolnexus/dreaming/) memory), conversation compaction, and a judge/classifier for guardrails and routing. |
 
 ## Classifier backends, images, cache and helpers
 

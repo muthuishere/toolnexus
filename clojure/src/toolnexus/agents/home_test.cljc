@@ -152,6 +152,19 @@
 ;; the memory tool
 ;; ---------------------------------------------------------------------------
 
+(deftest memory-write-over-the-cap-preserves-disk
+  ;; H3_memoryWriteOver2MBPreservesDisk (examples/persona-agent/fixture.json): the
+  ;; 2 MB cap is a SOUL-injection cap. The memory tool edits the FULL file, so an
+  ;; add to an oversized MEMORY.md must neither truncate it nor bake the notice in.
+  (let [big (apply str (repeat (+ home/max-file-bytes 100000) "a"))]
+    (with-home {"MEMORY.md" big}
+      (fn [dir]
+        (is (false? (:isError (call (home/memory-tool dir) {:action "add" :text "x"}))))
+        (let [after (fs/read-file (str dir "/MEMORY.md"))]
+          (is (str/starts-with? after big) "the original bytes survive as a prefix")
+          (is (str/ends-with? after "- x\n") "the entry is appended")
+          (is (not (str/includes? after "[truncated")) "no truncation notice on disk"))))))
+
 (deftest memory-tool-shape
   (with-home {}
     (fn [dir]

@@ -20,7 +20,12 @@ interface FromDirOptions {
   model?: string        // model id; default "inherit" (the runtime's llm.model)
   tools?: Tool[]         // extra tools beyond the memory builtin
   memory?: boolean        // set false to omit the memory tool (a read-only persona)
+  memoryIndexCap?: MemoryIndexCap // cap the injected MEMORY.md; off by default
+  notes?: boolean          // notes tier of the memory tool (note:<slug>, read, list)
+  dream?: { everyMs: number; store: ConversationStore; instructions?: string }
 }
+
+type MemoryIndexCap = boolean | { maxLines?: number; maxBytes?: number }
 ```
 
 The directory **is** the agent. `fromDir` calls [`composeSoul`](/api/javascript/persona/compose-soul/)
@@ -170,6 +175,25 @@ console.log("ok:", res.text)
 | `model` | `string` | Model id for this agent's client. Default `"inherit"`. |
 | `tools` | `Tool[]` | Extra tools alongside the memory builtin. |
 | `memory` | `boolean` | Set `false` to omit the `memory` tool — a read-only persona. Default `true`. |
+| `memoryIndexCap` | `MemoryIndexCap` | Cap the injected `MEMORY.md`: `true` ⇒ 200 lines / 25600 bytes (`MEMORY_INDEX_CAP_PRESET`); an object's missing field takes the preset's; `< 1` or non-integer throws. Off by default. |
+| `notes` | `boolean` | Turn on the notes tier of the memory tool. Default `false`. |
+| `dream` | `{ everyMs, store, instructions? }` | Dream every `everyMs` over `store` (a `ConversationStore` with `list()`) once started with `startAgent`. Off by default. |
+
+## Memory hierarchy and dreaming (opt-in)
+
+Three more options, all off by default — absent, the soul, the `memory` tool and the files on
+disk are byte-identical to the plain call (SPEC §7E "Memory hierarchy" and "Dreaming").
+
+- **`memoryIndexCap`** caps the `MEMORY.md` *index* injected into the soul at whole lines (`true` ⇒ 200 lines / 25600 bytes, or `{ maxLines, maxBytes }`).
+  Over the cap, the kept lines are followed by a one-line notice telling the persona to keep the
+  index short; the file on disk is never touched, and `USER.md` is not capped.
+- **`notes: true`** turns on the notes tier of the wired memory tool: target `note:<slug>` writes
+  `memory/<slug>.md`, plus `read` and `list` actions. Notes are never injected — the persona
+  reads them on demand and points to them from the index.
+- **`dream: { everyMs, store, instructions? }`** schedules a [dreamer](/api/javascript/persona/dreamer/) over the same directory. Only
+  when the persona is started with `startAgent` does a `<name>-dreamer` agent get registered on
+  the same runtime with its own heartbeat; stopping the persona stops both. `run`/`asTool` never
+  dream. `store` is the `ConversationStore` whose transcripts the dreamer checks memory against; `instructions` is host prose appended after the dream prompt. An interval `<= 0` throws `fromDir: dream.everyMs must be > 0`.
 
 ## See also
 
