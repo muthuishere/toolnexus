@@ -8,6 +8,15 @@ GitHub Releases `vX.Y.Z` via `release.yml` (see `PUBLISHING.md`).
 
 ## Unreleased
 
+**Benchmarks re-measured for 0.28.0 (docs only).** A quiet re-run (load < 4, five interleaved rounds of 0.27.0
+against `main`, medians) replaces the standing page's numbers and adds sitting `2026-11-08-quiet-0.28` to
+`benchmarks/results-2026-11.json`. Over MCP, `main` vs 0.27.0: python p50 1.38 → 0.92 ms; java init 361 → 195 ms
+and p50 2.44 → 2.28 ms; csharp init 89 → 61 ms; rust p50 0.376 → 0.342 ms; go unchanged. Against competitors:
+Rust now beats AutoAgents on latency (0.342 vs 0.368 ms; AutoAgents still uses less memory), C# now starts faster
+than Microsoft Agent Framework, Go is level with Eino, and Java is still 5% behind LangChain4j (was 37%). **Not
+reproduced:** the request-path entry's JS figure (3.28 → ~0.55 ms); this harness shows JS unchanged (3.43 → 3.40 ms).
+Elixir and Clojure were not re-run.
+
 **Change an ACP agent's mode or model without restarting it (#197).** A running ACP client now has
 `setMode(mode)` and `setModel(model)` (Go `SetMode(ctx, mode)` / `SetModel(ctx, model)`, Python
 `set_mode` / `set_model`, C# `SetModeAsync` / `SetModelAsync`, Clojure `set-mode!` / `set-model!`).
