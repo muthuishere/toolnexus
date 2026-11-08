@@ -23,7 +23,9 @@ use crate::client::{
 };
 
 mod backends;
+mod decisions;
 pub use backends::*;
+pub use decisions::*;
 
 // ---------------------------------------------------------------- constants
 
@@ -124,6 +126,8 @@ pub enum ClassifierBackend {
     OpenRouter,
     Cloudflare,
     Vercel,
+    /// OpenAI's Decisions API (`decisions` wire, issue #157).
+    OpenAi,
     Custom,
 }
 
@@ -135,20 +139,22 @@ impl ClassifierBackend {
             Self::OpenRouter => "openrouter",
             Self::Cloudflare => "cloudflare",
             Self::Vercel => "vercel",
+            Self::OpenAi => "openai",
             Self::Custom => "custom",
         }
     }
 
-    /// Parse the wire spelling (`""` ⇒ `typesafe`); an unknown name lists all five.
+    /// Parse the wire spelling (`""` ⇒ `typesafe`); an unknown name lists all six.
     pub fn parse(s: &str) -> Result<Self, ClassifierError> {
         match s {
             "" | "typesafe" => Ok(Self::TypeSafe),
             "openrouter" => Ok(Self::OpenRouter),
             "cloudflare" => Ok(Self::Cloudflare),
             "vercel" => Ok(Self::Vercel),
+            "openai" => Ok(Self::OpenAi),
             "custom" => Ok(Self::Custom),
             _ => Err(err(format!(
-                "classifier: unknown backend {s:?} (want \"typesafe\", \"openrouter\", \"cloudflare\", \"vercel\" or \"custom\")"
+                "classifier: unknown backend {s:?} (want \"typesafe\", \"openrouter\", \"cloudflare\", \"vercel\", \"openai\" or \"custom\")"
             ))),
         }
     }
@@ -160,7 +166,8 @@ impl ClassifierBackend {
             Self::OpenRouter => &CLASSIFIER_BACKENDS[1],
             Self::Cloudflare => &CLASSIFIER_BACKENDS[2],
             Self::Vercel => &CLASSIFIER_BACKENDS[3],
-            Self::Custom => &CLASSIFIER_BACKENDS[4],
+            Self::OpenAi => &CLASSIFIER_BACKENDS[4],
+            Self::Custom => &CLASSIFIER_BACKENDS[5],
         }
     }
 }
@@ -1089,8 +1096,10 @@ impl Classifier {
     ) -> Result<Vec<u8>, ClassifierError> {
         let o = &self.inner.opts;
         let mut endpoint = o.base_url.trim_end_matches('/').to_owned();
-        if self.inner.preset.wire != ClassifierWire::Cloudflare {
-            endpoint.push_str("/systemone");
+        match self.inner.preset.wire {
+            ClassifierWire::Cloudflare => {}
+            ClassifierWire::Decisions => endpoint.push_str("/decisions"),
+            ClassifierWire::SystemOne => endpoint.push_str("/systemone"),
         }
         let url = expand_env_refs(&endpoint);
         let retries: u32 = match o.retries {
