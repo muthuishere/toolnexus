@@ -9,7 +9,7 @@ namespace Toolnexus;
 /// </summary>
 public sealed class MediaStyle : IMediaClient
 {
-    /// <summary>Preset: the <c>grok</c> CLI (image, video) on the user's own subscription.</summary>
+    /// <summary>Preset: the <c>grok</c> CLI (image, video), run in its documented headless mode; the provider's terms apply.</summary>
     public const string XaiGrokCli = "xai-grok-cli";
     /// <summary>Preset: the <c>codex</c> CLI (image).</summary>
     public const string OpenAICodexCli = "openai-codex-cli";
