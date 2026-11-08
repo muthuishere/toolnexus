@@ -49,7 +49,7 @@ public final class Agents {
     public static final String DREAM_PROMPT = String.join("\n",
             "You are dreaming: an offline pass over your own memory. Memory exists so that a future session decides better. MEMORY.md is a short index loaded at the start of every session; notes (memory target \"note:<slug>\") hold the detail; the transcripts (transcript_search) are the ground truth of what actually happened.",
             "Work in this order:",
-            "1. Verify: read MEMORY.md and the notes it points to (memory read, memory list) and check each claim against the transcripts. Fix a claim the transcripts contradict; remove one they no longer support.",
+            "1. Verify: read MEMORY.md and the notes it points to (memory read, memory list) and check each claim against the transcripts. Fix or remove a claim only when it is contradicted by the transcripts; a claim they do not mention stays (transcripts may be pruned).",
             "2. Demote: move detail out of MEMORY.md into a note and leave a one-line [[slug]] pointer, so the index stays short.",
             "3. Merge: fold duplicate or conflicting notes into one.",
             "4. Repair links: point every [[slug]] at an existing note or create it; give every note an index line.",
@@ -433,12 +433,10 @@ public final class Agents {
             if (Files.exists(file) && Files.getFileStore(tmp).supportsFileAttributeView("posix")) {
                 Files.setPosixFilePermissions(tmp, Files.getPosixFilePermissions(file));
             }
-            try {
-                Files.move(tmp, file, java.nio.file.StandardCopyOption.REPLACE_EXISTING,
-                        java.nio.file.StandardCopyOption.ATOMIC_MOVE);
-            } catch (java.nio.file.AtomicMoveNotSupportedException e) {
-                Files.move(tmp, file, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
-            }
+            // ATOMIC_MOVE only: a filesystem without atomic rename surfaces as a failed write
+            // (AtomicMoveNotSupportedException), never a silent non-atomic replace (SPEC §7E).
+            Files.move(tmp, file, java.nio.file.StandardCopyOption.REPLACE_EXISTING,
+                    java.nio.file.StandardCopyOption.ATOMIC_MOVE);
         } finally {
             Files.deleteIfExists(tmp);
         }
@@ -724,8 +722,28 @@ public final class Agents {
                 .does("dreams over the memory in " + dir)
                 .soul("## HEARTBEAT.md\n\n" + String.join("\n\n", parts))
                 .model(model != null ? model : "inherit");
-        spec.tools = List.of(memoryTool(dir, true), search);
+        spec.tools = List.of(dreamGuard(memoryTool(dir, true)), search);
         return agent(name != null ? name : dir.getFileName() + "-dreamer", spec);
+    }
+
+    /** The dream guard (SPEC §7E "Dreaming"): refuses every action on {@code USER.md} and
+     * {@code replace}/{@code remove} on {@code note:log}, before anything is read or written. */
+    private static Tool dreamGuard(Tool mem) {
+        return new Tool() {
+            @Override public String name() { return mem.name(); }
+            @Override public String description() { return mem.description(); }
+            @Override public Map<String, Object> inputSchema() { return mem.inputSchema(); }
+            @Override public String source() { return mem.source(); }
+            @Override public ToolResult execute(Map<String, Object> args, ToolContext ctx) {
+                Object target = args.get("target");
+                Object action = args.get("action");
+                if ("user".equals(target)) return ToolResult.error("dreamer: USER.md is off-limits");
+                if ("note:log".equals(target) && ("replace".equals(action) || "remove".equals(action))) {
+                    return ToolResult.error("dreamer: memory/log.md is append-only");
+                }
+                return mem.execute(args, ctx);
+            }
+        };
     }
 
     /** {@link #dreamer(Path, LlmClient.ConversationStore, String, String, String)} with defaults. */

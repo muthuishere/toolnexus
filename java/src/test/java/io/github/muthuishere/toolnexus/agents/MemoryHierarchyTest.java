@@ -28,6 +28,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
+import java.util.TreeSet;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
@@ -498,6 +499,35 @@ class MemoryHierarchyTest {
     @Test
     void d0DreamPromptExact() {
         assertEquals(DR.get("dreamPrompt"), DREAM_PROMPT);
+    }
+
+    @Test
+    void d7DreamGuard() throws IOException {
+        Map<String, Object> e = m(m(DR, "expect"), "D7_dreamGuard");
+        Path home = mkHome(m(e, "files"));
+        Tool mem = dreamer(home, store()).spec.tools.get(0);
+        for (Object o : l(e, "cases")) {
+            Map<String, Object> c = (Map<String, Object>) o;
+            Map<String, Object> want = new LinkedHashMap<>();
+            want.put("output", c.get("output"));
+            want.put("isError", c.get("isError"));
+            assertEquals(want, res(mem.execute(m(c, "args"), null)), String.valueOf(c.get("name")));
+        }
+        Map<String, String> snap = snapshot(home);
+        assertEquals(new TreeSet<>(m(e, "files").keySet()), new TreeSet<>(snap.keySet()));
+        for (Map.Entry<String, Object> f : m(e, "filesAfter").entrySet()) assertEquals(f.getValue(), snap.get(f.getKey()), f.getKey());
+        Map<String, Object> p = m(e, "plainToolStillWrites");
+        Map<String, Object> want = new LinkedHashMap<>();
+        want.put("output", p.get("output"));
+        want.put("isError", p.get("isError"));
+        assertEquals(want, res(memoryTool(home, true).execute(m(p, "args"), null)));
+    }
+
+    @Test
+    void d8DreamPromptRemovesOnlyContradicted() {
+        Map<String, Object> e = m(m(DR, "expect"), "D8_promptKeepsUnmentionedClaims");
+        assertTrue(DREAM_PROMPT.contains(s(e, "dreamPromptContains")));
+        assertFalse(DREAM_PROMPT.contains(s(e, "dreamPromptNotContains")));
     }
 
     @Test
