@@ -22,7 +22,7 @@ loaded only after the MCP child was ready.
   csharp: SDK warm-up against an in-memory server; js: JSON-schema validator built on first use).
 - **java uses one JSON library.** `jackson-databind` 2.x is dropped; Jackson 3 (already required by the
   MCP SDK) is configured to produce byte-identical output.
-- **rust**: in progress, tracked in tasks.md.
+- **rust**: our own stdio MCP client replaces rmcp for stdio servers; runs move onto a tokio worker.
 - golang: no change (measured within ~8 µs of the floor). elixir, clojure: out of scope.
 
 ## Impact
