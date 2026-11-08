@@ -176,6 +176,11 @@ public final class LlmClient {
          * a {@code FAIL} surfaces the error immediately, skipping remaining retries. There is no
          * "suspend" tier — a failure is never a §10 {@code Pending}. Aborts (timeout/cancel) bypass it. */
         public Function<ErrorInfo, Tier> onError; // optional; null = default classifier
+        /** SPEC §7F.1: on a context-overflow provider error, compact via this hook (the
+         * {@code beforeLLM} signature, typically a {@code Compaction.compactor} with a tighter
+         * budget) and re-send the same turn, guarded by the rapid-refill breaker. Null ⇒ an
+         * overflow surfaces as {@link ProviderException}, byte-identical to before. */
+        public Function<BeforeLLMEvent, LLMOverride> compactOnOverflow;
         /** §1B: reject a content part larger than this many <b>decoded</b> bytes (not the base64
          * string, which is +33%) at request assembly. Null ⇒ unlimited. The edge constructors
          * enforce the same limit process-wide via {@link ContentPart#setMaxPartBytes(long)};
@@ -213,6 +218,7 @@ public final class LlmClient {
         public Options bodyTransform(Function<Map<String, Object>, Map<String, Object>> v) { this.bodyTransform = v; return this; }
         public Options httpClient(HttpClient v) { this.httpClient = v; return this; }
         public Options onError(Function<ErrorInfo, Tier> v) { this.onError = v; return this; }
+        public Options compactOnOverflow(Function<BeforeLLMEvent, LLMOverride> v) { this.compactOnOverflow = v; return this; }
         public Options maxPartBytes(long v) { this.maxPartBytes = v; return this; }
         public Options onUnsupportedPart(String v) { this.onUnsupportedPart = v; return this; }
     }
@@ -643,6 +649,67 @@ public final class LlmClient {
             this.status = status;
             this.body = body == null ? "" : body;
             this.retryAfter = retryAfter;
+        }
+    }
+
+    /**
+     * SPEC §7F.1: true iff {@code status} is 400 or 413 AND the lowercased body carries one of the
+     * pinned context-overflow markers (OpenAI, Anthropic, OpenAI-compatible gateways).
+     */
+    public static boolean isContextOverflow(int status, String body) {
+        if (status != 400 && status != 413) return false;
+        String b = body == null ? "" : body.toLowerCase(java.util.Locale.ROOT);
+        for (String m : OVERFLOW_MARKERS) if (b.contains(m)) return true;
+        return false;
+    }
+
+    private static final List<String> OVERFLOW_MARKERS = List.of(
+            "context_length_exceeded", "maximum context length", "prompt is too long",
+            "prompt_too_long", "request_too_large", "context window");
+
+    /**
+     * SPEC §7F.1: reactive compaction gave up — the hook made no progress, or three compactions
+     * in a rapid chain each overflowed again within fewer than two successful LLM calls.
+     */
+    public static final class ContextOverflowError extends RuntimeException {
+        /** Reactive compactions in the chain that failed (3 from the breaker). */
+        public final int compactions;
+        /** Status of the last provider error. */
+        public final int status;
+        /** Redacted body of the last provider error. */
+        public final String body;
+
+        ContextOverflowError(int compactions, int status, String body) {
+            super("context overflow: " + compactions + " reactive compaction(s) did not make the prompt fit");
+            this.compactions = compactions;
+            this.status = status;
+            this.body = body == null ? "" : body;
+        }
+    }
+
+    /** Per-run breaker state for reactive compaction (SPEC §7F.1). */
+    private final class Overflow {
+        int okSince;
+        int streak;
+        boolean retrying;
+        String model;
+
+        /** The compacted transcript to re-send the same turn with; rethrows {@code e} otherwise. */
+        List<Object> react(RuntimeException e, List<Object> messages, List<Map<String, Object>> tools,
+                           String turnModel, int turn) {
+            if (opts.compactOnOverflow == null || !(e instanceof ProviderException pe)
+                    || !isContextOverflow(pe.status, pe.body)) throw e;
+            if (!(streak > 0 && okSince < 2)) streak = 0;
+            if (streak == 3) throw new ContextOverflowError(3, pe.status, pe.body);
+            LLMOverride ov = opts.compactOnOverflow.apply(new BeforeLLMEvent(messages, tools, turnModel, turn));
+            if (ov == null || ov.messages() == null || ov.messages().size() >= messages.size()) {
+                throw new ContextOverflowError(streak, pe.status, pe.body);
+            }
+            streak++;
+            okSince = 0;
+            retrying = true;
+            model = turnModel;
+            return new ArrayList<>(ov.messages());
         }
     }
 
@@ -2272,10 +2339,14 @@ public final class LlmClient {
         // One virtual-thread executor for the whole run; tool calls in a turn run on it.
         ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
         try {
+            Overflow overflow = new Overflow();
             for (int turn = 0; turn < maxTurns(); turn++) {
                 turns++;
                 String turnModel = opts.model;
-                if (opts.hooks != null && opts.hooks.beforeLLM != null) {
+                if (overflow.retrying) {
+                    overflow.retrying = false;
+                    turnModel = overflow.model;
+                } else if (opts.hooks != null && opts.hooks.beforeLLM != null) {
                     LLMOverride ov = opts.hooks.beforeLLM.apply(
                             new BeforeLLMEvent(messages, tools, opts.model, turn));
                     if (ov != null && ov.messages() != null) messages = ov.messages();
@@ -2299,7 +2370,16 @@ public final class LlmClient {
                 headers.put("Content-Type", "application/json");
                 if (opts.headers != null) headers.putAll(opts.headers);
 
-                Map<String, Object> data = llmCallJson(url, headers, body, deadline, "openai");
+                Map<String, Object> data;
+                try {
+                    data = llmCallJson(url, headers, body, deadline, "openai");
+                } catch (RuntimeException e) {
+                    messages = overflow.react(e, messages, tools, turnModel, turn);
+                    turn--;
+                    turns--;
+                    continue;
+                }
+                overflow.okSince++;
                 addUsage(usage, (Map<String, Object>) data.get("usage"), "openai");
                 if (opts.hooks != null && opts.hooks.afterLLM != null) {
                     opts.hooks.afterLLM.accept(new AfterLLMEvent(data, turnModel, turn));
@@ -2408,10 +2488,14 @@ public final class LlmClient {
         // One virtual-thread executor for the whole run; tool calls in a turn run on it.
         ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
         try {
+            Overflow overflow = new Overflow();
             for (int turn = 0; turn < maxTurns(); turn++) {
                 turns++;
                 String turnModel = opts.model;
-                if (opts.hooks != null && opts.hooks.beforeLLM != null) {
+                if (overflow.retrying) {
+                    overflow.retrying = false;
+                    turnModel = overflow.model;
+                } else if (opts.hooks != null && opts.hooks.beforeLLM != null) {
                     LLMOverride ov = opts.hooks.beforeLLM.apply(
                             new BeforeLLMEvent(messages, tools, opts.model, turn));
                     if (ov != null && ov.messages() != null) messages = ov.messages();
@@ -2434,7 +2518,16 @@ public final class LlmClient {
                 headers.put("Content-Type", "application/json");
                 if (opts.headers != null) headers.putAll(opts.headers);
 
-                Map<String, Object> data = llmCallJson(endpoint, headers, body, deadline, "anthropic");
+                Map<String, Object> data;
+                try {
+                    data = llmCallJson(endpoint, headers, body, deadline, "anthropic");
+                } catch (RuntimeException e) {
+                    messages = overflow.react(e, messages, tools, turnModel, turn);
+                    turn--;
+                    turns--;
+                    continue;
+                }
+                overflow.okSince++;
                 addUsage(usage, (Map<String, Object>) data.get("usage"), "anthropic");
                 if (opts.hooks != null && opts.hooks.afterLLM != null) {
                     opts.hooks.afterLLM.accept(new AfterLLMEvent(data, turnModel, turn));
@@ -2559,10 +2652,14 @@ public final class LlmClient {
         InProcess.STREAM_SIDE.set(onEvent);
         ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
         try {
+            Overflow overflow = new Overflow();
             for (int turn = 0; turn < maxTurns(); turn++) {
                 turns++;
                 String turnModel = opts.model;
-                if (opts.hooks != null && opts.hooks.beforeLLM != null) {
+                if (overflow.retrying) {
+                    overflow.retrying = false;
+                    turnModel = overflow.model;
+                } else if (opts.hooks != null && opts.hooks.beforeLLM != null) {
                     LLMOverride ov = opts.hooks.beforeLLM.apply(new BeforeLLMEvent(messages, tools, opts.model, turn));
                     if (ov != null && ov.messages() != null) messages = ov.messages();
                     if (ov != null && ov.tools() != null) tools = ov.tools();
@@ -2640,8 +2737,12 @@ public final class LlmClient {
                     }
                 } catch (RuntimeException e) {
                     emit(new MetricEvent.Llm(turnModel, "error", System.currentTimeMillis() - t0, 0, 0));
-                    throw e;
+                    messages = overflow.react(e, messages, tools, turnModel, turn);
+                    turn--;
+                    turns--;
+                    continue;
                 }
+                overflow.okSince++;
                 emit(new MetricEvent.Llm(turnModel, "ok", System.currentTimeMillis() - t0,
                         usage.promptTokens - beforeP, usage.completionTokens - beforeC));
                 if (opts.hooks != null && opts.hooks.afterLLM != null) {
@@ -2767,10 +2868,14 @@ public final class LlmClient {
 
         ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
         try {
+            Overflow overflow = new Overflow();
             for (int turn = 0; turn < maxTurns(); turn++) {
                 turns++;
                 String turnModel = opts.model;
-                if (opts.hooks != null && opts.hooks.beforeLLM != null) {
+                if (overflow.retrying) {
+                    overflow.retrying = false;
+                    turnModel = overflow.model;
+                } else if (opts.hooks != null && opts.hooks.beforeLLM != null) {
                     LLMOverride ov = opts.hooks.beforeLLM.apply(new BeforeLLMEvent(messages, tools, opts.model, turn));
                     if (ov != null && ov.messages() != null) messages = ov.messages();
                     if (ov != null && ov.tools() != null) tools = ov.tools();
@@ -2851,8 +2956,12 @@ public final class LlmClient {
                     }
                 } catch (RuntimeException e) {
                     emit(new MetricEvent.Llm(turnModel, "error", System.currentTimeMillis() - t0, 0, 0));
-                    throw e;
+                    messages = overflow.react(e, messages, tools, turnModel, turn);
+                    turn--;
+                    turns--;
+                    continue;
                 }
+                overflow.okSince++;
                 emit(new MetricEvent.Llm(turnModel, "ok", System.currentTimeMillis() - t0,
                         usage.promptTokens - beforeP, usage.completionTokens - beforeC));
                 if (opts.hooks != null && opts.hooks.afterLLM != null) {
