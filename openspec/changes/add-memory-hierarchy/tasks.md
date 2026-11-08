@@ -36,9 +36,13 @@ byte-identity test with all options absent.
 
 ## Docs
 
-- [ ] Cookbook recipe "Dreaming" (per language): heartbeat persona with `transcriptSearchTool` +
-      notes; `HEARTBEAT.md` says what memory is for, verify index claims against transcripts,
-      fix or remove wrong ones, move detail to notes, keep the index short
+- [ ] Cookbook recipe "Dreaming" (per language), per design.md "Dreaming": Karpathy-style layout
+      (`MEMORY.md` index / `memory/<slug>.md` pages with `[[links]]` / `memory/log.md`), shipped
+      `HEARTBEAT.md` doing verify → demote → merge → repair links → log, the "when worth running"
+      table, cadence guidance, and a "Further reading" link to Anthropic's "The components of agent
+      memory" (2026-11-06) and Karpathy's LLM-wiki pattern
+- [ ] Extend site `scenarios/self-improving-agent.mdx` Part 4 (consolidator) to link the Dreaming
+      recipe as its transcript-verified successor
 - [ ] Per-port README memory section
 
 ## Changelog

@@ -92,6 +92,48 @@ Contract:
 - The article's "one page per writer" result is a **recipe** concern: give each writer its own
   note slug. No per-agent namespacing is added.
 
+## Dreaming — the recipe this change exists to make good
+
+Dreaming is not API. It is a §7E heartbeat persona (`startAgent(…, { everyMs })`) whose
+`HEARTBEAT.md` says what to do. G1–G4 exist so that a dream pass can do its job well; the
+recipe is the product of this change. Its memory layout follows Karpathy's LLM-wiki pattern,
+with transcripts in the role of the raw sources:
+
+| Layer | File | Loaded | Written by |
+|---|---|---|---|
+| Index | `MEMORY.md` (one line per page, capped by G1) | every session | session + dream |
+| Pages | `memory/<slug>.md`, linked as `[[slug]]` | on demand (G2 `read`) | session + dream |
+| Log | `memory/log.md` (append-only: what each dream changed and why) | never | dream |
+| Ground truth | transcripts via `transcriptSearchTool` (G3) | on demand | nobody (read-only) |
+
+One dream pass, in this order (the `HEARTBEAT.md` the recipe ships):
+
+1. **Verify** — for each index line and recently changed page, search the transcripts for the
+   claim. Contradicted ⇒ fix it; unsupported and stale ⇒ remove it. (The article's Mt. Moon case.)
+2. **Demote** — move detail out of `MEMORY.md` into a page, leave a one-line `[[slug]]` link.
+   The index stays under the cap.
+3. **Merge** — fold duplicate or contradicting pages into one.
+4. **Repair links** — a `[[slug]]` with no page is repointed to an existing page or the page is
+   created; orphan pages get an index line or are deleted.
+5. **Log** — append one entry to `memory/log.md` naming every change.
+6. Nothing to do ⇒ reply `HEARTBEAT_OK` (silent, §7E).
+
+The library does not enforce `[[link]]` syntax, page layout or the log — those are recipe prose.
+Consistent with the article: tell the model what memory is *for*, not rigid write rules.
+
+### When dreaming is worth running
+
+| Run it when | Skip it when |
+|---|---|
+| The persona lives for weeks and `MEMORY.md` keeps growing (approaching the G1 cap) | One-shot or short-lived agents — nothing accumulates |
+| The environment changes, so notes go stale (repos, prices, people, configs) | Facts are stable; write them into `SOUL.md` once |
+| A wrong note has caused a repeated mistake (the same failure twice) | The agent can re-read the truth cheaply every turn (it is on screen / in a tool result) |
+| Several agents write to one home dir and notes duplicate or conflict | Memory is small (index well under the cap) — a dream pass costs more than it saves |
+| Questions need facts from several sessions combined | Answers come from one lookup — transcript search alone is enough |
+
+Cadence: start nightly (`everyMs: 24h`) on a cheap model with a hard budget; dream more often
+only when `log.md` shows most passes changing something, less when most are `HEARTBEAT_OK`.
+
 ## Open decisions (owner)
 
 - **D1 — G1 default.** Default-on would change the soul for any `MEMORY.md` > 25 KB or > 200 lines
