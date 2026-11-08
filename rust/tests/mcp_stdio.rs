@@ -88,7 +88,8 @@ async fn handshake_pagination_names_and_hints() {
             "leg_reverse",
             "leg_die",
             "leg_orphan",
-            "leg_log"
+            "leg_log",
+            "leg_flood"
         ],
         "both pages, in list order"
     );
@@ -213,6 +214,56 @@ async fn idle_timeout_resets_on_matching_progress_only() {
         .map(|c| c["reason"].as_str().unwrap())
         .collect();
     assert_eq!(reasons, ["request timeout", "request timeout"]);
+    src.close().await;
+}
+
+#[tokio::test]
+async fn progress_for_one_call_does_not_keep_another_alive() {
+    if !node() {
+        return;
+    }
+    let src = load(300, None).await;
+    // A gets its own progress every 150ms for ~1.2s; B gets none and must
+    // time out on its own 300ms clock, not ride on A's progress
+    let a = call(&src, "progress", json!({"n": 8, "gapMs": 150}));
+    let b = async {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let start = Instant::now();
+        let r = call(&src, "silent", json!({})).await;
+        (r, start.elapsed())
+    };
+    let (ra, (rb, b_elapsed)) = tokio::join!(a, b);
+    assert!(!ra.is_error, "{}", ra.output);
+    assert!(ra.output.starts_with("done after 8 with token "));
+    assert_eq!(rb.output, "mcp idle timeout after 300ms without progress");
+    assert!(
+        b_elapsed < Duration::from_millis(700),
+        "B lived {b_elapsed:?}: another call's progress reset its timeout"
+    );
+    src.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn server_request_during_a_blocked_large_write_does_not_deadlock() {
+    if !node() {
+        return;
+    }
+    let src = load(20_000, None).await;
+    // the server stops reading stdin, then (200ms later) pings us and floods
+    // stdout; meanwhile a 2 MB request blocks holding the stdin lock. The
+    // reader must keep draining stdout instead of waiting on that lock.
+    let flood = call(&src, "flood", json!({"delayMs": 200, "mb": 4}));
+    let big = async {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        call(&src, "echo", json!({"x": "y".repeat(2 << 20)})).await
+    };
+    let both = tokio::time::timeout(Duration::from_secs(10), async { tokio::join!(flood, big) });
+    let (rf, rb) = both
+        .await
+        .expect("deadlock: client and server both stuck writing");
+    assert_eq!(rf.output, "flooded");
+    assert!(!rb.is_error, "{}", &rb.output[..rb.output.len().min(200)]);
+    assert_eq!(rb.output.len(), (2 << 20) + 8);
     src.close().await;
 }
 

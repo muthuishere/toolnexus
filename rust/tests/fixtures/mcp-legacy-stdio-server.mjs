@@ -18,6 +18,10 @@
 //   die         — exits mid-call
 //   orphan      — starts a `sleep 60` grandchild (which also keeps this
 //                 server alive past stdin EOF) and returns its pid
+//   flood       — stops reading stdin, waits `delayMs`, sends a `ping` request,
+//                 then writes `mb` MB of notifications; resumes stdin only
+//                 once all of it is flushed, then replies (a reader that
+//                 waits on the stdin lock to answer the ping deadlocks here)
 //   log         — what the client sent: initialize params, cancelled notes
 import { createInterface } from "node:readline";
 import { spawn } from "node:child_process";
@@ -48,7 +52,7 @@ const PAGE1 = [
   tool("fail"),
   tool("progress"),
 ];
-const PAGE2 = [tool("silent"), tool("ask"), tool("reverse"), tool("die"), tool("orphan"), tool("log")];
+const PAGE2 = [tool("silent"), tool("ask"), tool("reverse"), tool("die"), tool("orphan"), tool("log"), tool("flood")];
 
 const text = (t) => ({ type: "text", text: t });
 const IMG = { type: "image", mimeType: "image/png", data: "aGVsbG8=" };
@@ -104,6 +108,17 @@ async function call(msg) {
     case "orphan": {
       const child = spawn("sleep", ["60"], { stdio: "ignore" });
       return reply({ content: [text(String(child.pid))] });
+    }
+    case "flood": {
+      process.stdin.pause();
+      await new Promise((r) => setTimeout(r, args.delayMs ?? 200));
+      send({ jsonrpc: "2.0", id: nextId++, method: "ping" });
+      const note = JSON.stringify({ jsonrpc: "2.0", method: "notifications/message", params: { level: "info", data: "x".repeat(1000) } }) + "\n";
+      const chunk = note.repeat(1024);
+      for (let i = 0; i < (args.mb ?? 4) - 1; i++) process.stdout.write(chunk);
+      await new Promise((r) => process.stdout.write(chunk, r));
+      process.stdin.resume();
+      return reply({ content: [text("flooded")] });
     }
     case "log":
       return reply({ content: [text(JSON.stringify(log))] });

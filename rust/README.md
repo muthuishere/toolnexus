@@ -78,7 +78,7 @@ An API key from the environment is sent only to the host it belongs to: `OPENAI_
 
 | | |
 |---|---|
-| **MCP servers** | Reads `mcp.json` (`mcpServers` / `servers` / `mcp`) and connects to stdio and streamable-HTTP servers on the official `rmcp` SDK. A failing server is isolated rather than failing the load. Idle timeouts are reset by progress, and MCP elicitation is supported. |
+| **MCP servers** | Reads `mcp.json` (`mcpServers` / `servers` / `mcp`) and connects to stdio servers through toolnexus's own client and to remote streamable-HTTP/SSE servers through the official `rmcp` SDK (also used by the serve side). A failing server is isolated rather than failing the load. Idle timeouts are reset by progress, and MCP elicitation is supported. |
 | **Agent skills** | Finds every `SKILL.md` and exposes one `skill` tool that loads a skill's instructions and files when the model needs them, following the open [Agent Skills](https://agentskills.io) format. |
 | **Your functions** | `define_tool` / `define_typed_tool`: `Ok` becomes the output, `Err` becomes a tool error. |
 | **HTTP tools** | `http_tool`: URL placeholders and `${ENV}` headers that are never logged. |
@@ -228,7 +228,7 @@ Every MCP server is probed with `server/discover` first (SPEC §2.2). A server t
 `input_required` rounds through §10 `wait_for` (or a resumable `pending` result without one), the
 skills extension (remote skills join the `skill` tool), and opt-in lazy tool search
 (`"toolSearch": true` ⇒ `<server>_search_tools` + `<server>_call_tool`). Anything else falls back to
-the frozen rmcp path, unchanged.
+the frozen path: toolnexus's own stdio client for local servers, `rmcp` for remote HTTP/SSE servers.
 
 Remote servers get OAuth 2.1 (§2A): PRM → AS metadata → pre-registered `clientId` / `clientIds` or a
 Client ID Metadata Document (never DCR) → PKCE S256 + `resource` → token, refresh, step-up.

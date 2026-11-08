@@ -13,6 +13,10 @@
 //! - `tools/call` with a fresh `_meta.progressToken`; the timeout is an IDLE
 //!   timeout that a matching `notifications/progress` resets. On timeout and
 //!   on caller cancellation it sends `notifications/cancelled`;
+//! - server requests are answered through an unbounded queue drained by a
+//!   writer task, so the reader never waits on the stdin lock (a caller
+//!   blocked writing a large request to a server that is itself blocked
+//!   writing stdout would otherwise deadlock both). Caller writes stay direct;
 //! - server requests: `ping` → `{}`, `roots/list` → `{roots: []}`,
 //!   `elicitation/create` → the §10 bridge (decline without a `wait_for`),
 //!   anything else → `-32601` naming the method;
@@ -31,7 +35,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWriteExt, BufReader};
 use tokio::process::ChildStdin;
-use tokio::sync::{Notify, oneshot, watch};
+use tokio::sync::{Notify, mpsc, oneshot, watch};
 use tokio_util::sync::CancellationToken;
 
 use super::elicit::{answer_to_elicit_result, elicitation_to_request};
@@ -174,10 +178,18 @@ impl StdioClient {
             next_id: AtomicI64::new(0),
             elicit: wait_for.is_some(),
         });
+        // replies to server requests: queued by the reader, written here
+        let (reply_tx, mut reply_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+        let stdin = c.stdin.clone();
+        tokio::spawn(async move {
+            while let Some(line) = reply_rx.recv().await {
+                let _ = write_line(&stdin, &line).await;
+            }
+        });
         tokio::spawn(read_loop(
             stdout,
             c.pending.clone(),
-            c.stdin.clone(),
+            reply_tx,
             wait_for,
             done_tx,
         ));
@@ -382,7 +394,7 @@ fn rpc_error(e: &Value) -> CallError {
 async fn read_loop<R>(
     mut stdout: BufReader<R>,
     pending: Arc<Pending>,
-    stdin: Arc<tokio::sync::Mutex<Option<ChildStdin>>>,
+    replies: mpsc::UnboundedSender<Vec<u8>>,
     wait_for: Option<WaitForFn>,
     done: watch::Sender<bool>,
 ) where
@@ -432,7 +444,7 @@ async fn read_loop<R>(
                 // logging, list_changed and the rest: nothing to do
             }
             (Some(method), Some(id)) => {
-                server_request(&method, id, m.params, &stdin, &wait_for).await;
+                server_request(&method, id, m.params, &replies, &wait_for);
             }
             (None, None) => {}
         }
@@ -443,11 +455,12 @@ async fn read_loop<R>(
 }
 
 /// Answer a server → client request (what the SDK's default handler did).
-async fn server_request(
+/// Never waits: the reply goes on the writer queue.
+fn server_request(
     method: &str,
     id: Value,
     params: Option<Value>,
-    stdin: &Arc<tokio::sync::Mutex<Option<ChildStdin>>>,
+    replies: &mpsc::UnboundedSender<Vec<u8>>,
     wait_for: &Option<WaitForFn>,
 ) {
     let line = match method {
@@ -456,25 +469,24 @@ async fn server_request(
         "elicitation/create" => {
             let Some(w) = wait_for.clone() else {
                 let line = reply_line(&id, json!({"result": {"action": "decline"}}));
-                let _ = write_line(stdin, &line).await;
+                let _ = replies.send(line);
                 return;
             };
             // it may wait on a human: off the reader, which keeps routing
             let params = params.unwrap_or(Value::Null);
-            let stdin = stdin.clone();
+            let replies = replies.clone();
             tokio::spawn(async move {
                 let body = match w(elicitation_to_request(&params)).await {
                     Ok(answer) => json!({"result": answer_to_elicit_result(&answer)}),
                     Err(e) => json!({"error": {"code": -32603, "message": e}}),
                 };
-                let line = reply_line(&id, body);
-                let _ = write_line(&stdin, &line).await;
+                let _ = replies.send(reply_line(&id, body));
             });
             return;
         }
         other => reply_line(&id, json!({"error": {"code": -32601, "message": other}})),
     };
-    let _ = write_line(stdin, &line).await;
+    let _ = replies.send(line);
 }
 
 /// A response line to a server request: `{jsonrpc, id}` + `body`.
