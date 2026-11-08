@@ -348,6 +348,24 @@ async fn g2_memory_tool_cases() {
     }
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn g2_list_skips_non_regular() {
+    let ls = &load("memory-hierarchy")["memoryTool"]["listSkipsNonRegular"];
+    let dir = mk_home(&ls["regular"]);
+    for (link, target) in ls["symlinks"].as_object().unwrap() {
+        std::os::unix::fs::symlink(s(target), dir.join(link)).unwrap();
+    }
+    for d in ls["dirs"].as_array().unwrap() {
+        std::fs::create_dir_all(dir.join(s(d))).unwrap();
+    }
+    let tool = memory_tool_with(&dir, MemoryToolOptions { notes: true });
+    assert_eq!(
+        exec(&tool, json!({"action": "list"})).await,
+        json!({"output": s(&ls["expectList"]), "isError": false})
+    );
+}
+
 // ===========================================================================
 // G3 — transcript search
 // ===========================================================================
@@ -367,7 +385,12 @@ async fn g3_transcript_search_cases() {
             snippet_chars: o["snippetChars"].as_u64().map(|n| n as usize),
             name: None,
         };
-        let tool = transcript_search_tool(stub_store(convs), opts).unwrap();
+        let store = if c["emptyStore"].as_bool().unwrap_or(false) {
+            stub_store(&json!([]))
+        } else {
+            stub_store(convs)
+        };
+        let tool = transcript_search_tool(store, opts).unwrap();
         let want = c["expect"].clone();
         assert_eq!(
             exec(&tool, c["args"].clone()).await,
@@ -442,6 +465,43 @@ async fn g4_concurrent_adds_keep_every_entry() {
         j.await.unwrap();
     }
     let body = std::fs::read_to_string(dir.join("MEMORY.md")).unwrap();
+    let lines: Vec<&str> = body.trim_end().split('\n').collect();
+    let uniq: std::collections::HashSet<&&str> = lines.iter().collect();
+    assert_eq!((lines.len(), uniq.len()), (want, want));
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn g4_concurrent_adds_via_symlink_share_one_lock() {
+    let ca = &load("memory-hierarchy")["writeSafety"]["concurrentAddsViaSymlink"];
+    let (each, want) = (
+        ca["addsEach"].as_u64().unwrap(),
+        ca["expectEntries"].as_u64().unwrap() as usize,
+    );
+    let dir = mk_home(&json!({}));
+    let link = dir.with_extension(format!("link{}", SEQ.fetch_add(1, Ordering::SeqCst)));
+    std::os::unix::fs::symlink(&dir, &link).unwrap();
+    let tools = [Arc::new(memory_tool(&link)), Arc::new(memory_tool(&dir))];
+    let mut joins = Vec::new();
+    for (w, tool) in tools.iter().enumerate() {
+        for n in 0..each {
+            let tool = tool.clone();
+            joins.push(tokio::spawn(async move {
+                let r = tool
+                    .call(
+                        json!({"action": "add", "text": format!("w{}-{n}", w + 1)}),
+                        ToolContext::default(),
+                    )
+                    .await;
+                assert!(!r.is_error, "{}", r.output);
+            }));
+        }
+    }
+    for j in joins {
+        j.await.unwrap();
+    }
+    let _ = std::fs::remove_file(&link);
+    let body = std::fs::read_to_string(dir.join(s(&ca["file"]))).unwrap();
     let lines: Vec<&str> = body.trim_end().split('\n').collect();
     let uniq: std::collections::HashSet<&&str> = lines.iter().collect();
     assert_eq!((lines.len(), uniq.len()), (want, want));
@@ -799,4 +859,48 @@ async fn d5_absent_dream_is_unchanged() {
     sa.stop().await;
     assert_eq!(snapshot(&home), frozen);
     assert!(!trace.iter().any(|l| l.contains("dreamer")), "{trace:?}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn d6_dreamer_name_collision_errors_before_spawning() {
+    let d = Dream::new();
+    let e = &d.fx["expect"]["D6_dreamerNameCollision"];
+    let home = d.home();
+    let name = s(&e["personaName"]);
+    let mut persona = from_dir(
+        &home,
+        FromDirOptions {
+            name: name.into(),
+            model: "m-quiet".into(),
+            dream: Some(DreamOptions {
+                every_ms: 50,
+                store: d.store(),
+                instructions: String::new(),
+            }),
+            ..Default::default()
+        },
+    );
+    persona.spec.team.push(toolnexus::agents::new(
+        format!("{name}-dreamer"),
+        toolnexus::agents::Spec {
+            does: "a team member that happens to share the dreamer's name".into(),
+            ..Default::default()
+        },
+    ));
+    let clk = FakeClock::new();
+    let err = start_agent(
+        &persona,
+        StartOptions {
+            options: Options {
+                clock: Some(clk.clone()),
+                ..d.opts()
+            },
+            every_ms: 1000,
+            on_beat: None,
+        },
+    )
+    .err()
+    .unwrap();
+    assert_eq!(err, s(&e["error"]));
+    assert_eq!(clk.armed(), 0, "nothing scheduled");
 }

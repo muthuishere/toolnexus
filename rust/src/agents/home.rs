@@ -189,11 +189,11 @@ pub struct MemoryToolOptions {
 fn path_lock(p: &Path) -> Arc<Mutex<()>> {
     static LOCKS: std::sync::OnceLock<Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>> =
         std::sync::OnceLock::new();
+    // The key is the resolved REAL path (§7E): symlinks resolved; a file that
+    // does not exist yet resolves its nearest existing ancestor and appends
+    // the rest; nothing resolvable falls back to the absolute path.
     let abs = std::path::absolute(p).unwrap_or_else(|_| p.to_path_buf());
-    let key = match (abs.parent().map(std::fs::canonicalize), abs.file_name()) {
-        (Some(Ok(dir)), Some(name)) => dir.join(name),
-        _ => abs,
-    };
+    let key = real_path_key(&abs);
     LOCKS
         .get_or_init(Mutex::default)
         .lock()
@@ -389,6 +389,25 @@ fn notes_execute(dir: &Path, args: &Value) -> ToolResult {
     }
 }
 
+/// The real path of `abs`, resolving the nearest existing ancestor when
+/// `abs` (or its parents) do not exist yet.
+fn real_path_key(abs: &Path) -> PathBuf {
+    let mut rest: Vec<std::ffi::OsString> = Vec::new();
+    let mut cur = abs.to_path_buf();
+    loop {
+        if let Ok(real) = std::fs::canonicalize(&cur) {
+            return rest.iter().rev().fold(real, |acc, n| acc.join(n));
+        }
+        match (cur.file_name().map(|n| n.to_os_string()), cur.parent()) {
+            (Some(n), Some(parent)) => {
+                rest.push(n);
+                cur = parent.to_path_buf();
+            }
+            _ => return abs.to_path_buf(),
+        }
+    }
+}
+
 /// `list`: `<slug>\t<bytes>` per note, slug-ascending by explicit sort (never
 /// directory order); `(no notes)` when none.
 fn list_notes(notes_dir: &Path) -> String {
@@ -402,7 +421,8 @@ fn list_notes(notes_dir: &Path) -> String {
             if !valid_slug(slug) {
                 continue;
             }
-            if let Ok(m) = std::fs::metadata(e.path())
+            // lstat: a symlink (dangling or not) or a directory is skipped (§7E).
+            if let Ok(m) = std::fs::symlink_metadata(e.path())
                 && m.is_file()
             {
                 rows.push((slug.to_string(), m.len()));
@@ -730,6 +750,14 @@ impl StartedAgent {
 pub fn start_agent(a: &Agent, opts: StartOptions) -> Result<StartedAgent, String> {
     let mut ro = opts.options.clone();
     ro.registry = a.registry();
+    if let Some(d) = &a.dream
+        && ro.registry.contains_key(&d.dreamer.name)
+    {
+        return Err(format!(
+            "startAgent: dreamer name collision: {} is already registered",
+            d.dreamer.name
+        ));
+    }
     if let Some(d) = &a.dream {
         for (k, v) in d.dreamer.registry() {
             ro.registry.entry(k).or_insert(v);
@@ -765,7 +793,19 @@ pub fn start_agent(a: &Agent, opts: StartOptions) -> Result<StartedAgent, String
     tasks.lock().unwrap_or_else(|e| e.into_inner()).push(main);
     if let Some(d) = &a.dream {
         // The dreamer's replies are housekeeping — what it did is in memory/log.md.
-        let dh = rt.spawn(&rt.root(), &d.dreamer.name, None)?;
+        let dh = match rt.spawn(&rt.root(), &d.dreamer.name, None) {
+            Ok(dh) => dh,
+            Err(e) => {
+                // Never leak the persona's heartbeat when the dreamer cannot start.
+                stop.cancel();
+                for t in tasks.lock().unwrap_or_else(|e| e.into_inner()).drain(..) {
+                    t.abort();
+                }
+                let (rt2, h2) = (rt.clone(), h.clone());
+                tokio::spawn(async move { rt2.close(&h2, None).await });
+                return Err(e);
+            }
+        };
         let dream = heartbeat(&rt, &dh, d.every_ms, &stop, &tasks, Arc::new(|_| {}), None);
         tasks.lock().unwrap_or_else(|e| e.into_inner()).push(dream);
     }
