@@ -30,11 +30,24 @@ without the new options is byte-identical to before.**
 - The notes-off `memory` tool's description and schema are now identical in all eight ports.
   python, go, rust, csharp and elixir had drifted ("next session" vs "NEXT session", a missing
   `(with)`, no `target` description), so the text their models see changes slightly.
+- **`replace` inserts `with` literally everywhere.** js expanded `$&`, `$1`, `$$` in the
+  replacement (so a model writing "costs $&" got the matched text pasted in); all eight ports now
+  insert the text exactly, pinned by a fixture case.
+- Hardening from review, all eight ports: a slug with a trailing newline (`note:abc\n`) is
+  refused (elixir and csharp accepted it); `list` skips symlinks and directories and no longer
+  throws on a dangling symlink (js threw; most ports listed links); the write lock keys on the real
+  path, so a home reached through a symlink shares one lock with its real path; `limit: null`
+  is an error, not "no limit"; `tool_use` input keeps U+2028/U+2029 as-is (go and csharp escaped
+  them); `startAgent` throws `startAgent: dreamer name collision: <name>-dreamer is already
+  registered` instead of letting one agent silently shadow the other, and never leaves the
+  persona's heartbeat running when the dreamer fails to start.
 
 All eight ports; fixtures `examples/memory-hierarchy/` and `examples/dreaming/` (the "Mt. Moon"
 case: a dream pass fixes a wrong note and the next session answers differently). Docs: new
 "Dreaming" page. Not done: no cross-process write locking; no semantic search; clojure writes
-are not atomic (koine has no rename) and its lock is in-process only; a go `IndexCap` field of 0
+are not atomic (koine has no rename) and its lock is in-process only; clojure's note `list` uses a
+real-path check instead of lstat (koine has none), so a FIFO or socket named `x.md` would be listed; on
+a case-insensitive filesystem two spellings of one path may get two locks; a go `IndexCap` field of 0
 means "use the preset" rather than an error; rust custom conversation stores must override
 `supports_list()` to be searchable. Change: `openspec/changes/add-memory-hierarchy`.
 
