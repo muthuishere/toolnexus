@@ -13,7 +13,7 @@
 - [x] 2.5 csharp — `SetModeAsync` / `SetModelAsync`
 - [ ] 2.6 elixir — `set_mode/2` / `set_model/2`
 - [ ] 2.7 clojure — `set-mode!` / `set-model!`
-- [ ] 2.8 rust — `set_mode` / `set_model`
+- [x] 2.8 rust — `set_mode` / `set_model`
 
 ## 3. Release notes
 
