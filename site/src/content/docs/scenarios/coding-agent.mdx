@@ -12,7 +12,7 @@ a hand on the brake.
 That agent is not one model call. It is a **loop** with six things wired around it: an identity,
 a filesystem tool pack, a way to research a codebase without drowning in context, a spend
 ceiling, a way to survive a session longer than the context window, and an approval gate on the
-commands that can hurt you. toolnexus ships all six as first-class seams. This page wires them
+commands that can hurt you. Toolnexus ships all six as first-class seams. This page wires them
 together end to end.
 
 <Aside type="note" title="When to reach for this page">
@@ -73,7 +73,7 @@ long agent session.
 
 ## 2. Hands — the built-in tool pack
 
-toolnexus ships opencode's ten built-ins with identical names and input schemas in every port.
+Toolnexus ships opencode's ten built-ins with identical names and input schemas in every port.
 Six of them are the coding agent's hands:
 
 | Tool | What it buys the agent |
@@ -1084,7 +1084,7 @@ that are genuinely hard to build correctly and that behave identically in eight 
 |---|---|---|
 | A TUI | Your own renderer over [streaming](/toolnexus/streaming/) events | Terminal UX is opinionated and app-specific. |
 | A diff viewer / patch review UI | Render `edit`/`apply_patch` args yourself before approving | Same reason — it is presentation. |
-| LSP / type-aware navigation | An MCP server exposing your language server, wired via [`mcp.json`](/toolnexus/mcp/) | This is exactly what MCP is for; toolnexus consumes it. |
+| LSP / type-aware navigation | An MCP server exposing your language server, wired via [`mcp.json`](/toolnexus/mcp/) | This is exactly what MCP is for; Toolnexus consumes it. |
 | Git safety (worktrees, auto-branch, rollback) | Your own tools, or a policy in `AGENTS.md` + the approval gate | Repo policy varies too much to standardize. |
 | Sandboxing | Run the process in a container/jail; drop `bash` for untrusted input | `bash` is a real shell. Process isolation is the host's job, not a flag. |
 | Cost in currency | Convert `totalTokens` with your own price table | Vendor pricing is vendor data — budgets are deliberately token-denominated. |

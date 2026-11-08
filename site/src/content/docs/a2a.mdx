@@ -5,9 +5,9 @@ description: Point the toolkit at a remote agent-to-agent (A2A) agent and each o
 
 import { Aside, Tabs, TabItem, LinkButton } from '@astrojs/starlight/components';
 
-An agent is just another tool source. Point toolnexus at a remote **A2A agent** and each of its
+An agent is just another tool source. Point Toolnexus at a remote **A2A agent** and each of its
 advertised skills becomes a tool (named `<agent>_<skill>`, `source: "a2a"`). The *same* toolkit can
-turn around and **serve itself** as an A2A agent, so other agents — toolnexus or not — can call it.
+turn around and **serve itself** as an A2A agent, so other agents — Toolnexus or not — can call it.
 
 It's a genuine, minimal subset of real A2A (verified against `a2a-python`): JSON-RPC 2.0, the Agent
 Card at `/.well-known/agent-card.json`, and `SendMessage` → poll `GetTask`. No streaming / push /
@@ -256,7 +256,7 @@ served agent can survive restarts and be scaled across processes.
 <Aside type="note" title="Suspension crosses A2A">
 If a served run [suspends for a human](/toolnexus/suspension/) with no `waitFor`, the A2A layer maps
 it to the A2A `input-required` state (the question in the task's status message) — never a
-`completed` task. So a served toolnexus agent can ask *its caller* a question, and the caller
+`completed` task. So a served Toolnexus agent can ask *its caller* a question, and the caller
 resumes it by answering. The human-in-the-loop primitive reaches across the agent boundary.
 </Aside>
 

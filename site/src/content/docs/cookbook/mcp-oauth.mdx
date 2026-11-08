@@ -8,7 +8,7 @@ import { Tabs, TabItem, Aside } from '@astrojs/starlight/components';
 <Aside type="tip" title="Why you need this">
 Hosted MCP servers (GitHub's among them) speak the **2026-07-28** protocol and most of them ask you to
 log in with OAuth. Before, you pasted a bearer token into `headers` and refreshed it by hand. Now
-toolnexus asks every server `server/discover` first, talks 2026-07-28 to the ones that answer, keeps the
+Toolnexus asks every server `server/discover` first, talks 2026-07-28 to the ones that answer, keeps the
 old client for the ones that don't, and runs the OAuth login itself when a server answers `401`.
 </Aside>
 
@@ -35,7 +35,7 @@ Nothing in an existing `mcp.json` has to change. Three keys are new and optional
 
 ## 1. Log in: which client identity?
 
-The authorization server has to know your app. toolnexus uses, in order:
+The authorization server has to know your app. Toolnexus uses, in order:
 
 1. a **pre-registered** `clientId` (or `clientIds[<issuer>]`), with `clientSecret` if the app has one;
 2. a **Client ID Metadata Document** URL (`clientMetadataUrl`), when the server advertises CIMD support.
@@ -47,7 +47,7 @@ answer. With neither available you get an error that names the issuer and tells 
 
 ## 2. Two login modes
 
-- **`auto`** (default): toolnexus opens the browser with `openUrl` and takes the callback on
+- **`auto`** (default): Toolnexus opens the browser with `openUrl` and takes the callback on
   `http://127.0.0.1:<random>/callback`. Good for CLIs and desktop apps.
 - **`pause`**: no browser. Your host receives a §10 request
   `{kind: "authorization", id: "auth-…", url}` through `waitFor`. Send the person to `url`; when the
@@ -145,13 +145,13 @@ tk =
 
 ## 3. Questions a tool asks mid-call
 
-A 2026 server can answer `tools/call` with `input_required` ("what name?"). toolnexus turns each
+A 2026 server can answer `tools/call` with `input_required` ("what name?"). Toolnexus turns each
 question into a §10 request through your `waitFor`: a form becomes `kind: "input"` (the JSON schema is
 in `data.schema`), a URL becomes `kind: "authorization"`. Without a `waitFor` the call returns
 `{status: "pending"}`, and resuming it continues from the round it stopped at, so earlier answers are
 never asked again.
 
-toolnexus **never re-sends a `tools/call`** after a timeout, a 5xx or a dropped connection, because the
+Toolnexus **never re-sends a `tools/call`** after a timeout, a 5xx or a dropped connection, because the
 server may already have run it. It re-sends only after a `401` or a `403 insufficient_scope`, which a
 server returns before it runs anything.
 

@@ -1,6 +1,6 @@
 ---
 title: "Recipe — drive any ACP agent"
-description: "A complete, copy-pasteable recipe in all eight ports that drives any Agent Client Protocol agent as the model behind a toolnexus client, with your toolkit attached as an MCP server and the agent's text streamed. Plus per-agent isolation and model-selection notes."
+description: "A complete, copy-pasteable recipe in all eight ports that drives any Agent Client Protocol agent as the model behind a Toolnexus client, with your toolkit attached as an MCP server and the agent's text streamed. Plus per-agent isolation and model-selection notes."
 ---
 
 import { Tabs, TabItem, Aside } from '@astrojs/starlight/components';
@@ -8,9 +8,9 @@ import { Tabs, TabItem, Aside } from '@astrojs/starlight/components';
 <Aside type="tip" title="Why you need this">
 Coding agents such as Claude Code, GitHub Copilot CLI, opencode and Devin speak the
 [Agent Client Protocol](https://agentclientprotocol.com) (ACP): JSON-RPC over the agent's stdin and
-stdout. Drive one from toolnexus and you get a subscription-backed agent behind the same `Client`
+stdout. Drive one from Toolnexus and you get a subscription-backed agent behind the same `Client`
 your app already uses, and the agent gets **your** tools: the MCP servers, skills and functions in
-your toolkit, through one loopback MCP server toolnexus serves for it.
+your toolkit, through one loopback MCP server Toolnexus serves for it.
 </Aside>
 
 ## How it works
@@ -30,8 +30,8 @@ Three pieces, all public API since 0.25.0 ([SPEC §8C](https://github.com/muthui
    `agent_thought_chunk` a `thought` event, and the agent's own tool calls arrive as `tool_call` /
    `tool_result` events with `via: "acp"`: reported to you, never executed by your loop.
 
-The agent calls your tools itself, over MCP, inside its own loop. So the toolnexus client runs
-with an **empty toolkit**; toolnexus never sees a tool call it would execute a second time.
+The agent calls your tools itself, over MCP, inside its own loop. So the Toolnexus client runs
+with an **empty toolkit**; Toolnexus never sees a tool call it would execute a second time.
 
 What the ACP client does for you on the wire: answers `session/request_permission` (first
 `allow*` option unless you pass a permission hook), answers agent requests it does not implement
@@ -492,7 +492,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 | | how |
 |---|---|
-| all eight recipes | compiled and run on toolnexus 0.25.0 against a fake ACP agent ([`fake_acp_agent.py`](https://github.com/muthuishere/toolnexus/blob/main/tools/mock-llm/fake_acp_agent.py), stdlib Python: answers `initialize` / `session/new`, sends a `session/request_permission`, calls `tools/list` + `tools/call` on the served URL with the entry's bearer header, streams two `agent_message_chunk`s). Each printed `[tool] add(17, 25)` and `final: The sum is 42.` |
+| all eight recipes | compiled and run on Toolnexus 0.25.0 against a fake ACP agent ([`fake_acp_agent.py`](https://github.com/muthuishere/toolnexus/blob/main/tools/mock-llm/fake_acp_agent.py), stdlib Python: answers `initialize` / `session/new`, sends a `session/request_permission`, calls `tools/list` + `tools/call` on the served URL with the entry's bearer header, streams two `agent_message_chunk`s). Each printed `[tool] add(17, 25)` and `final: The sum is 42.` |
 | JavaScript, Python, Go, Java, C#, Rust, live | `@agentclientprotocol/claude-agent-acp@0.100.0` on 2026-11-06: the agent found the tool (`[agent tool] ToolSearch`), called `mcp__toolnexus__add` over MCP with the bearer token, our `add` ran, and it answered `42`, streamed |
 | Elixir, Clojure, live | not run live; same library wire, verified against the fake only |
 
@@ -550,5 +550,5 @@ Most ACP agents advertise their models in the `session/new` result and let you s
 
 Vendor-specific hints, such as Copilot's `_meta.copilotUsage` or opencode's `-free` suffix, are
 raw data; filter on them in your own code if you need to. To **pick** a model, pass `model` to
-`loadACP` ([Extend it](/toolnexus/in-process-client/extend/#model-selection)); toolnexus does not
+`loadACP` ([Extend it](/toolnexus/in-process-client/extend/#model-selection)); Toolnexus does not
 list models.

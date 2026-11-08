@@ -1,14 +1,14 @@
 ---
 title: "Run without a model: the mock server"
-description: A deterministic, key-free local fake for every wire toolnexus speaks — chat, streaming, tool calls, attachments, classifiers, media and faults.
+description: A deterministic, key-free local fake for every wire Toolnexus speaks — chat, streaming, tool calls, attachments, classifiers, media and faults.
 ---
 
 import { Aside } from '@astrojs/starlight/components';
 
 <Aside type="tip" title="Why you need this">
 Tests, demos and CI should not need an API key, a network or a bill. The mock server answers
-every request toolnexus sends with a plausible, **deterministic** reply, so a client run, a
-classifier decision or a media job can be asserted exactly. It is what every toolnexus port's
+every request Toolnexus sends with a plausible, **deterministic** reply, so a client run, a
+classifier decision or a media job can be asserted exactly. It is what every Toolnexus port's
 own integration suite runs against.
 </Aside>
 
@@ -44,7 +44,7 @@ sha256=…`, so a test proves the bytes arrived intact. To exercise retries, sen
 
 ## Tool sources, CLI and ACP fakes
 
-The same folder holds a fake for every other thing toolnexus talks to. All are stdlib Python and
+The same folder holds a fake for every other thing Toolnexus talks to. All are stdlib Python and
 deterministic.
 
 | Fake | Run | What it does |
@@ -67,7 +67,7 @@ files where the real CLI would. A prompt containing `[fail]` fails the way each 
 usage limit, and exits 1.
 
 <Aside type="note">
-No released toolnexus version drives a media CLI yet: media on `main` goes through JSON styles
+No released Toolnexus version drives a media CLI yet: media on `main` goes through JSON styles
 over HTTP. The fake matches the CLI media clients on the unreleased `media-clients` branch.
 </Aside>
 
@@ -76,7 +76,7 @@ over HTTP. The fake matches the CLI media clients on the unreleased `media-clien
 ## Point a client at it
 
 Use base URL `http://127.0.0.1:8787/v1` with any key. The key must be passed explicitly, because
-toolnexus only reads a provider's key env var for that provider's own host.
+Toolnexus only reads a provider's key env var for that provider's own host.
 
 | Language | Client options |
 |---|---|

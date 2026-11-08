@@ -8,7 +8,7 @@ import { Tabs, TabItem, Aside } from '@astrojs/starlight/components';
 <Aside type="tip" title="Why you need this">
 The recipes are deliberately small so you can own them. Everything an agent integration needs
 beyond "send a prompt, get text back" is a few lines on top of them, and lives in **your** code,
-next to the agent version you actually run. Nothing here needs a toolnexus release.
+next to the agent version you actually run. Nothing here needs a Toolnexus release.
 </Aside>
 
 Everything below is an option on the ACP client (`loadACP` and its per-port equivalents) from the
@@ -72,7 +72,7 @@ logs those to stderr.
 
 ## Model selection
 
-Pass `model` to `loadACP`. toolnexus sends it unchanged after `session/new`, first as
+Pass `model` to `loadACP`. Toolnexus sends it unchanged after `session/new`, first as
 `session/set_config_option {configId: "model", value}` and, if the agent rejects that, as
 `session/set_model {modelId}`; if both fail, `loadACP` fails. It never lists or validates models.
 Verified live: Claude Code with `model: "haiku"` reported `claude-haiku-5-5` in its `usage_update`s.

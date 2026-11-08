@@ -1,13 +1,13 @@
 ---
 title: "In-process client — overview"
-description: "createInProcessClient is the one seam for putting anything behind a toolnexus client — a local model, a coding agent over ACP, a CLI. You supply generate (or generateStream); toolnexus runs the tool loop. Plus how to hand your toolkit to an external agent as an MCP server."
+description: "createInProcessClient is the one seam for putting anything behind a Toolnexus client — a local model, a coding agent over ACP, a CLI. You supply generate (or generateStream); Toolnexus runs the tool loop. Plus how to hand your toolkit to an external agent as an MCP server."
 ---
 
 import { Tabs, TabItem, Aside } from '@astrojs/starlight/components';
 
 <Aside type="tip" title="Why you need this">
 Not every "model" is an HTTP endpoint. It may be a weights file in your process, a coding agent
-you drive over the Agent Client Protocol (ACP), or a CLI you run once per turn. toolnexus does
+you drive over the Agent Client Protocol (ACP), or a CLI you run once per turn. Toolnexus does
 not need a vendor integration for any of them. It needs one function: **given the request, return
 one assistant message**. Everything above that function (the tool loop, MCP servers, skills,
 hooks, memory, metrics) stays exactly as it is against a hosted model.
@@ -16,7 +16,7 @@ hooks, memory, metrics) stays exactly as it is against a hosted model.
 <Aside type="note" title="These recipes are meant to be copied, not imported">
 Every recipe in this section is a **complete, self-contained file**: full imports, nothing elided,
 built only on toolnexus's public API. Copy it into your project, or hand it to a coding agent to
-drop in as-is, and change what you need. toolnexus does not ship or maintain vendor-specific
+drop in as-is, and change what you need. Toolnexus does not ship or maintain vendor-specific
 CLI/ACP drivers as library surface; agents and CLIs change their flags every few weeks, and a
 copied recipe you own is easier to fix than a library release you wait for.
 The whole section is also published as plain markdown for LLMs and agents:
@@ -34,7 +34,7 @@ listed in the site index [`llms.txt`](/toolnexus/llms.txt), and inside [`llms-fu
 | **`generate(request)`** (every port) | `messages`, `tools`, `model`, `body` (the assembled request for this turn) | one assistant message: `{ content }` to finish, or `{ toolCalls }` to ask for tools | no: `stream` / `runStream` is **refused** with an error naming why |
 | **`generateStream(request, emit)`** (every port since 0.25.0: Go `GenerateStream(ctx, …)`, Python `generate_stream`, Elixir `:generate_stream`, Clojure `:generate-stream`, …) | the same request, plus an `emit` function (Go also gets the run's `ctx`) | the same one message | yes: every `emit({type:"text", delta})` becomes a stream delta as it happens (the deltas must add up to `content`); `thought`, `tool_call` and `tool_result` events pass through to the stream consumer and are never executed |
 
-Return `toolCalls` and toolnexus executes them against the toolkit, appends the results and calls
+Return `toolCalls` and Toolnexus executes them against the toolkit, appends the results and calls
 you again. Return `content` and the run is over. The contract is the same one documented in
 [Run a model in-process](/toolnexus/cookbook/local-and-in-process-models/), which also covers
 retries (in-process failures are final by default) and the per-port request shapes.
@@ -428,11 +428,11 @@ differently:
 
 | | who runs the tools | what `generate` returns | recipe |
 |---|---|---|---|
-| **A plain model** (weights in-process, a CLI asked for one reply) | **toolnexus**: the model asks, the client executes | `toolCalls` or `content` | [One-shot CLI](/toolnexus/in-process-client/one-shot-cli/), [Run a model in-process](/toolnexus/cookbook/local-and-in-process-models/) |
+| **A plain model** (weights in-process, a CLI asked for one reply) | **Toolnexus**: the model asks, the client executes | `toolCalls` or `content` | [One-shot CLI](/toolnexus/in-process-client/one-shot-cli/), [Run a model in-process](/toolnexus/cookbook/local-and-in-process-models/) |
 | **An agent** (Claude Code, Copilot, opencode… over ACP) | **the agent**: it has its own loop, and reaches your tools over MCP | only `content`: the agent's final text | [ACP agent](/toolnexus/in-process-client/acp-agent/) |
 
 An agent already has a tool loop of its own. You do not want two loops fighting over the same
-call, so in the agent case you **give the agent your toolkit as an MCP server**, run the toolnexus
+call, so in the agent case you **give the agent your toolkit as an MCP server**, run the Toolnexus
 client with an empty toolkit, and let `generate` return the agent's answer.
 
 ## Give your toolkit to an external agent: `asMcpServer`
@@ -785,5 +785,5 @@ auth: see [serve MCP](/toolnexus/api/javascript/serve/mcp/) and [mcpHandler](/to
 ## In this section
 
 - [ACP agent recipe](/toolnexus/in-process-client/acp-agent/): drive any ACP agent with `loadACP`, your toolkit attached through `asMcpServer`, streaming its text.
-- [One-shot CLI recipe](/toolnexus/in-process-client/one-shot-cli/): one CLI process per turn (`claude -p`, `codex exec`), toolnexus runs the tools.
+- [One-shot CLI recipe](/toolnexus/in-process-client/one-shot-cli/): one CLI process per turn (`claude -p`, `codex exec`), Toolnexus runs the tools.
 - [Extend it](/toolnexus/in-process-client/extend/): add your own agent, isolation, model selection, permissions.

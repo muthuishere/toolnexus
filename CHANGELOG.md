@@ -8,6 +8,8 @@ GitHub Releases `vX.Y.Z` via `release.yml` (see `PUBLISHING.md`).
 
 ## Unreleased
 
+- **Docs site: new "Reference" theme and the Toolnexus name.** The docs at muthuishere.github.io/toolnexus now use Source Serif 4 for headings and the hero, Source Sans 3 for text and JetBrains Mono for code, with a deep-green accent and matched light and dark themes (body text ≥ 11:1 contrast in both). Fonts are self-hosted, so the static site makes no third-party font calls. Code blocks, section rules, small-caps labels and a linked eight-language strip on the home page follow the same reference-book style. The product is written "Toolnexus" in titles and prose; package names, imports, commands and URLs stay lowercase `toolnexus`. Generated API reference pages are unchanged.
+
 ## 0.28.0 — 2026-11-08
 
 **Upgrading — read this first.**

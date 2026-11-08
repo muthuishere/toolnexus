@@ -34,7 +34,7 @@ testdata/shop ─▶ 1 Understand ─▶ 2 Triage ─────▶ 3 Plan ─�
 | 2 Triage | classifier, one call | `value` (score) and `noticed` (noul) for every function |
 | 3 Plan | classifier, one call | `choice` of test kind per function, bug report in state |
 | 4 Gate | policy | keep / skip; unsure re-asks with two different views, a split goes to a human |
-| 5 Write | LLM (toolnexus client) | drafts the test |
+| 5 Write | LLM (Toolnexus client) | drafts the test |
 | 6 Verify | code + classifier | fails on shipped code, passes on the fix, kills mutants; classifier checks asserts / naming |
 
 ## Real live output
