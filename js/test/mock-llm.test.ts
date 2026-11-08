@@ -22,6 +22,10 @@ import {
   noul,
   choice,
   score,
+  createInProcessClient,
+  loadACP,
+  httpTool,
+  agent,
   type ClientStyle,
 } from "../dist/index.js"
 
@@ -169,4 +173,169 @@ test("mock: media style drives all six verbs + an async failure", { skip }, asyn
     assert.equal(cv.text, "voice-" + createHash("sha256").update("muthu").digest("hex").slice(0, 8))
     await assert.rejects(m.image({ prompt: "please [fail]" }), (e: any) => /mock: job asked to fail/.test(e.message))
   } finally { fs.rmSync(tmp, { recursive: true, force: true }) }
+})
+
+// ---------------------------------------------------------------- round 2: mixed toolkit, in-process CLI, ACP
+// TN_MOCK_KIT_DIR overrides where mock_mcp.py / fake_cli.py / fake_acp_agent.py are read from (mutation checks).
+const KIT = process.env.TN_MOCK_KIT_DIR ?? path.join(REPO, "tools/mock-llm")
+const SKILLS = path.join(REPO, "examples/skills")
+
+async function startHttpMcp(legacy: boolean): Promise<{ url: string; kill: () => void }> {
+  const p = spawn("python3", [path.join(KIT, "mock_mcp.py"), "--http", "--port", "0", ...(legacy ? ["--legacy"] : [])], { stdio: ["ignore", "pipe", "ignore"] })
+  const url = await new Promise<string>((resolve, reject) => {
+    let buf = ""
+    const t = setTimeout(() => reject(new Error("mock mcp did not start")), 10000)
+    p.stdout!.on("data", (c) => {
+      buf += c
+      const m = buf.match(/toolnexus mock mcp at (\S+)/)
+      if (m) { clearTimeout(t); resolve(m[1]) }
+    })
+  })
+  return { url, kill: () => p.kill() }
+}
+
+async function mixedToolkit() {
+  const { tool, calls } = add()
+  const origin = new URL(base).origin
+  const httpMcp = await startHttpMcp(false)
+  const legacyMcp = await startHttpMcp(true)
+  const tk = await createToolkit({
+    builtins: false,
+    mcpConfig: {
+      mcpServers: {
+        aaa: { type: "stdio", command: "python3", args: [path.join(KIT, "mock_mcp.py")] },
+        web: { type: "http", url: httpMcp.url },
+        old: { type: "http", url: legacyMcp.url },
+      },
+    },
+    skillsDir: SKILLS,
+    agents: [agent({ card: `${origin}/.well-known/agent-card.json`, pollEvery: 20 })],
+    extraTools: [
+      tool,
+      httpTool({ name: "http_add", description: "Add over HTTP.", method: "POST", url: `${base}/tools/add`, body: "json",
+        inputSchema: { type: "object", properties: { a: { type: "integer" }, b: { type: "integer" } }, required: ["a", "b"] } }),
+    ],
+  } as any)
+  return { tk, calls, close: async () => { await (tk as any).close?.(); httpMcp.kill(); legacyMcp.kill() } }
+}
+
+const run = async (tk: any, name: string, args: Record<string, unknown>) => {
+  const t = tk.tools().find((x: any) => x.name === name)
+  assert.ok(t, `tool ${name} missing; have ${tk.tools().map((x: any) => x.name)}`)
+  return t.execute(args)
+}
+
+test("mock: mixed toolkit — MCP stdio/http/legacy + HTTP + A2A + native + skills", { skip }, async () => {
+  const { tk, calls, close } = await mixedToolkit()
+  try {
+    const names = tk.tools().map((t: any) => t.name)
+    for (const n of ["aaa_add", "aaa_echo", "web_add", "web_echo", "old_add", "old_echo", "skill", "mockagent_summarize", "add", "http_add"])
+      assert.ok(names.includes(n), `${n} not in ${names}`)
+    for (const s of ["aaa", "web", "old"]) assert.equal((await run(tk, `${s}_add`, { a: 2, b: 3 })).output, "5")
+    // SPEC §0.4: structuredContent wins, JSON-stringified
+    assert.deepEqual(JSON.parse((await run(tk, "web_echo", { text: "hi" })).output), { text: "hi" })
+    assert.equal((await run(tk, "mockagent_summarize", { task: "x" })).output, "A2A mock done: x")
+    assert.deepEqual(JSON.parse((await run(tk, "http_add", { a: 2, b: 3 })).output), { sum: 5 })
+    assert.equal((await run(tk, "add", { a: 2, b: 3 })).output, "5")
+    assert.deepEqual(calls, [{ a: 2, b: 3 }])
+    const sk = await run(tk, "skill", { name: "hello-world" })
+    assert.equal(sk.isError, false)
+    assert.ok(sk.output.includes('<skill_content name="hello-world">'), sk.output)
+  } finally { await close() }
+})
+
+test("mock: openai run over the mixed toolkit calls the first offered tool (an MCP add)", { skip }, async () => {
+  const { tk, close } = await mixedToolkit()
+  try {
+    // js orders MCP tools by server connect-completion, so the first server varies; every
+    // server's first tool is add(a,b), so the mock's add(1,1) is meaningful either way.
+    const first = tk.tools()[0].name
+    assert.match(first, /^(aaa|web|old)_add$/)
+    const r = await client("openai").run("add something", { toolkit: tk })
+    assert.equal(r.text, "Tool result: 2")
+    assert.equal(r.toolCalls[0].name, first)
+  } finally { await close() }
+})
+
+test("mock: in-process one-shot CLI (fake_cli.py) drives a native add tool", { skip }, async () => {
+  const { tool, calls } = add()
+  const tk = await createToolkit({ builtins: false, extraTools: [tool] })
+  const render = ({ messages }: any) => {
+    const called: Record<string, string> = {}
+    const lines: string[] = []
+    for (const m of messages) {
+      if (m.role === "tool") lines.push(`[tool ${called[m.tool_call_id] ?? m.tool_call_id}] ${m.content}`)
+      else if (m.tool_calls) for (const c of m.tool_calls) called[c.id] = c.function.name
+      else lines.push(`[${m.role}] ${typeof m.content === "string" ? m.content : JSON.stringify(m.content)}`)
+    }
+    return lines.join("\n")
+  }
+  const c = createInProcessClient({
+    model: "fake-cli",
+    generate: (req: any) => {
+      const r = spawnSync("python3", [path.join(KIT, "fake_cli.py")], { input: render(req), encoding: "utf8" })
+      if (r.status !== 0) throw new Error(`fake_cli exited ${r.status}: ${r.stderr}`)
+      const o = JSON.parse(r.stdout)
+      return o.tool_calls ? { toolCalls: o.tool_calls.map((x: any) => ({ name: x.name, arguments: x.arguments })) } : { content: o.content }
+    },
+  })
+  const r = await c.run("add 19 and 23", { toolkit: tk })
+  assert.deepEqual(calls, [{ a: 19, b: 23 }])
+  assert.equal(r.text, "The sum is 42.")
+})
+
+async function acpSession(onPermission?: (p: any) => string | undefined) {
+  const { tool, calls } = add()
+  const served = await createToolkit({ builtins: false, extraTools: [tool] })
+  const server = await (served as any).asMcpServer()
+  const ag = await loadACP({
+    command: "python3", args: [path.join(KIT, "fake_acp_agent.py")],
+    mcpServers: [{ type: "http", name: "toolnexus", url: server.url, headers: [{ name: "Authorization", value: `Bearer ${server.token}` }] }],
+    ...(onPermission ? { onPermission } : {}),
+  })
+  return { ag, calls, close: async () => { await (ag as any).close(); await server.close() } }
+}
+
+test("mock: ACP agent uses the served toolkit after permission is approved", { skip }, async () => {
+  const { ag, calls, close } = await acpSession()
+  try {
+    const c = createInProcessClient({ model: "fake-acp", generateStream: ag.generateStream })
+    let txt = ""
+    let done: any
+    const acpTools: string[] = []
+    for await (const ev of c.stream("add 17 and 25", { toolkit: await createToolkit({ builtins: false }) })) {
+      if (ev.type === "text") txt += ev.delta
+      if (ev.type === "tool_call" && ev.via === "acp") acpTools.push(ev.name)
+      if (ev.type === "done") done = ev.result
+    }
+    assert.equal(txt, "The sum is 42.")
+    assert.equal(done.text, "The sum is 42.")
+    assert.deepEqual(calls, [{ a: 17, b: 25 }])
+    assert.ok(acpTools.length >= 1)
+  } finally { await close() }
+})
+
+test("mock: ACP permission rejected via onPermission -> Permission denied.", { skip }, async () => {
+  const { ag, calls, close } = await acpSession(() => "no")
+  try {
+    const r = await createInProcessClient({ model: "fake-acp", generate: ag.generate }).run("add 17 and 25", { toolkit: await createToolkit({ builtins: false }) })
+    assert.equal(r.text, "Permission denied.")
+    assert.deepEqual(calls, [])
+  } finally { await close() }
+})
+
+test("mock: ACP [wait] turn cancelled via AbortSignal sends session/cancel", { skip }, async () => {
+  const { ag, close } = await acpSession()
+  try {
+    const ac = new AbortController()
+    let txt = ""
+    const p = ag.generateStream({ messages: [{ role: "user", content: "please [wait]" }], tools: [] } as any, (ev: any) => {
+      if (ev.type === "text") { txt += ev.delta; if (txt.includes("Working...")) ac.abort() }
+    }, { signal: ac.signal })
+    await assert.rejects(p, (e: any) => e?.name === "AbortError")
+    assert.equal(txt, "Working...")
+    // session stays warm: a following turn still answers
+    const r = await ag.generate({ messages: [{ role: "user", content: "hello" }], tools: [] } as any)
+    assert.ok(typeof r.content === "string" && r.content.length > 0, JSON.stringify(r))
+  } finally { await close() }
 })
