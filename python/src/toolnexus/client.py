@@ -30,6 +30,8 @@ import queue as queue_mod
 import random
 import re
 import sys
+import functools
+import http.client
 import threading
 import time
 import urllib.error
@@ -412,10 +414,72 @@ def _open(url: str, headers: dict[str, str], payload: dict[str, Any], timeout: f
         raise _HttpError(e.code, text, ra) from None
 
 
+_KEEPALIVE = threading.local()
+
+
 def _post(url: str, headers: dict[str, str], payload: dict[str, Any], timeout: float) -> dict[str, Any]:
-    """Blocking JSON POST → parsed dict (raises ``_HttpError`` on HTTP error)."""
-    with _open(url, headers, payload, timeout) as resp:
-        return json.loads(resp.read().decode("utf-8"))
+    """Blocking JSON POST → parsed dict (raises ``_HttpError`` on HTTP error).
+
+    Reuses one persistent HTTP/1.1 connection per worker thread and host: a fresh TCP
+    connect per POST was the largest single cost of a turn. A connection the server closed
+    while idle is retried once on a new one. When a proxy env var applies, it goes through
+    ``urllib`` as before so proxy handling is unchanged."""
+    u = urllib.parse.urlsplit(url)
+    if u.scheme not in ("http", "https") or _proxied(u):
+        with _open(url, headers, payload, timeout) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    body = json.dumps(payload).encode("utf-8")
+    path = u.path or "/"
+    if u.query:
+        path += "?" + u.query
+    key = (u.scheme, u.hostname, u.port)
+    pool = getattr(_KEEPALIVE, "conns", None)
+    if pool is None:
+        pool = _KEEPALIVE.conns = {}
+    for attempt in (0, 1):
+        conn = pool.get(key)
+        reused = conn is not None
+        if conn is None:
+            cls = http.client.HTTPSConnection if u.scheme == "https" else http.client.HTTPConnection
+            conn = pool[key] = cls(u.hostname, u.port, timeout=timeout)
+        else:
+            conn.timeout = timeout
+            if conn.sock is not None:
+                conn.sock.settimeout(timeout)
+        try:
+            conn.request("POST", path, body, {"Content-Length": str(len(body)), **headers})
+            resp = conn.getresponse()
+            data = resp.read()
+        except (http.client.RemoteDisconnected, BrokenPipeError, ConnectionResetError, http.client.BadStatusLine):
+            conn.close()
+            pool.pop(key, None)
+            if reused and attempt == 0:
+                continue  # stale idle connection: retry once on a fresh one
+            raise
+        except BaseException:
+            conn.close()
+            pool.pop(key, None)
+            raise
+        if resp.will_close:
+            conn.close()
+            pool.pop(key, None)
+        if resp.status >= 400:
+            raise _HttpError(resp.status, data.decode("utf-8", errors="replace"), resp.getheader("Retry-After"))
+        return json.loads(data.decode("utf-8"))
+    raise AssertionError("unreachable")  # pragma: no cover
+
+
+@functools.lru_cache(maxsize=64)
+def _proxied_host(scheme: str, host: str) -> bool:
+    proxies = urllib.request.getproxies()
+    return bool(proxies.get(scheme)) and not urllib.request.proxy_bypass(host)
+
+
+def _proxied(u: urllib.parse.SplitResult) -> bool:
+    """True when urllib would route this URL through a proxy. Cached per scheme and host:
+    on macOS each lookup queries SystemConfiguration, and ``urlopen``'s default opener also
+    reads the proxy settings only once per process."""
+    return _proxied_host(u.scheme, u.hostname or "")
 
 
 # --------------------------------------------------------------------------- #
