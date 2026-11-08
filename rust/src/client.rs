@@ -71,6 +71,9 @@ pub type WaitForFn = Arc<dyn Fn(Request) -> BoxFuture<Result<Answer, String>> + 
 /// §10 host slot with the turn's cancellation (a pending question ends with its turn).
 pub type WaitForCtxFn =
     Arc<dyn Fn(CancellationToken, Request) -> BoxFuture<Result<Answer, String>> + Send + Sync>;
+/// §8 `after_round`: the round-boundary hook (#192).
+pub type AfterRoundHook =
+    Arc<dyn Fn(AfterRoundEvent) -> BoxFuture<Result<Option<RoundInjection>, String>> + Send + Sync>;
 pub type OnMetricFn = Arc<dyn Fn(&MetricEvent) + Send + Sync>;
 pub type OnErrorFn = Arc<dyn Fn(&ErrorInfo) -> ErrorTier + Send + Sync>;
 pub type BodyTransformFn = Arc<dyn Fn(Value) -> Option<Value> + Send + Sync>;
@@ -82,6 +85,26 @@ pub struct Hooks {
     pub after_llm: Option<AfterLlmHook>,
     pub before_tool: Option<BeforeToolHook>,
     pub after_tool: Option<AfterToolHook>,
+    /// At each round boundary (§8, #192): after a round's tool results
+    /// (`final == false`), or when the model stopped with a turn remaining
+    /// (`final == true`, `text` = its answer). Each `inject` string is appended
+    /// as a user message; a non-empty inject on a final round CONTINUES the loop.
+    pub after_round: Option<AfterRoundHook>,
+}
+
+/// The `after_round` hook event.
+#[derive(Debug, Clone)]
+pub struct AfterRoundEvent {
+    pub turn: usize,
+    pub r#final: bool,
+    pub text: String,
+    pub messages: Vec<Value>,
+}
+
+/// What an `after_round` hook may return.
+#[derive(Debug, Clone, Default)]
+pub struct RoundInjection {
+    pub inject: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -1978,8 +2001,18 @@ impl Client {
                 st.messages.push(a);
             }
             let calls = match end {
-                TurnEnd::Empty => return Ok(self.end_run(st, String::new(), tx)),
-                TurnEnd::Final(text) => return Ok(self.end_run(st, text, tx)),
+                TurnEnd::Empty => {
+                    if self.round_end(st, turn, true, String::new()).await? {
+                        continue;
+                    }
+                    return Ok(self.end_run(st, String::new(), tx));
+                }
+                TurnEnd::Final(text) => {
+                    if self.round_end(st, turn, true, text.clone()).await? {
+                        continue;
+                    }
+                    return Ok(self.end_run(st, text, tx));
+                }
                 TurnEnd::Calls(c) => c,
             };
             for c in &calls {
@@ -2092,6 +2125,7 @@ impl Client {
             if let Some(req) = halt {
                 return Ok(self.pending_run(st, req, tx));
             }
+            self.round_end(st, turn, false, String::new()).await?;
         }
         let text = if style == Style::OpenAI {
             last_text(&st.messages)
@@ -2114,6 +2148,40 @@ impl Client {
             );
         }
         Ok(res)
+    }
+
+    /// §8 `after_round`: fire the round-boundary hook and append its
+    /// injections as user messages. `Ok(true)` when something was appended.
+    /// A final round fires only when a turn remains.
+    async fn round_end(
+        &self,
+        st: &mut RunState,
+        turn: usize,
+        r#final: bool,
+        text: String,
+    ) -> Result<bool, ClientError> {
+        let Some(h) = &self.opts().hooks.after_round else {
+            return Ok(false);
+        };
+        if r#final && turn + 1 >= self.max_turns() {
+            return Ok(false);
+        }
+        let out = h(AfterRoundEvent {
+            turn,
+            r#final,
+            text,
+            messages: st.messages.clone(),
+        })
+        .await
+        .map_err(ClientError::Hook)?;
+        let mut added = false;
+        for m in out.map(|o| o.inject).unwrap_or_default() {
+            if !m.is_empty() {
+                st.messages.push(json!({"role": "user", "content": m}));
+                added = true;
+            }
+        }
+        Ok(added)
     }
 
     fn end_run(&self, st: &RunState, text: String, tx: Option<&Tx>) -> RunResult {
