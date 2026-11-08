@@ -165,6 +165,10 @@ pub struct ClientOptions {
     pub system_prompt: String,
     /// 0 ⇒ 10.
     pub max_turns: usize,
+    /// SPEC §8 "Stop-reason recovery" (default false): answer a malformed tool call with a
+    /// corrective message (once), a truncated reply (length/max_tokens) with a continue
+    /// message (up to 3 times, text joined) and an empty answer with a nudge (once).
+    pub stop_recovery: bool,
     /// Cap on concurrency-safe tool calls of one response running at once (SPEC §8
     /// "Tool scheduling"). 0 ⇒ env `TOOLNEXUS_MAX_TOOL_CONCURRENCY` when a positive
     /// integer, else 10. Unsafe calls (anything not read-only) always run alone.
@@ -642,6 +646,58 @@ struct RunState {
     last_model: String,
     /// The transcript was built (an error after this point keeps a partial).
     started: bool,
+    /// The last response stopped at the output token limit (length / max_tokens).
+    truncated: bool,
+    /// The last response had a tool call whose arguments are not a JSON object.
+    malformed: bool,
+    /// Stop-reason recovery budgets + carried text (per run).
+    rec: StopRecovery,
+}
+
+/// The three pinned user messages of SPEC §8 "Stop-reason recovery" — byte-exact in every port.
+pub const STOP_RECOVERY_NUDGE: &str =
+    "Your previous response contained no answer. Continue and give your answer.";
+pub const STOP_RECOVERY_CONTINUE: &str = "Your previous response was cut off at the output token limit. Continue exactly where it stopped, without repeating anything.";
+pub const STOP_RECOVERY_CORRECTIVE: &str = "Your previous tool call could not be used: its arguments were not a valid JSON object. Call the tool again with arguments that are a single valid JSON object matching its input schema.";
+
+#[derive(Default)]
+struct StopRecovery {
+    correct: u8,
+    cont: u8,
+    nudges: u8,
+    carry: String,
+}
+
+impl StopRecovery {
+    /// Classifies one response (SPEC §8 order): the pinned text to append, and whether the
+    /// assistant message is dropped. `None` ⇒ no recovery.
+    fn decide(
+        &mut self,
+        has_calls: bool,
+        malformed: bool,
+        truncated: bool,
+        text: &str,
+    ) -> Option<(&'static str, bool)> {
+        if has_calls && malformed && self.correct < 1 {
+            self.correct += 1;
+            Some((STOP_RECOVERY_CORRECTIVE, true))
+        } else if !has_calls && truncated && self.cont < 3 {
+            self.cont += 1;
+            self.carry.push_str(text);
+            Some((STOP_RECOVERY_CONTINUE, false))
+        } else if !has_calls && !truncated && text.trim().is_empty() && self.nudges < 1 {
+            self.nudges += 1;
+            Some((STOP_RECOVERY_NUDGE, true))
+        } else {
+            None
+        }
+    }
+}
+
+/// A raw tool-arguments string that is not a JSON object (empty/whitespace is `{}`).
+fn malformed_args(raw: &str) -> bool {
+    let t = raw.trim();
+    !t.is_empty() && !matches!(serde_json::from_str::<Value>(t), Ok(Value::Object(_)))
 }
 
 enum TurnEnd {
@@ -1399,6 +1455,22 @@ impl Client {
                 .and_then(Value::as_str)
                 .unwrap_or("")
                 .to_owned();
+            st.truncated = data
+                .pointer("/choices/0/finish_reason")
+                .and_then(Value::as_str)
+                == Some("length");
+            st.malformed = msg
+                .get("tool_calls")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .any(|tc| {
+                    malformed_args(
+                        tc.pointer("/function/arguments")
+                            .and_then(Value::as_str)
+                            .unwrap_or(""),
+                    )
+                });
             let mut asst = json!({"role": "assistant", "content": content});
             let calls: Vec<Call> = msg
                 .get("tool_calls")
@@ -1442,6 +1514,7 @@ impl Client {
             }
             return Ok((Some(asst), TurnEnd::Final(content), data));
         }
+        st.truncated = data.get("stop_reason").and_then(Value::as_str) == Some("max_tokens");
         let mut content = Vec::new();
         let mut text = String::new();
         let mut calls = Vec::new();
@@ -1461,6 +1534,7 @@ impl Client {
                     let id = b.get("id").and_then(Value::as_str).unwrap_or("");
                     let name = b.get("name").and_then(Value::as_str).unwrap_or("");
                     let input = b.get("input").cloned().unwrap_or(Value::Null);
+                    st.malformed |= !matches!(input, Value::Null | Value::Object(_));
                     content
                         .push(json!({"type": "tool_use", "id": id, "name": name, "input": input}));
                     calls.push(Call {
@@ -1502,6 +1576,7 @@ impl Client {
         }
         let mut blocks: Vec<(i64, Block)> = Vec::new();
         let mut stop_reason = String::new();
+        let mut finish = String::new();
         let mut done = false;
 
         let mut handle = |line: &str, st: &mut RunState| -> bool {
@@ -1521,6 +1596,13 @@ impl Client {
             if style == Style::OpenAI {
                 if let Some(u) = j.get("usage").filter(|u| u.is_object()) {
                     add_usage(&mut st.usage, u, style);
+                }
+                if let Some(fr) = j
+                    .pointer("/choices/0/finish_reason")
+                    .and_then(Value::as_str)
+                    && !fr.is_empty()
+                {
+                    finish = fr.to_owned();
                 }
                 let Some(d) = j
                     .get("choices")
@@ -1699,6 +1781,8 @@ impl Client {
         }
         let streamed = json!({"streamed": true});
         if style == Style::OpenAI {
+            st.truncated = finish == "length";
+            st.malformed = acc.iter().any(|(_, _, a)| malformed_args(a));
             if acc.is_empty() {
                 let asst = json!({"role": "assistant", "content": content});
                 return Ok((Some(asst), TurnEnd::Final(content), streamed));
@@ -1721,11 +1805,13 @@ impl Client {
                 .collect();
             return Ok((Some(asst), TurnEnd::Calls(calls), streamed));
         }
+        st.truncated = stop_reason == "max_tokens";
         let mut content_blocks = Vec::new();
         let mut text = String::new();
         let mut calls = Vec::new();
         for (_, b) in blocks {
             if b.typ == "tool_use" {
+                st.malformed |= malformed_args(&b.json);
                 let input = safe_json_args(&b.json);
                 content_blocks
                     .push(json!({"type": "tool_use", "id": b.id, "name": b.name, "input": input}));
@@ -2005,17 +2091,42 @@ impl Client {
                     }
                 }
             }
+            st.truncated = false;
+            st.malformed = false;
             let (asst, end) = self
                 .call_model(st, &key, &turn_model, &system, &tools, turn, cancel, tx)
                 .await?;
+            let had_asst = asst.is_some();
             if let Some(a) = asst {
                 st.messages.push(a);
             }
+            if self.opts().stop_recovery && turn + 1 < self.max_turns() {
+                let (has_calls, text) = match &end {
+                    TurnEnd::Calls(_) => (true, ""),
+                    TurnEnd::Final(t) => (false, t.as_str()),
+                    TurnEnd::Empty => (false, ""),
+                };
+                let (malformed, truncated) = (st.malformed, st.truncated);
+                if let Some((msg, drop)) = st.rec.decide(has_calls, malformed, truncated, text) {
+                    if drop && had_asst {
+                        st.messages.pop();
+                    }
+                    st.messages.push(json!({"role": "user", "content": msg}));
+                    continue;
+                }
+            }
             let calls = match end {
-                TurnEnd::Empty => return Ok(self.end_run(st, String::new(), tx)),
-                TurnEnd::Final(text) => return Ok(self.end_run(st, text, tx)),
+                TurnEnd::Empty => {
+                    let text = std::mem::take(&mut st.rec.carry);
+                    return Ok(self.end_run(st, text, tx));
+                }
+                TurnEnd::Final(text) => {
+                    let text = std::mem::take(&mut st.rec.carry) + &text;
+                    return Ok(self.end_run(st, text, tx));
+                }
                 TurnEnd::Calls(c) => c,
             };
+            st.rec.carry.clear();
             for c in &calls {
                 send(tx, self.call_event(c));
             }
