@@ -150,6 +150,13 @@
         "tier": "full"
       },
       {
+        "name": "fallbackModels",
+        "aliases": [
+          "fallbackmodels"
+        ],
+        "tier": "full"
+      },
+      {
         "name": "apiKeyEnv",
         "aliases": [
           "apikeyenv"

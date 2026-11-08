@@ -239,6 +239,12 @@ public sealed partial class LlmClient
         public Hooks? Hooks { get; set; }
         public int? Retries { get; set; }              // default 2
 
+        /// <summary>(§8 Resilience, <c>fallbackModels</c>) Ordered model ids tried, on the same
+        /// endpoint, after the turn's model when its retry budget ends on <c>503</c>/<c>529</c>
+        /// (overload). Each fallback gets a fresh retry budget; nothing else advances. Null/empty ⇒
+        /// byte-identical to today. Env <c>TOOLNEXUS_DISABLE_MODEL_FALLBACK=1|true</c> disables it.</summary>
+        public IReadOnlyList<string>? FallbackModels { get; set; }
+
         /// <summary>
         /// Extra HTTP statuses to treat as retryable, ADDED to the default set
         /// (<c>429</c>/<c>500</c>/<c>502</c>/<c>503</c>/<c>504</c>/<c>529</c>). It can only widen: a
@@ -386,6 +392,7 @@ public sealed partial class LlmClient
         public Options WithMaxToolConcurrency(int v) { MaxToolConcurrency = v; return this; }
         public Options WithHooks(Hooks v) { Hooks = v; return this; }
         public Options WithRetries(int v) { Retries = v; return this; }
+        public Options WithFallbackModels(IReadOnlyList<string> v) { FallbackModels = v; return this; }
         public Options WithRetryableStatuses(IReadOnlyCollection<int> v) { RetryableStatuses = v; return this; }
         public Options WithRetryBaseMs(int v) { RetryBaseMs = v; return this; }
         public Options WithTimeoutMs(long v) { TimeoutMs = v; return this; }
@@ -861,15 +868,17 @@ public sealed partial class LlmClient
     /// <c>ToolCallArgs</c> is a call's input an ACP agent reported on a <c>tool_call_update</c>
     /// after the call began (<c>Id</c>, <c>Name</c>, <c>Args</c>, <c>Via</c>; SPEC §8C, issue #188).
     /// <c>Retry</c> (streaming only): the LLM request failed retryably and the loop is about to wait
-    /// <see cref="StreamEvent.DelayMs"/> and try again.</summary>
-    public enum StreamKind { Text, ToolCall, ToolResult, Usage, Pending, Done, Thought, ToolCallArgs, Retry }
+    /// <see cref="StreamEvent.DelayMs"/> and try again.
+    /// <c>Fallback</c> (streaming only): the call switched from model <c>From</c> to <c>To</c> after overload.</summary>
+    public enum StreamKind { Text, ToolCall, ToolResult, Usage, Pending, Done, Thought, ToolCallArgs, Retry, Fallback }
 
     public sealed record StreamEvent(
         StreamKind Type, string? Delta = null, string? Id = null, string? Name = null,
         IDictionary<string, object?>? Args = null, string? Output = null, bool IsError = false,
         Usage? Usage = null, RunResult? Result = null, Request? Request = null,
         IDictionary<string, object?>? Metadata = null, string? Via = null,
-        int? Attempt = null, int? Max = null, long? DelayMs = null, int? Status = null, string? Reason = null)
+        int? Attempt = null, int? Max = null, long? DelayMs = null, int? Status = null, string? Reason = null,
+        string? From = null, string? To = null)
     {
         /// <summary>§8 Retry event: <c>Attempt</c> is the 1-based retry about to happen, <c>Max</c> the
         /// configured retries, <c>DelayMs</c> the exact wait, <c>Status</c> the HTTP status (null on a
@@ -877,6 +886,8 @@ public sealed partial class LlmClient
         internal static StreamEvent RetryEvent(int attempt, int max, long delayMs, int? status) =>
             new(StreamKind.Retry, Attempt: attempt, Max: max, DelayMs: delayMs, Status: status,
                 Reason: status is { } st ? $"HTTP {st}" : "network");
+        /// <summary>§8 <c>fallbackModels</c>: the call is switching from model <c>From</c> to <c>To</c> after overload.</summary>
+        internal static StreamEvent FallbackEvent(string from, string to) => new(StreamKind.Fallback, From: from, To: to);
         /// <summary>§10: a tool is waiting on an out-of-band resolution (emitted before <c>WaitFor</c> runs).</summary>
         internal static StreamEvent PendingEvent(Request request) => new(StreamKind.Pending, Request: request);
         internal static StreamEvent Text(string delta) => new(StreamKind.Text, Delta: delta);
@@ -954,6 +965,7 @@ public sealed partial class LlmClient
         body = FinalizeBody(body);
 
         var data = await LlmCallJsonAsync(url, BaseHeaders(key, false), body, deadline, external, "openai").ConfigureAwait(false);
+        turnModel = ServedModel(body, turnModel);
         _opts.Hooks?.AfterLLM?.Invoke(new AfterLLMEvent(data, turnModel, 0));
 
         var result = new Translate.Result { Model = turnModel, Raw = data };
@@ -1007,6 +1019,7 @@ public sealed partial class LlmClient
         body = FinalizeBody(body);
 
         var data = await LlmCallJsonAsync(endpoint, BaseHeaders(key, true), body, deadline, external, "anthropic").ConfigureAwait(false);
+        turnModel = ServedModel(body, turnModel);
         _opts.Hooks?.AfterLLM?.Invoke(new AfterLLMEvent(data, turnModel, 0));
 
         var result = new Translate.Result { Model = turnModel, Raw = data };
@@ -1483,6 +1496,7 @@ public sealed partial class LlmClient
                     try
                     {
                         data = await LlmCallJsonAsync(url, BaseHeaders(key, false), body, deadline, external, "openai").ConfigureAwait(false);
+                        turnModel = lastModel = ServedModel(body, turnModel);
                     }
                     catch (ProviderException pe)
                     {
@@ -1627,6 +1641,7 @@ public sealed partial class LlmClient
                     try
                     {
                         data = await LlmCallJsonAsync(endpoint, BaseHeaders(key, true), body, deadline, external, "anthropic").ConfigureAwait(false);
+                        turnModel = lastModel = ServedModel(body, turnModel);
                     }
                     catch (ProviderException pe)
                     {
@@ -1814,7 +1829,7 @@ public sealed partial class LlmClient
                     {
                         try
                         {
-                            await foreach (var line in SseLinesAsync(url, BaseHeaders(key, false), body, deadline, onEvent, external).ConfigureAwait(false))
+                            await foreach (var line in SseLinesAsync(url, BaseHeaders(key, false), body, deadline, onEvent, external, (f, t) => onEvent(StreamEvent.FallbackEvent(f, t))).ConfigureAwait(false))
                             {
                                 if (!line.StartsWith("data:")) continue;
                                 var payload = line[5..].Trim();
@@ -1848,9 +1863,10 @@ public sealed partial class LlmClient
                         }
                         catch (Exception)
                         {
-                            Emit(MetricEvent.Llm(turnModel, "error", NowMs() - t0, 0, 0));
+                            Emit(MetricEvent.Llm(ServedModel(body, turnModel), "error", NowMs() - t0, 0, 0));
                             throw;
                         }
+                        turnModel = lastModel = ServedModel(body, turnModel);
                         break;
                     }
                     catch (ProviderException pe)
@@ -2022,7 +2038,7 @@ public sealed partial class LlmClient
                     {
                         try
                         {
-                            await foreach (var line in SseLinesAsync(endpoint, BaseHeaders(key, true), body, deadline, onEvent, external).ConfigureAwait(false))
+                            await foreach (var line in SseLinesAsync(endpoint, BaseHeaders(key, true), body, deadline, onEvent, external, (f, t) => onEvent(StreamEvent.FallbackEvent(f, t))).ConfigureAwait(false))
                             {
                                 if (!line.StartsWith("data:")) continue;
                                 if (Json.ParseLoose(line[5..].Trim()) is not IDictionary<string, object?> j) continue;
@@ -2073,9 +2089,10 @@ public sealed partial class LlmClient
                         }
                         catch (Exception)
                         {
-                            Emit(MetricEvent.Llm(turnModel, "error", NowMs() - t0, 0, 0));
+                            Emit(MetricEvent.Llm(ServedModel(body, turnModel), "error", NowMs() - t0, 0, 0));
                             throw;
                         }
+                        turnModel = lastModel = ServedModel(body, turnModel);
                         break;
                     }
                     catch (ProviderException pe)
@@ -2236,9 +2253,50 @@ public sealed partial class LlmClient
         }
     }
 
+    /// <summary>The model the call actually transmitted last (the served model after any fallback).</summary>
+    private static string ServedModel(Dictionary<string, object?> body, string fallback) =>
+        body.Get("model") as string ?? fallback;
+
+    internal static bool ModelFallbackDisabled()
+    {
+        var v = Environment.GetEnvironmentVariable("TOOLNEXUS_DISABLE_MODEL_FALLBACK")?.Trim();
+        return v == "1" || string.Equals(v, "true", StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>§8 <c>fallbackModels</c>: [turnModel, ...FallbackModels], empties/duplicates skipped.</summary>
+    private List<string> ModelChain(string turnModel)
+    {
+        var chain = new List<string> { turnModel };
+        if (_opts.FallbackModels is not { Count: > 0 } fb || ModelFallbackDisabled()) return chain;
+        foreach (var m in fb)
+            if (!string.IsNullOrEmpty(m) && !chain.Contains(m)) chain.Add(m);
+        return chain;
+    }
+
+    /// <summary>
+    /// One model call over the §8 fallback chain: today's retry budget runs on each model; only an
+    /// exhausted budget ending on 503/529 advances to the next model (rewriting <c>body["model"]</c>,
+    /// which callers then read as the served model). Everything else returns/throws as today.
+    /// </summary>
     private async Task<HttpResponseMessage> LlmSendAsync(string url, Dictionary<string, string> headers,
         Dictionary<string, object?> body, Deadline deadline, bool streaming, CancellationToken external,
-        Action<StreamEvent>? onRetry = null)
+        Action<StreamEvent>? onRetry = null, Action<string, string>? onFallback = null)
+    {
+        var chain = body.Get("model") is string tm ? ModelChain(tm) : new List<string>();
+        for (var i = 0; ; i++)
+        {
+            var (res, exhausted) = await LlmSendOnceAsync(url, headers, body, deadline, streaming, external, onRetry).ConfigureAwait(false);
+            var st = (int)res.StatusCode;
+            if (i + 1 >= chain.Count || !exhausted || (st != 503 && st != 529)) return res;
+            res.Dispose();
+            onFallback?.Invoke(chain[i], chain[i + 1]);
+            body["model"] = chain[i + 1];
+        }
+    }
+
+    private async Task<(HttpResponseMessage Res, bool Exhausted)> LlmSendOnceAsync(string url, Dictionary<string, string> headers,
+        Dictionary<string, object?> body, Deadline deadline, bool streaming, CancellationToken external,
+        Action<StreamEvent>? onRetry)
     {
         var retries = Retries();
         var baseMs = RetryBaseMs();
@@ -2276,7 +2334,7 @@ public sealed partial class LlmClient
                 var completion = streaming ? HttpCompletionOption.ResponseHeadersRead : HttpCompletionOption.ResponseContentRead;
                 var res = await _http.SendAsync(req, completion, cts.Token).ConfigureAwait(false);
                 var status = (int)res.StatusCode;
-                if (status is >= 200 and < 300) return res;
+                if (status is >= 200 and < 300) return (res, false);
                 var retryable = IsRetryableStatus(status, _opts.RetryableStatuses);
                 // x-should-retry: a server-sent true/false overrides the default classification.
                 if (res.Headers.TryGetValues("x-should-retry", out var xsrs))
@@ -2286,7 +2344,8 @@ public sealed partial class LlmClient
                     else if (string.Equals(xsr, "false", StringComparison.OrdinalIgnoreCase)) retryable = false;
                 }
                 var tier = classify(new ErrorInfo(null, status, attempt, retryable));
-                if (tier == Tier.Fail || attempt == retries) return res; // caller handles non-2xx
+                if (tier == Tier.Fail) return (res, false); // caller handles non-2xx
+                if (attempt == retries) return (res, true);  // budget exhausted (fallback may advance)
                 var wait = RetryAfterMs(res) ?? (long)(baseMs * Math.Pow(2, attempt) + Random.Shared.Next(0, 100));
                 res.Dispose();
                 onRetry?.Invoke(StreamEvent.RetryEvent(attempt + 1, retries, wait, status));
@@ -2351,18 +2410,18 @@ public sealed partial class LlmClient
     private async Task<Dictionary<string, object?>> LlmCallJsonAsync(string url, Dictionary<string, string> headers,
         Dictionary<string, object?> body, Deadline deadline, CancellationToken external, string style)
     {
-        var callModel = body.Get("model")?.ToString() ?? _opts.Model;
         var t0 = NowMs();
         try
         {
             var data = await PostJsonAsync(url, headers, body, deadline, external).ConfigureAwait(false);
+            var callModel = body.Get("model")?.ToString() ?? _opts.Model;
             var tok = PerCall(data.Get("usage") as IDictionary<string, object?>, style);
             Emit(MetricEvent.Llm(callModel, "ok", NowMs() - t0, tok.Prompt, tok.Completion));
             return data;
         }
         catch (Exception)
         {
-            Emit(MetricEvent.Llm(callModel, "error", NowMs() - t0, 0, 0));
+            Emit(MetricEvent.Llm(body.Get("model")?.ToString() ?? _opts.Model, "error", NowMs() - t0, 0, 0));
             throw;
         }
     }
@@ -2383,9 +2442,10 @@ public sealed partial class LlmClient
 
     private async IAsyncEnumerable<string> SseLinesAsync(string url, Dictionary<string, string> headers,
         Dictionary<string, object?> body, Deadline deadline, Action<StreamEvent>? onRetry,
-        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken external)
+        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken external,
+        Action<string, string>? onFallback = null)
     {
-        using var res = await LlmSendAsync(url, headers, body, deadline, true, external, onRetry).ConfigureAwait(false);
+        using var res = await LlmSendAsync(url, headers, body, deadline, true, external, onRetry, onFallback).ConfigureAwait(false);
         if ((int)res.StatusCode is < 200 or >= 300)
         {
             var b = await res.Content.ReadAsStringAsync(external).ConfigureAwait(false);

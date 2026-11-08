@@ -2747,6 +2747,7 @@ the thread's transcript is loaded as history before the stream, and saved back t
 - `{ type: "usage", usage }` — token usage
 - `{ type: "retry", attempt, max, delayMs, status?, reason }` — the LLM request failed retryably and
   the loop is about to wait `delayMs` and try again (§ Resilience, "Retry event")
+- `{ type: "fallback", from, to }` — only with `fallbackModels` (§8 Resilience): the call is switching from model `from` to `to` after overload
 - `{ type: "done", result }` — the final `RunResult`
 
 OpenAI: `stream:true` + `stream_options.include_usage`, SSE deltas (assemble `tool_calls` by
@@ -2872,6 +2873,41 @@ honoured `Retry-After` in milliseconds, otherwise the backoff-with-jitter value 
 failure that is not retried (terminal, `"fail"`, or budget spent), for aborts, or by
 `run`/`ask` (non-streaming output is unchanged). Field spelling is per-port idiom
 (`delay_ms` / `DelayMs` / `:delay-ms`). An in-process client has no wire and emits none.
+
+**`fallbackModels` — opt-in model fallback chain on overload (optional; change `add-model-fallback-chain`).**
+An ordered list of model ids (idiomatic per port: js `fallbackModels`, python `fallback_models`,
+Go `FallbackModels`, java `fallbackModels(List<String>)`, C# `FallbackModels`, elixir
+`:fallback_models`, clojure `:fallback-models`, rust `fallback_models(Vec<String>)`). It is the
+**model-only first slice** of `openspec/changes/add-llm-upstream-failover` (same `baseUrl`, `style`,
+credentials and transport — only the model changes), and follows that design's D1/D5/D6 verbatim.
+Pinned behaviour, identical in all eight ports:
+
+- **Chain.** For each model call the chain is `[turnModel, ...fallbackModels]`, where `turnModel` is
+  the model that call would send today (the configured model, or that turn's `beforeLLM` override).
+  Entries that are empty or equal to a model already earlier in the chain are skipped. `beforeLLM` is
+  **not** re-run per fallback: the fallback list is itself the operator's explicit, ordered choice.
+- **Trigger = overload, exactly `503` and `529`.** The retry budget (`retries`, `Retry-After`,
+  `onError`) is spent on the current model first, unchanged. Only when that budget is exhausted and
+  the **final** attempt's HTTP status is `503` or `529` does the call advance to the next model, with
+  a **fresh** retry budget. Nothing else advances: `429` (a rate limit — the same model will serve
+  later), other 5xx, network errors, `4xx`, aborts/timeouts, and any attempt `onError` classified
+  `"fail"` surface exactly as today. Worst case `(1 + retries) × chain length` attempts.
+- **Per call, not sticky.** Every model call (each turn) starts again at `turnModel`; no cooldown or
+  cross-call memory (v1).
+- **Exhausted chain** ⇒ the last model's error surfaces exactly as a non-fallback client's would.
+- **Reporting.** The model that actually served is "the model transmitted" for §8 Hooks reporting:
+  the `afterLLM` event's `model`, that turn's `llm` metric event, `RunResult.model` and the `run`
+  metric event carry it.
+- **Streaming.** Before switching, `stream` emits `{ type: "fallback", from, to }` (both model ids);
+  `run`/`ask` emit nothing new. Overload is an HTTP status received before any token, so a fallback
+  always precedes the call's first delta; a failure after the first token never falls back.
+- **Kill switch.** When the environment variable **`TOOLNEXUS_DISABLE_MODEL_FALLBACK`** is `1` or
+  `true` (case-insensitive), read at each model call, the chain is ignored. Any other value or unset
+  ⇒ the option applies.
+- **Absent / empty `fallbackModels` ⇒ byte-identical** to today. In-process and ACP model sources
+  (no wire, no HTTP status) ignore it.
+- **Model faithfulness (§8 Right-size routing) still holds:** the configured model is transmitted
+  verbatim first; a fallback is an operator-configured, reported substitution, never a silent one.
 
 **Cancellation** beyond `timeoutMs`/abort: the per-port cancellation contract used by the
 agent runtime's `interrupt` is tabled in §7D — ports differ only in abort latency, never in

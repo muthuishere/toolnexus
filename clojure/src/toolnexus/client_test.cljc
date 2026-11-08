@@ -1881,3 +1881,98 @@
                      (client/run (client-for "openai" base opts) "hi" {:toolkit toolkit})
                      @raw)))]
     (is (= (bodies {}) (bodies {:hooks {:after-round (constantly nil)}})))))
+;; ---------------------------------------------------------------------------
+;; §8 fallbackModels — opt-in model fallback chain on overload (#190)
+;; ---------------------------------------------------------------------------
+
+(def ^:private fb-ok
+  {:status 200 :body "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"hi\"}}]}"})
+
+(defn- fb-stub
+  "Answers from `responses` in order and records each request's `model`."
+  [responses]
+  (let [seen (atom [])]
+    [(fn [_url _headers body]
+       (let [i (count (swap! seen conj (get (json/read-str body) :model)))]
+         (nth responses (dec i) (last responses))))
+     seen]))
+
+(defn- fb-client [f & {:as more}]
+  (client/create-client (merge {:base-url "http://127.0.0.1:1" :model "m1" :api-key "k"
+                                :retries 0 :retry-base-ms 1 :http-client f
+                                :fallback-models ["m2"]}
+                               more)))
+
+(deftest fallback-529-switches-to-the-next-model
+  (let [[f seen] (fb-stub [{:status 529 :body "{}"} fb-ok])
+        metrics  (atom [])
+        after    (atom nil)
+        c        (fb-client f :on-metric #(swap! metrics conj %)
+                            :hooks {:after-llm (fn [ev] (reset! after (:model ev)) nil)})
+        r        (client/run c "hi" {})]
+    (is (= ["m1" "m2"] @seen))
+    (is (= "m2" (:model r)))
+    (is (= "hi" (:text r)))
+    (is (= "m2" @after) "afterLLM sees the serving model")
+    (is (= ["m2"] (map :model (filter #(= "llm" (:event %)) @metrics))))
+    (is (= "m2" (:model (first (filter #(= "run" (:event %)) @metrics)))))))
+
+(deftest fallback-spends-the-budget-first-and-dedupes
+  (let [[f seen] (fb-stub [{:status 503 :body "{}"} {:status 503 :body "{}"} fb-ok])
+        c        (fb-client f :retries 1 :fallback-models ["" "m1" "m2" "m2"])]
+    (is (= "m2" (:model (client/run c "hi" {}))))
+    (is (= ["m1" "m1" "m2"] @seen))))
+
+(deftest fallback-429-never-switches
+  (let [[f seen] (fb-stub [{:status 429 :body "{}"} fb-ok])
+        e        (try (client/run (fb-client f) "hi" {}) nil (catch Throwable e e))]
+    (is (= 429 (:status (ex-data e))))
+    (is (= ["m1"] @seen))))
+
+(deftest fallback-on-error-fail-never-switches
+  (let [[f seen] (fb-stub [{:status 503 :body "{}"} fb-ok])
+        e        (try (client/run (fb-client f :on-error (fn [_] :fail)) "hi" {}) nil
+                      (catch Throwable e e))]
+    (is (= 503 (:status (ex-data e))))
+    (is (= ["m1"] @seen))))
+
+(deftest fallback-exhausted-chain-surfaces-the-last-error
+  (let [[f seen] (fb-stub [{:status 529 :body "{}"}])
+        e        (try (client/run (fb-client f) "hi" {}) nil (catch Throwable e e))]
+    (is (= 529 (:status (ex-data e))))
+    (is (= ["m1" "m2"] @seen))))
+
+(deftest fallback-kill-switch-disables-the-chain
+  (doseq [v ["1" "TRUE" "true"]]
+    (let [[f seen] (fb-stub [{:status 529 :body "{}"} fb-ok])
+          c        (assoc (fb-client f) ::client/get-env
+                          (fn [k] (when (= k "TOOLNEXUS_DISABLE_MODEL_FALLBACK") v)))
+          e        (try (client/run c "hi" {}) nil (catch Throwable e e))]
+      (is (= 529 (:status (ex-data e))))
+      (is (= ["m1"] @seen))))
+  (let [[f seen] (fb-stub [{:status 529 :body "{}"} fb-ok])
+        c        (assoc (fb-client f) ::client/get-env (constantly "no"))]
+    (is (= "m2" (:model (client/run c "hi" {}))))
+    (is (= ["m1" "m2"] @seen))))
+
+(deftest fallback-event-precedes-the-call-output
+  (let [[f _] (fb-stub [{:status 529 :body "{}"} fb-ok])
+        evs   (atom [])]
+    (client/run (fb-client f) "hi" {:on-event #(swap! evs conj %)})
+    (is (= {:type "fallback" :from "m1" :to "m2"} (first @evs)))
+    (is (= ["fallback" "usage" "done"] (map :type @evs)))))
+
+(deftest fallback-absent-option-is-unchanged
+  (let [[f seen] (fb-stub [{:status 529 :body "{}"} fb-ok])
+        evs      (atom [])
+        c        (fb-client f :fallback-models nil)
+        e        (try (client/run c "hi" {:on-event #(swap! evs conj %)}) nil (catch Throwable e e))]
+    (is (= 529 (:status (ex-data e))))
+    (is (= ["m1"] @seen))
+    (is (empty? @evs))))
+
+(deftest fallback-applies-to-call-provider
+  (let [[f seen] (fb-stub [{:status 503 :body "{}"} fb-ok])
+        [_ sent] (client/call-provider* (fb-client f) {:model "m1" :messages []})]
+    (is (= "m2" sent))
+    (is (= ["m1" "m2"] @seen))))

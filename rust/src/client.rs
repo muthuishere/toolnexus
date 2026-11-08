@@ -205,6 +205,10 @@ pub struct ClientOptions {
     pub retry_base_ms: u64,
     /// Extra statuses to retry, ADDED to 429/500/502/503/504/529.
     pub retryable_statuses: Vec<u16>,
+    /// Ordered fallback models tried on overload (503/529) once the retry budget is
+    /// spent (§8 Resilience). Empty ⇒ off. Env `TOOLNEXUS_DISABLE_MODEL_FALLBACK=1|true`
+    /// disables it per call.
+    pub fallback_models: Vec<String>,
     /// Whole-run deadline in ms (0 = none).
     pub timeout_ms: u64,
     /// `None` ⇒ in-memory.
@@ -358,6 +362,10 @@ pub struct StreamEvent {
     pub status: Option<u16>,
     /// `retry` only: `"HTTP <status>"` or `"network"`.
     pub reason: String,
+    /// `"fallback"` events: the model being left.
+    pub from: String,
+    /// `"fallback"` events: the model being switched to.
+    pub to: String,
 }
 
 impl StreamEvent {
@@ -1302,6 +1310,77 @@ impl Client {
         cancel: &CancellationToken,
         side: Option<&Tx>,
     ) -> Result<RawResponse, ClientError> {
+        self.llm_fetch_x(endpoint, headers, raw, cancel, side)
+            .await
+            .map(|(r, _)| r)
+    }
+
+    /// The model chain for one call: `[turn_model, ...fallback_models]`, empties and
+    /// duplicates skipped; just `[turn_model]` when off, in-process, or kill-switched.
+    fn model_chain(&self, turn_model: &str) -> Vec<String> {
+        let mut chain = vec![turn_model.to_owned()];
+        if matches!(self.inner.transport, Transport::InProcess(_)) {
+            return chain;
+        }
+        let kill = std::env::var("TOOLNEXUS_DISABLE_MODEL_FALLBACK").unwrap_or_default();
+        if kill == "1" || kill.eq_ignore_ascii_case("true") {
+            return chain;
+        }
+        for m in &self.opts().fallback_models {
+            if !m.is_empty() && !chain.contains(m) {
+                chain.push(m.clone());
+            }
+        }
+        chain
+    }
+
+    /// [`Self::llm_fetch`] over the model chain (§8 `fallbackModels`): advances to the
+    /// next model only when the retry budget is spent and the final status is 503/529.
+    /// Returns the response and the model that served it.
+    #[allow(clippy::too_many_arguments)]
+    async fn llm_fetch_chain(
+        &self,
+        turn_model: &str,
+        make_raw: &(dyn Fn(&str) -> Result<Vec<u8>, ClientError> + Sync),
+        endpoint: &str,
+        headers: &[(String, String)],
+        cancel: &CancellationToken,
+        side: Option<&Tx>,
+    ) -> Result<(RawResponse, String), ClientError> {
+        let chain = self.model_chain(turn_model);
+        let mut i = 0;
+        loop {
+            let model = &chain[i];
+            let raw = make_raw(model)?;
+            let (resp, exhausted) = self
+                .llm_fetch_x(endpoint, headers, &raw, cancel, side)
+                .await?;
+            if exhausted && matches!(resp.status, 503 | 529) && i + 1 < chain.len() {
+                drop(resp);
+                if let Some(tx) = side {
+                    let _ = tx.send(StreamEvent {
+                        kind: "fallback".into(),
+                        from: model.clone(),
+                        to: chain[i + 1].clone(),
+                        ..Default::default()
+                    });
+                }
+                i += 1;
+                continue;
+            }
+            return Ok((resp, model.clone()));
+        }
+    }
+
+    /// The retry loop; the flag says the budget was spent without an `on_error` "fail".
+    async fn llm_fetch_x(
+        &self,
+        endpoint: &str,
+        headers: &[(String, String)],
+        raw: &[u8],
+        cancel: &CancellationToken,
+        side: Option<&Tx>,
+    ) -> Result<(RawResponse, bool), ClientError> {
         let retries = self.retries();
         let classify = |info: &ErrorInfo| match &self.opts().on_error {
             Some(f) => f(info),
@@ -1339,7 +1418,7 @@ impl Client {
                 }
                 Ok(resp) => {
                     if resp.status < 300 {
-                        return Ok(resp);
+                        return Ok((resp, false));
                     }
                     let retryable = resp.should_retry.unwrap_or_else(|| {
                         is_retryable_status(resp.status, &self.opts().retryable_statuses)
@@ -1350,8 +1429,11 @@ impl Client {
                         attempt,
                         retryable,
                     });
-                    if tier == ErrorTier::Fail || attempt == retries {
-                        return Ok(resp);
+                    if tier == ErrorTier::Fail {
+                        return Ok((resp, false));
+                    }
+                    if attempt == retries {
+                        return Ok((resp, true));
                     }
                     let (ra, status) = (resp.retry_after.clone(), resp.status);
                     drop(resp);
@@ -1434,7 +1516,7 @@ impl Client {
         let streaming = tx.is_some();
         let wire = self.wire(&st.messages)?;
         let mut body = Map::new();
-        body.insert("model".into(), json!(model));
+        body.insert("model".into(), json!(""));
         if style == Style::Anthropic {
             body.insert("max_tokens".into(), json!(4096));
         }
@@ -1454,21 +1536,37 @@ impl Client {
                 body.insert("tool_choice".into(), json!("auto"));
             }
         }
-        let body = self.finalize_body(body);
-        let raw = serde_json::to_vec(&body).map_err(|e| ClientError::Decode(e.to_string()))?;
+        let make_raw = |m: &str| {
+            let mut b = body.clone();
+            b.insert("model".into(), json!(m));
+            let b = self.finalize_body(b);
+            serde_json::to_vec(&b).map_err(|e| ClientError::Decode(e.to_string()))
+        };
         let t0 = Instant::now();
         st.last_model = model.into();
         let before = st.usage;
-        let resp = match self
-            .llm_fetch(&self.endpoint(), &self.auth_headers(key), &raw, cancel, tx)
-            .await
-        {
-            Ok(r) => r,
+        let fetched = self
+            .llm_fetch_chain(
+                model,
+                &make_raw,
+                &self.endpoint(),
+                &self.auth_headers(key),
+                cancel,
+                tx,
+            )
+            .await;
+        let resp = match fetched {
+            Ok((r, served)) => {
+                st.last_model = served;
+                r
+            }
             Err(e) => {
                 self.emit_llm(model, "error", t0, 0, 0);
                 return Err(e);
             }
         };
+        let served = st.last_model.clone();
+        let model = served.as_str();
         if !(200..300).contains(&resp.status) {
             self.emit_llm(model, "error", t0, 0, 0);
             return Err(Self::provider_error(resp).await);

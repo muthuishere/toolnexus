@@ -18,6 +18,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -78,6 +79,12 @@ type ClientOptions struct {
 	// Retries on transient LLM errors (429/500/502/503/504/529 + network). 0 ⇒ 2.
 	// Widen the status set with RetryableStatuses.
 	Retries int
+	// FallbackModels (§8 Resilience) is an opt-in ordered model fallback chain on
+	// overload. Per model call the chain is [turnModel, ...FallbackModels]; only
+	// when the retry budget is exhausted on a final 503/529 does the call advance
+	// to the next model with a fresh budget. Nil/empty ⇒ byte-identical. The env
+	// TOOLNEXUS_DISABLE_MODEL_FALLBACK=1|true disables it at each call.
+	FallbackModels []string
 	// RetryBaseMs is the base backoff in ms (exponential + jitter). 0 ⇒ 500.
 	RetryBaseMs int
 	// RetryableStatuses are extra HTTP statuses to treat as retryable, ADDED to
@@ -512,7 +519,7 @@ type RunResult struct {
 // surface on a channel — see Stream.
 type StreamEvent struct {
 	// Type discriminates the event: "text" | "thought" | "tool_call" |
-	// "tool_result" | "usage" | "retry" | "done" | "error". "thought" comes only from an
+	// "tool_result" | "usage" | "retry" | "fallback" | "done" | "error". "thought" comes only from an
 	// in-process stream source (ACP agent_thought_chunk, Via "acp") and is
 	// never part of the answer.
 	Type string
@@ -553,6 +560,10 @@ type StreamEvent struct {
 	DelayMs int64
 	Status  int
 	Reason  string
+	// From / To are the model ids of a fallback switch (Type == "fallback",
+	// §8 Resilience FallbackModels): emitted before the call is re-sent to To.
+	From string
+	To   string
 }
 
 // addUsage sums one response's usage object into acc. Numbers arrive from JSON
@@ -1088,6 +1099,67 @@ func (c *Client) backoff(attempt int, retryAfter string) time.Duration {
 // § Resilience, "Retry event"). A non-ok response's x-should-retry header
 // (true/false) overrides the default retryable classification before OnError.
 func (c *Client) llmFetch(ctx context.Context, endpoint string, headers map[string]string, raw []byte, onRetry func(StreamEvent)) (*http.Response, error) {
+	resp, _, err := c.llmFetchBudget(ctx, endpoint, headers, raw, onRetry)
+	return resp, err
+}
+
+// fallbackChain (§8 Resilience FallbackModels) is [turnModel, ...FallbackModels]
+// minus empty and duplicate entries; just [turnModel] when the option is absent
+// or the TOOLNEXUS_DISABLE_MODEL_FALLBACK kill switch is set (read per call).
+func (c *Client) fallbackChain(turnModel string) []string {
+	chain := []string{turnModel}
+	if len(c.opts.FallbackModels) == 0 {
+		return chain
+	}
+	if v := strings.ToLower(os.Getenv("TOOLNEXUS_DISABLE_MODEL_FALLBACK")); v == "1" || v == "true" {
+		return chain
+	}
+	for _, m := range c.opts.FallbackModels {
+		if m == "" || slices.Contains(chain, m) {
+			continue
+		}
+		chain = append(chain, m)
+	}
+	return chain
+}
+
+// llmFetchModels runs llmFetch (retry events via onRetry, live, per model) over the model fallback chain. body is the
+// finalized request body for turnModel; each fallback re-sends a shallow copy with
+// only "model" replaced. It advances only when a model's retry budget ended on a
+// 503/529 (never on onError "fail", 429, other statuses, network errors or
+// aborts). onSwitch (may be nil) runs before each switch. Returns the response,
+// the model that served (or failed last) and any error, like llmFetch.
+func (c *Client) llmFetchModels(ctx context.Context, endpoint string, headers map[string]string, body map[string]any, raw []byte, turnModel string, onRetry func(StreamEvent), onSwitch func(from, to string)) (*http.Response, string, error) {
+	chain := c.fallbackChain(turnModel)
+	for i, m := range chain {
+		if i > 0 {
+			next := make(map[string]any, len(body))
+			for k, v := range body {
+				next[k] = v
+			}
+			next["model"] = m
+			b, err := json.Marshal(next)
+			if err != nil {
+				return nil, m, err
+			}
+			raw = b
+		}
+		resp, exhausted, err := c.llmFetchBudget(ctx, endpoint, headers, raw, onRetry)
+		if err != nil || resp.StatusCode < 300 || i == len(chain)-1 ||
+			!exhausted || (resp.StatusCode != 503 && resp.StatusCode != 529) {
+			return resp, m, err
+		}
+		resp.Body.Close()
+		if onSwitch != nil {
+			onSwitch(m, chain[i+1])
+		}
+	}
+	return nil, turnModel, fmt.Errorf("toolnexus: empty model chain") // unreachable
+}
+
+// llmFetchBudget is llmFetch plus whether a returned non-ok response ended
+// because the retry budget ran out (true) rather than OnError saying fail.
+func (c *Client) llmFetchBudget(ctx context.Context, endpoint string, headers map[string]string, raw []byte, onRetry func(StreamEvent)) (*http.Response, bool, error) {
 	retries := c.retries()
 	// Default classifier = today's behavior, expressed as an OnError. A TierRetry is
 	// always capped by the budget below (attempt == retries stops regardless).
@@ -1104,7 +1176,7 @@ func (c *Client) llmFetch(ctx context.Context, endpoint string, headers map[stri
 	for attempt := 0; attempt <= retries; attempt++ {
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(raw))
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		req.Header.Set("Content-Type", "application/json")
 		for k, v := range headers {
@@ -1117,24 +1189,24 @@ func (c *Client) llmFetch(ctx context.Context, endpoint string, headers map[stri
 		if err != nil {
 			// ctx cancelled/timed out: abort, never retry.
 			if ctx.Err() != nil {
-				return nil, ctx.Err()
+				return nil, false, ctx.Err()
 			}
 			lastErr = err
 			tier := classify(ErrorInfo{Err: err, Attempt: attempt, Retryable: true})
 			if tier == TierFail || attempt == retries {
-				return nil, err
+				return nil, false, err
 			}
 			d := c.backoff(attempt, "")
 			if onRetry != nil {
 				onRetry(StreamEvent{Type: "retry", Attempt: attempt + 1, Max: retries, DelayMs: d.Milliseconds(), Reason: "network"})
 			}
 			if werr := sleep(ctx, d); werr != nil {
-				return nil, werr
+				return nil, false, werr
 			}
 			continue
 		}
 		if resp.StatusCode < 300 {
-			return resp, nil
+			return resp, false, nil
 		}
 		retryable := isRetryableStatus(resp.StatusCode, c.opts.RetryableStatuses)
 		if v, ok := shouldRetryHeader(resp.Header.Get("X-Should-Retry")); ok {
@@ -1142,7 +1214,7 @@ func (c *Client) llmFetch(ctx context.Context, endpoint string, headers map[stri
 		}
 		tier := classify(ErrorInfo{Status: resp.StatusCode, Attempt: attempt, Retryable: retryable})
 		if tier == TierFail || attempt == retries {
-			return resp, nil // caller surfaces the non-ok status
+			return resp, tier != TierFail, nil // caller surfaces the non-ok status
 		}
 		ra := resp.Header.Get("Retry-After")
 		resp.Body.Close()
@@ -1151,13 +1223,13 @@ func (c *Client) llmFetch(ctx context.Context, endpoint string, headers map[stri
 			onRetry(StreamEvent{Type: "retry", Attempt: attempt + 1, Max: retries, DelayMs: d.Milliseconds(), Status: resp.StatusCode, Reason: fmt.Sprintf("HTTP %d", resp.StatusCode)})
 		}
 		if werr := sleep(ctx, d); werr != nil {
-			return nil, werr
+			return nil, false, werr
 		}
 	}
 	if lastErr != nil {
-		return nil, lastErr
+		return nil, false, lastErr
 	}
-	return nil, fmt.Errorf("LLM request failed after %d retries", retries)
+	return nil, false, fmt.Errorf("LLM request failed after %d retries", retries)
 }
 
 // ConversationStore (§8 Gap 4) returns the client's conversation provider — the
@@ -1221,21 +1293,23 @@ func (w *toolsWire) apply(c *Client, body map[string]any) {
 	body["tools"] = w.raw
 }
 
-func (c *Client) postJSON(ctx context.Context, endpoint string, headers map[string]string, body any) ([]byte, error) {
+// postJSONModels is postJSON over the model fallback chain (§8 Resilience
+// FallbackModels); it also returns the model that served (or failed last).
+func (c *Client) postJSONModels(ctx context.Context, endpoint string, headers map[string]string, body map[string]any, turnModel string) ([]byte, string, error) {
 	raw, err := json.Marshal(body)
 	if err != nil {
-		return nil, err
+		return nil, turnModel, err
 	}
-	resp, err := c.llmFetch(ctx, endpoint, headers, raw, nil)
+	resp, model, err := c.llmFetchModels(ctx, endpoint, headers, body, raw, turnModel, nil, nil)
 	if err != nil {
-		return nil, err
+		return nil, model, err
 	}
 	defer resp.Body.Close()
 	out, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, newProviderError(resp.StatusCode, out, resp.Header.Get("Retry-After"))
+		return nil, model, newProviderError(resp.StatusCode, out, resp.Header.Get("Retry-After"))
 	}
-	return out, nil
+	return out, model, nil
 }
 
 // ---- OpenAI-style: POST {baseURL}/chat/completions ----
@@ -1317,8 +1391,10 @@ func (c *Client) runOpenAI(ctx context.Context, prompt any, tk *Toolkit, history
 			body = c.finalizeBody(body)
 			toolsJSON.apply(c, body)
 			t0 = time.Now()
+			var served string
+			raw, served, err = c.postJSONModels(ctx, endpoint, authHeader, body, turnModel)
+			turnModel = served
 			lastModel = turnModel
-			raw, err = c.postJSON(ctx, endpoint, authHeader, body)
 			if err == nil {
 				overflow.ok()
 				break
@@ -1644,8 +1720,10 @@ func (c *Client) runAnthropic(ctx context.Context, prompt any, tk *Toolkit, hist
 			body = c.finalizeBody(body)
 			toolsJSON.apply(c, body)
 			t0 = time.Now()
+			var served string
+			raw, served, err = c.postJSONModels(ctx, endpoint, headers, body, turnModel)
+			turnModel = served
 			lastModel = turnModel
-			raw, err = c.postJSON(ctx, endpoint, headers, body)
 			if err == nil {
 				overflow.ok()
 				break
@@ -1999,13 +2077,18 @@ func (c *Client) streamOpenAI(ctx context.Context, prompt any, tk *Toolkit, hist
 				sbody["tools"] = tools
 				sbody["tool_choice"] = "auto"
 			}
-			body, err := json.Marshal(c.finalizeBody(sbody))
+			fbody := c.finalizeBody(sbody)
+			body, err := json.Marshal(fbody)
 			if err != nil {
 				return err
 			}
 			t0 = time.Now()
+			var served string
+			resp, served, err = c.llmFetchModels(ctx, endpoint, map[string]string{"Authorization": "Bearer " + key}, fbody, body, turnModel, func(e StreamEvent) { ch <- e }, func(from, to string) {
+				ch <- StreamEvent{Type: "fallback", From: from, To: to}
+			})
+			turnModel = served
 			lastModel = turnModel
-			resp, err = c.llmFetch(ctx, endpoint, map[string]string{"Authorization": "Bearer " + key}, body, func(e StreamEvent) { ch <- e })
 			if err != nil {
 				c.emitLLM(turnModel, "error", t0, 0, 0)
 				return err
@@ -2322,13 +2405,18 @@ func (c *Client) streamAnthropic(ctx context.Context, prompt any, tk *Toolkit, h
 			if len(tools) > 0 {
 				reqBody["tools"] = tools
 			}
-			body, err := json.Marshal(c.finalizeBody(reqBody))
+			fbody := c.finalizeBody(reqBody)
+			body, err := json.Marshal(fbody)
 			if err != nil {
 				return err
 			}
 			t0 = time.Now()
+			var served string
+			resp, served, err = c.llmFetchModels(ctx, endpoint, headers, fbody, body, turnModel, func(e StreamEvent) { ch <- e }, func(from, to string) {
+				ch <- StreamEvent{Type: "fallback", From: from, To: to}
+			})
+			turnModel = served
 			lastModel = turnModel
-			resp, err = c.llmFetch(ctx, endpoint, headers, body, func(e StreamEvent) { ch <- e })
 			if err != nil {
 				c.emitLLM(turnModel, "error", t0, 0, 0)
 				return err

@@ -1174,6 +1174,7 @@ class Client:
         max_tool_concurrency: Optional[int] = None,
         stop_recovery: bool = False,
         compact_on_overflow: Optional[Callable[[dict[str, Any]], Any]] = None,
+        fallback_models: Optional[list[str]] = None,
     ) -> None:
         self.base_url = base_url
         # §8 stop-reason recovery: answer a malformed tool call, a truncated response and
@@ -1184,6 +1185,10 @@ class Client:
         # long; its shorter transcript replaces the working one and the SAME turn is re-sent.
         # None ⇒ byte-identical: the overflow surfaces as ProviderError.
         self.compact_on_overflow = compact_on_overflow
+        # §8 Resilience: opt-in model fallback chain on overload (503/529 after the retry
+        # budget is spent). None/[] ⇒ byte-identical. Kill switch:
+        # TOOLNEXUS_DISABLE_MODEL_FALLBACK=1|true, read at each model call.
+        self.fallback_models = list(fallback_models) if fallback_models else None
         # §8 tool scheduling: cap on concurrency-safe calls of one response running at once.
         # None ⇒ env TOOLNEXUS_MAX_TOOL_CONCURRENCY when a positive integer, else 10. Unsafe
         # calls (anything not read-only) always run alone.
@@ -1903,6 +1908,9 @@ class Client:
                     retryable = override
                 tier = classify({"status": e.status, "attempt": attempt, "retryable": retryable})
                 if tier == "fail" or attempt == self.retries:
+                    # §8 fallbackModels: only a spent budget (never an on_error "fail")
+                    # may advance the model chain.
+                    e._tn_budget_spent = tier != "fail"  # type: ignore[attr-defined]
                     raise
                 # The field carries the RAW header; the waiting rule parses it here and
                 # is unchanged. `is not None`, not truthiness: `Retry-After: 0` means
@@ -1996,13 +2004,14 @@ class Client:
         cancel: Optional[asyncio.Event],
         style: ClientStyle,
         log: Optional["_TurnLog"],
+        served_out: Optional[list[str]] = None,
     ) -> dict[str, Any]:
         """One non-streaming LLM call of a turn, re-sent after a §7F.1 reactive
         compaction. ``box["messages"]`` is the working transcript, replaced in place."""
         while True:
             msgs = box["messages"]
             try:
-                data = await self._llm_call_json(url, headers, build(msgs), deadline, cancel, style, self._part_summaries(msgs), model=model)
+                data = await self._llm_call_json(url, headers, build(msgs), deadline, cancel, style, self._part_summaries(msgs), model=model, served_out=served_out)
             except ProviderError as e:
                 box["messages"] = await self._compact_on_overflow(e, state, msgs, tools, model, turn)
                 if log is not None:
@@ -2046,6 +2055,52 @@ class Client:
             async for line in gen:
                 yield line
             return
+    def _model_chain(self, payload: dict[str, Any]) -> list[str]:
+        """§8 fallbackModels: ``[turnModel, ...fallback_models]`` (empty/duplicate entries
+        skipped), or just ``[turnModel]`` when the option is absent, the kill switch is
+        set, or the model source is in-process (no wire, no HTTP status)."""
+        turn_model = payload.get("model") or ""
+        if (
+            not self.fallback_models
+            or isinstance(self._transport, InProcessTransport)
+            or os.environ.get("TOOLNEXUS_DISABLE_MODEL_FALLBACK", "").lower() in ("1", "true")
+        ):
+            return [turn_model]
+        chain: list[str] = [turn_model]
+        for m in self.fallback_models:
+            if m and m not in chain:
+                chain.append(m)
+        return chain
+
+    @staticmethod
+    def _advances(e: BaseException) -> bool:
+        """Overload after a spent budget — exactly 503/529 — advances the chain."""
+        return (
+            isinstance(e, _HttpError)
+            and e.status in (503, 529)
+            and getattr(e, "_tn_budget_spent", False)
+        )
+
+    async def _llm_fetch_chain(
+        self,
+        worker,
+        url: str,
+        headers: dict[str, str],
+        payload: dict[str, Any],
+        deadline: Optional[float],
+        cancel: Optional[asyncio.Event],
+    ) -> tuple[Any, str]:
+        """:meth:`_llm_fetch` over the model chain; returns ``(result, served_model)``."""
+        chain = self._model_chain(payload)
+        for i, m in enumerate(chain):
+            body = payload if i == 0 else {**payload, "model": m}
+            try:
+                return await self._llm_fetch(worker, url, headers, body, deadline, cancel), m
+            except _HttpError as e:
+                if i + 1 < len(chain) and self._advances(e):
+                    continue
+                raise
+        raise AssertionError("unreachable")
 
     async def _run_tool(
         self,
@@ -2161,6 +2216,7 @@ class Client:
         style: ClientStyle,
         parts: Optional[list[dict[str, Any]]] = None,
         model: Optional[str] = None,
+        served_out: Optional[list[str]] = None,
     ) -> dict[str, Any]:
         """One non-streaming LLM call, with an ``llm`` metric event (ok/error + per-call
         tokens + ms). Mirrors JS ``llmCallJson``. ``parts`` describes the §1B content the
@@ -2168,7 +2224,11 @@ class Client:
         t0 = _now()
         model = model or self.model
         try:
-            data = await self._llm_fetch(self._transport.post, url, headers, payload, deadline, cancel)
+            data, served = await self._llm_fetch_chain(self._transport.post, url, headers, payload, deadline, cancel)
+            if served != payload.get("model"):
+                model = served  # §8: the serving model is "the model transmitted"
+            if served_out is not None:
+                served_out.append(served)
             prompt, completion = _per_call(data.get("usage"), style)
             ev: dict[str, Any] = {"event": "llm", "model": model, "status": "ok", "ms": _ms_since(t0), "prompt_tokens": prompt, "completion_tokens": completion}
             if parts:
@@ -2241,7 +2301,9 @@ class Client:
             payload["max_tokens"] = max_tokens
         payload = self._finalize_body(payload)
 
-        data = await self._llm_call_json(endpoint, req_headers, payload, self._deadline(), cancel, "openai", model=turn_model)
+        _served: list[str] = []
+        data = await self._llm_call_json(endpoint, req_headers, payload, self._deadline(), cancel, "openai", model=turn_model, served_out=_served)
+        turn_model = _served[-1] if _served else turn_model
         await self._translate_after_llm(data, turn_model)
 
         usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
@@ -2311,7 +2373,9 @@ class Client:
             payload["tool_choice"] = native_choice
         payload = self._finalize_body(payload)
 
-        data = await self._llm_call_json(endpoint, req_headers, payload, self._deadline(), cancel, "anthropic", model=turn_model)
+        _served: list[str] = []
+        data = await self._llm_call_json(endpoint, req_headers, payload, self._deadline(), cancel, "anthropic", model=turn_model, served_out=_served)
+        turn_model = _served[-1] if _served else turn_model
         await self._translate_after_llm(data, turn_model)
 
         usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
@@ -2577,11 +2641,14 @@ class Client:
                     return self._finalize_body(payload)
 
                 last_model = turn_model
+                _served: list[str] = []
                 box = {"messages": messages}
                 try:
-                    data = await self._llm_json_compacting(url, req_headers, build, box, overflow, tools, turn_model, turn, deadline, cancel, "openai", log)
+                    data = await self._llm_json_compacting(url, req_headers, build, box, overflow, tools, turn_model, turn, deadline, cancel, "openai", log, served_out=_served)
                 finally:
                     messages = box["messages"]
+                if _served:
+                    turn_model = last_model = _served[-1]
                 _add_usage(usage, data.get("usage"), "openai")
                 after = _get_hook(self.hooks, "after_llm")
                 if after is not None:
@@ -2719,11 +2786,14 @@ class Client:
                     return self._finalize_body(payload)
 
                 last_model = turn_model
+                _served: list[str] = []
                 box = {"messages": messages}
                 try:
-                    data = await self._llm_json_compacting(endpoint, req_headers, build, box, overflow, tools, turn_model, turn, deadline, cancel, "anthropic", log)
+                    data = await self._llm_json_compacting(endpoint, req_headers, build, box, overflow, tools, turn_model, turn, deadline, cancel, "anthropic", log, served_out=_served)
                 finally:
                     messages = box["messages"]
+                if _served:
+                    turn_model = last_model = _served[-1]
                 _add_usage(usage, data.get("usage"), "anthropic")
                 after = _get_hook(self.hooks, "after_llm")
                 if after is not None:
@@ -2867,6 +2937,8 @@ class Client:
                 try:
                     async for line in self._sse_compacting(url, req_headers, build, box, overflow, tools, turn_model, turn, deadline, cancel, log):
                         if isinstance(line, dict):  # an in-process side-channel event
+                            if line.get("type") == "fallback":
+                                model = last_model = turn_model = line["to"]
                             yield line
                             continue
                         if not line.startswith("data:"):
@@ -3058,7 +3130,9 @@ class Client:
                 stop_reason = ""
                 try:
                     async for line in self._sse_compacting(endpoint, req_headers, build, box, overflow, tools, turn_model, turn, deadline, cancel, log):
-                        if isinstance(line, dict):  # a retry event (§8)
+                        if isinstance(line, dict):  # a retry / fallback event (§8)
+                            if line.get("type") == "fallback":
+                                model = last_model = turn_model = line["to"]
                             yield line
                             continue
                         if not line.startswith("data:"):
@@ -3180,7 +3254,7 @@ class Client:
         payload: dict[str, Any],
         deadline: Optional[float],
         cancel: Optional[asyncio.Event],
-    ) -> AsyncGenerator[str, None]:
+    ) -> AsyncGenerator[Union[str, dict[str, Any]], None]:
         """Open the streaming POST (with retry on the initial connect) and yield SSE
         lines. Since urllib is blocking, a worker thread reads the response and feeds
         an :class:`asyncio.Queue`; this async generator awaits items from the queue.
@@ -3189,12 +3263,24 @@ class Client:
         # Initial connection uses the retrying fetch (retries transient connect errors).
         # Each retry surfaces to the consumer as a §8 ``retry`` stream event (a dict,
         # like the in-process side channel) before its wait.
+        # §8 fallbackModels: on overload after a spent budget, announce and switch model —
+        # always before the first delta (overload is an HTTP status, received pre-token).
+        chain = self._model_chain(payload)
         resp: Any = None
-        async for kind, value in self._llm_fetch_events(self._transport.open, url, headers, payload, deadline, cancel):
-            if kind == "retry":
-                yield value
-            else:
-                resp = value
+        for i, m in enumerate(chain):
+            body = payload if i == 0 else {**payload, "model": m}
+            try:
+                async for kind, value in self._llm_fetch_events(self._transport.open, url, headers, body, deadline, cancel):
+                    if kind == "retry":
+                        yield value
+                    else:
+                        resp = value
+                break
+            except _HttpError as e:
+                if i + 1 < len(chain) and self._advances(e):
+                    yield {"type": "fallback", "from": m, "to": chain[i + 1]}
+                    continue
+                raise
 
         queue: asyncio.Queue = asyncio.Queue(maxsize=256)
         _SENTINEL = object()
@@ -3339,11 +3425,13 @@ def create_client(
     max_tool_concurrency: Optional[int] = None,
     stop_recovery: bool = False,
     compact_on_overflow: Optional[Callable[[dict[str, Any]], Any]] = None,
+    fallback_models: Optional[list[str]] = None,
 ) -> Client:
     return Client(
         max_tool_concurrency=max_tool_concurrency,
         stop_recovery=stop_recovery,
         compact_on_overflow=compact_on_overflow,
+        fallback_models=fallback_models,
         api_key_env=api_key_env,
         wait_for_ctx=wait_for_ctx,
         prompt_cache=prompt_cache,
