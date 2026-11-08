@@ -136,7 +136,7 @@ func (c *Client) translateOpenAI(ctx context.Context, req TranslateRequest) (Tra
 	body = c.finalizeBody(body)
 
 	t0 := time.Now()
-	raw, err := c.postJSON(ctx, endpoint, map[string]string{"authorization": "Bearer " + key}, body)
+	raw, model, err := c.postJSONModels(ctx, endpoint, map[string]string{"authorization": "Bearer " + key}, body, model)
 	if err != nil {
 		c.emitLLM(model, "error", t0, 0, 0)
 		return TranslateResult{}, err
@@ -227,9 +227,9 @@ func (c *Client) translateAnthropic(ctx context.Context, req TranslateRequest) (
 	body = c.finalizeBody(body)
 
 	t0 := time.Now()
-	raw, err := c.postJSON(ctx, endpoint, map[string]string{
+	raw, model, err := c.postJSONModels(ctx, endpoint, map[string]string{
 		"x-api-key": key, "anthropic-version": "2023-06-01",
-	}, body)
+	}, body, model)
 	if err != nil {
 		c.emitLLM(model, "error", t0, 0, 0)
 		return TranslateResult{}, err
