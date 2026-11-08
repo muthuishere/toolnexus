@@ -8,6 +8,24 @@ GitHub Releases `vX.Y.Z` via `release.yml` (see `PUBLISHING.md`).
 
 ## Unreleased
 
+## 0.28.0 — 2026-11-08
+
+**Upgrading — read this first.**
+
+- **BREAKING (rust only):** `AcpStreamEvent` gains `ToolCallArgs` and is now `#[non_exhaustive]`; a `match`
+  on it needs a `_` arm once. Rust code that builds `ClientOptions` or `Hooks` by setting every field by
+  hand must add the new `stop_recovery` / `after_round` fields (or end the literal with `..Default::default()`).
+- **java:** Jackson 2 (`jackson-databind` 2.x) is gone; Jackson 3 is the only JSON library. If your code used
+  the Jackson 2 that toolnexus brought in transitively, declare it yourself.
+- **Default change (#191, all ports, with `stopRecovery` off):** tool arguments that are valid JSON but not an
+  object (`[1]`, `"x"`) now reach the tool as `{}`. Before, js and python passed the raw value through.
+- **rust and java:** local stdio MCP servers now run on in-house clients (rmcp / the MCP Java SDK remain for
+  remote HTTP servers and `serve`).
+- **Benchmarks:** the JavaScript speed-up claimed in the request-path work (#185) did **not** reproduce in the
+  quiet benchmark (3.43 → 3.40 ms). Java after the in-house stdio client: init 137 ms, p50 1.63 ms vs
+  LangChain4j 220 ms / 1.84 ms, in a separate 7-round sitting (not blended into the standing page's
+  5-round medians).
+
 **Java: local MCP servers run on an in-house stdio client** (java only). Pre-2026 stdio servers no longer
 go through the official MCP Java SDK session. That covers nearly every local server in use today: those
 that answer `server/discover` as an old server, plus the child respawned after a silent discover. The SDK

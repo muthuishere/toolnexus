@@ -31,16 +31,16 @@ model: a named, described, schema'd callable (an insight borrowed from
 `Tool` interface, emits the schema in OpenAI / Anthropic / Gemini shape, and drives any model with
 them through one client loop.
 
-## Install (0.27.0)
+## Install (0.28.0)
 
 ```sh
 npm i toolnexus                                   # JavaScript / TypeScript (npm)
 pip install toolnexus                             # Python (PyPI)
 go get github.com/muthuishere/toolnexus/golang    # Go
 dotnet add package Toolnexus                       # C# / .NET (NuGet)
-{:toolnexus, "~> 0.27"}                             # Elixir (mix.exs deps, Hex)
-# Java (Maven Central): io.github.muthuishere:toolnexus:0.27.0
-# Clojure (deps.edn, Clojars): net.clojars.muthuishere/toolnexus {:mvn/version "0.27.0"} (JVM and cljgo)
+{:toolnexus, "~> 0.28"}                             # Elixir (mix.exs deps, Hex)
+# Java (Maven Central): io.github.muthuishere:toolnexus:0.28.0
+# Clojure (deps.edn, Clojars): net.clojars.muthuishere/toolnexus {:mvn/version "0.28.0"} (JVM and cljgo)
 cargo add toolnexus                                # Rust (crates.io)
 ```
 
@@ -84,8 +84,9 @@ port's API reference.
 ## Benchmarks
 
 Measured against 21 frameworks on a zero-cost mock model, per language. Honest summary: **lowest
-per-request overhead over MCP in Python, JavaScript, C# and Rust, level with Eino in Go, and still 5%
-behind LangChain4j on the JVM**. Every row, loss included: [Nov 2026 standing](https://muthuishere.github.io/toolnexus/standing-2026-11/).
+per-request overhead over MCP in Python, JavaScript, C# and Rust, level with Eino in Go, and on the JVM 5% behind
+LangChain4j in the five-round table but ahead of it (1.63 vs 1.84 ms p50) in a separate 7-round sitting after
+the in-house Java stdio MCP client (#204)**. Every row, loss included: [Nov 2026 standing](https://muthuishere.github.io/toolnexus/standing-2026-11/).
 
 ## What it is not
 

@@ -1,4 +1,4 @@
-;; deps.edn: {:deps {net.clojars.muthuishere/toolnexus {:mvn/version "0.27.0"}}}
+;; deps.edn: {:deps {net.clojars.muthuishere/toolnexus {:mvn/version "0.28.0"}}}
 ;; run:      clojure -M main.clj npx -y @agentclientprotocol/claude-agent-acp@0.100.0
 (ns main
   (:require [clojure.string :as str]
