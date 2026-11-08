@@ -225,6 +225,36 @@
       "clientCapabilitiesHasMeta": false
     }
   },
+  "liveSwitch": {
+    "_doc": "Issue #197. loadACP with no mode/model, then on the RUNNING client: setMode(mode) and setModel(model), then one generate. The fake records every method it receives. initialize and session/new MUST each be recorded exactly once (no restart); set_mode, set_config_option carry the same sessionId session/new returned; the turn still answers expectText. With fallback.fakeEnv the fake rejects set_config_option and set_model {modelId} follows. With reject.fakeEnv the fake rejects session/set_mode with an error; setMode fails with an error containing expectErrorContains and a following generate still answers expectText.",
+    "mode": "plan",
+    "model": "m-2",
+    "expectSetMode": {
+      "modeId": "plan"
+    },
+    "expectSetConfigOption": {
+      "configId": "model",
+      "value": "m-2"
+    },
+    "expectInitializeCount": 1,
+    "expectSessionNewCount": 1,
+    "expectText": "hello",
+    "fallback": {
+      "fakeEnv": {
+        "TN_FAKE_NO_CONFIG_OPTION": "1"
+      },
+      "expectSetModel": {
+        "modelId": "m-2"
+      }
+    },
+    "reject": {
+      "fakeEnv": {
+        "TN_FAKE_REJECT_MODE": "1"
+      },
+      "expectErrorContains": "unknown mode",
+      "expectText": "hello"
+    }
+  },
   "agentExit": {
     "_doc": "fake exits (no reply) on session/prompt; the generate fails promptly (well under the request timeout) with an error containing expectError.",
     "fakeEnv": {
