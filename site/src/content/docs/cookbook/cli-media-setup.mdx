@@ -1,6 +1,6 @@
 ---
 title: Grok CLI, Codex CLI and Antigravity media setup
-description: Make images (and Grok video) by driving a vendor's official CLI — Grok, Codex or Google Antigravity — in its documented headless mode. Install, log in, enable Grok video, limits, the watermark, models, timeouts, file names, mocks and the shell command.
+description: "Make images (and Grok video) through the official Grok, Codex or Antigravity CLI, in all eight languages: call it directly, give it to your agent as a tool, and handle its errors."
 ---
 
 import { Tabs, TabItem, Aside } from '@astrojs/starlight/components';
@@ -24,20 +24,7 @@ Contract: SPEC §7G.10, §7G.10a, §7G.10b · ADR 0042 · `conformance/media/cli
 | `openai-codex-cli` | `codex` | image | `$CODEX_HOME/auth.json` (default `~/.codex/auth.json`) exists | `exec --json --skip-git-repo-check -s workspace-write` |
 | `google-agy-cli` | `agy` | image | `~/.gemini/antigravity-cli/antigravity-oauth-token` exists | `-p … --output-format stream-json --dangerously-skip-permissions` |
 
-Each port spells the constants its own way: `MediaStyle.XaiGrokCli` (TypeScript, C#),
-`toolnexus.MediaStyleXaiGrokCli` (Go), `MediaStyle.XAI_GROK_CLI` (Python, Java, Rust),
-`Media.xai_grok_cli()` (Elixir), `media/xai-grok-cli` (Clojure); the same for
-`OpenAICodexCli` and `GoogleAgyCli`. They are plain strings underneath.
-
-Asking a preset for a verb it does not declare fails at once, before any process starts:
-
-```
-media: no style supports "video"
-```
-
-and the agent never gets a tool for it (`openai-codex-cli` and `google-agy-cli` expose only
-`generate_image`; `xai-grok-cli` exposes `generate_image` and `generate_video`). `media.verbs()`
-lists what a media object can do.
+Each language spells the constants its own way (see the tabs below); they are plain strings underneath.
 
 ## Install and log in
 
@@ -48,21 +35,14 @@ Toolnexus never installs, logs in or changes settings for you. Check each CLI wo
 - **Codex** — `codex login`, then `codex login status` should print `Logged in using ChatGPT`.
 - **Antigravity** — run `agy` and sign in when it asks; `agy models` lists the models you can use.
 
-Then ask toolnexus, in a few milliseconds and without generating anything:
+Then check from code, in a few milliseconds and without generating anything, with
+`available()` on the loaded style (examples under [Errors](#errors)). It checks that the command is
+on `PATH` and that the CLI's own login file exists, and never reads the file.
 
-```ts
-const s = loadMediaStyle(MediaStyle.XaiGrokCli)
-s.available()  // { installed: true, loggedIn: true, reason: 'grok: installed, logged in (/Users/you/.grok/auth.json present)' }
-```
-
-`available()` checks that the command is on `PATH` and that the CLI's own login file exists. It
-never reads the file. Reasons are byte-exact across ports: `grok: "grok" not found on PATH`,
-`codex: installed, not logged in (/Users/you/.codex/auth.json missing)`, and so on.
-
-## One image, one line
+## 1. Use it directly
 
 <Tabs syncKey="lang">
-<TabItem label="TypeScript">
+<TabItem label="JavaScript">
 ```ts
 import { generateMedia, createMedia, loadMediaStyle, MediaStyle } from "toolnexus"
 
@@ -173,9 +153,6 @@ let img = codex.image(ImageInput { prompt: "a red apple".into(), aspect_ratio: S
 </TabItem>
 </Tabs>
 
-The same media object gives your agent tools: `createToolkit({ media })` (or
-`toolkit.register(...media.tools())`) registers `generate_image` (and `generate_video` for Grok).
-
 ### From the shell
 
 ```sh
@@ -189,6 +166,280 @@ It prints the path of each saved file, one per line, and exits non-zero with the
 (`error: media: no style supports "video"` for `toolnexus media video --style openai-codex-cli`).
 Flags: `--style`, `--prompt`, `--aspect-ratio`, `--width`, `--height`, `--seconds`, `--model`,
 `--out`, `--name`, `--timeout-ms`. `--style` also takes the path of an HTTP style JSON file.
+
+## 2. Use it as a function (agent tool)
+
+Pass the media object to the toolkit and your agent gets one tool per verb the preset declares:
+`generate_image` for all three, plus `generate_video` for Grok. Any LLM can call it. Every file
+the agent makes lands in `RunResult.files`, in call order. Only images go back to the model; a
+video reaches it only as a `video ready: <path>` line.
+
+<Tabs syncKey="lang">
+<TabItem label="JavaScript">
+```ts
+import { createClient, createToolkit, createMedia, loadMediaStyle, MediaStyle } from "toolnexus"
+
+const media = createMedia(loadMediaStyle(MediaStyle.XaiGrokCli))
+const tk = await createToolkit({ media })            // generate_image, generate_video
+const agent = createClient({ baseUrl: "https://openrouter.ai/api/v1", style: "openai", model: "openai/gpt-4o-mini" })
+const res = await agent.run("Draw a lighthouse at dusk, then animate it.", { toolkit: tk })
+for (const f of res.files) console.log(f.from, f.mimeType, f.path)
+```
+</TabItem>
+<TabItem label="Python">
+```python
+from toolnexus import create_client, create_toolkit, create_media, load_media_style, MediaStyle
+
+media = create_media(load_media_style(MediaStyle.XAI_GROK_CLI))
+tk = await create_toolkit(media=media)              # generate_image, generate_video
+agent = create_client(base_url="https://openrouter.ai/api/v1", style="openai", model="openai/gpt-4o-mini")
+res = await agent.run("Draw a lighthouse at dusk, then animate it.", tk)
+for f in res.files:
+    print(f["from"], f["mimeType"], f.get("path"))
+```
+</TabItem>
+<TabItem label="Go">
+```go
+style, err := toolnexus.LoadMediaStyle(toolnexus.MediaStyleXaiGrokCli)
+if err != nil {
+	log.Fatal(err)
+}
+tk, err := toolnexus.CreateToolkit(ctx, toolnexus.Options{Media: toolnexus.MustCreateMedia(style)})
+if err != nil {
+	log.Fatal(err)
+}
+defer tk.Close()
+agent := toolnexus.CreateClient(toolnexus.ClientOptions{
+	BaseURL: "https://api.openai.com/v1", Model: "gpt-4o-mini", // reads OPENAI_API_KEY
+})
+res, err := agent.Run(ctx, "Draw a lighthouse at dusk, then animate it.", tk)
+if err != nil {
+	log.Fatal(err)
+}
+for _, f := range res.Files {
+	fmt.Println(f.From, f.MimeType, f.Path)
+}
+```
+</TabItem>
+<TabItem label="Java">
+```java
+Media media = Media.create(Media.loadMediaStyle(MediaStyle.XAI_GROK_CLI));
+Toolkit tk = Toolkit.create(new Toolkit.Options().media(media)); // generate_image, generate_video
+LlmClient agent = LlmClient.create(new LlmClient.Options()
+        .baseUrl("https://openrouter.ai/api/v1").style("openai")
+        .model("openai/gpt-4o-mini").apiKey(System.getenv("OPENROUTER_API_KEY")));
+LlmClient.RunResult res = agent.run("Draw a lighthouse at dusk, then animate it.", tk);
+for (LlmClient.RunFile f : res.files) System.out.println(f.from() + " " + f.mimeType() + " " + f.path());
+tk.close();
+```
+</TabItem>
+<TabItem label="C#">
+```csharp
+var media = Media.Create(MediaStyle.Load(MediaStyle.XaiGrokCli));
+await using var tk = await Toolkit.CreateAsync(new Toolkit.Options().WithMedia(media)); // generate_image, generate_video
+var agent = LlmClient.Create(new LlmClient.Options
+{
+    BaseUrl = "https://openrouter.ai/api/v1", Style = "openai", Model = "openai/gpt-4o-mini",
+    ApiKey = Environment.GetEnvironmentVariable("OPENROUTER_API_KEY"),
+});
+var res = await agent.RunAsync("Draw a lighthouse at dusk, then animate it.", tk);
+foreach (var f in res.Files) Console.WriteLine($"{f.From} {f.MimeType} {f.Url}");
+```
+</TabItem>
+<TabItem label="Elixir">
+```elixir
+alias Toolnexus.Media
+
+{:ok, style} = Media.load_style(Media.xai_grok_cli())
+{:ok, tk} = Toolnexus.create_toolkit(media: Media.create!(style)) # generate_image, generate_video
+
+client = Toolnexus.Client.create(base_url: "https://openrouter.ai/api/v1", style: "openai",
+                                 model: "openai/gpt-4o-mini", api_key: System.get_env("OPENROUTER_API_KEY"))
+res = Toolnexus.Client.run(client, "Draw a lighthouse at dusk, then animate it.", tk)
+for f <- res.files, do: IO.puts("#{f.from} #{f.mime_type} #{f[:path]}")
+```
+</TabItem>
+<TabItem label="Clojure">
+```clojure
+(require '[toolnexus.core :as tn] '[toolnexus.client :as client] '[toolnexus.media :as media])
+
+(def m  (media/create-media (media/load-media-style media/xai-grok-cli)))
+(def tk (tn/build {:media m}))                     ; generate_image, generate_video
+
+(def llm (client/create-client {:base-url "https://openrouter.ai/api/v1"
+                                :style "openai" :model "openai/gpt-4o-mini"}))
+(def res (client/run llm "Draw a lighthouse at dusk, then animate it." {:toolkit tk}))
+(doseq [f (:files res)] (println (:from f) (:mimeType f) (:path f)))
+```
+</TabItem>
+<TabItem label="Rust">
+```rust
+use toolnexus::client::{ClientOptions, Style, create_client};
+use toolnexus::{MediaStyle, ToolkitOptions, create_media, create_toolkit, load_media_style};
+
+let media = create_media([load_media_style(MediaStyle::XAI_GROK_CLI)?])?;
+let tk = create_toolkit(ToolkitOptions { media: Some(media), ..Default::default() }).await?; // generate_image, generate_video
+let agent = create_client(ClientOptions {
+    base_url: "https://api.openai.com/v1".into(), // reads OPENAI_API_KEY
+    style: Style::OpenAI, model: "gpt-4o-mini".into(), ..Default::default()
+});
+let res = agent.run("Draw a lighthouse at dusk, then animate it.", &tk).await?;
+for f in &res.files { println!("{} {} {}", f.from, f.mime_type, f.path); }
+tk.close().await;
+```
+</TabItem>
+</Tabs>
+
+A media tool never throws inside the loop: a failure comes back to the model as a tool error
+(`isError: true`) with the same message as the table below, so the agent can explain it or try
+something else.
+
+## 3. Errors
+
+A direct call fails with a typed media error whose status is `failed`, `timeout`, `cancelled`
+or `unavailable`. `unavailable` means the call was valid but the CLI cannot serve it right now:
+not installed, not logged in, usage limit reached, or Grok video blocked by Zero Data Retention.
+Check `available()` first if you want to skip a CLI without starting it.
+
+<Tabs syncKey="lang">
+<TabItem label="JavaScript">
+```ts
+import { createMedia, loadMediaStyle, MediaStyle, MediaUnavailableError } from "toolnexus"
+
+const style = loadMediaStyle(MediaStyle.XaiGrokCli)
+console.log(style.available())   // { installed, loggedIn, reason }
+try {
+  const r = await createMedia(style).video({ prompt: "waves on a beach", seconds: 6 })
+  console.log(r.files[0].path)
+} catch (e) {
+  if (e instanceof MediaUnavailableError) console.log("grok unavailable:", e.message)
+  else throw e                     // e.status: failed | timeout | cancelled
+}
+```
+</TabItem>
+<TabItem label="Python">
+```python
+from toolnexus import MediaStyle, create_media, load_media_style, MediaError, MediaUnavailableError
+
+style = load_media_style(MediaStyle.XAI_GROK_CLI)
+print(style.available())          # {"installed": ..., "loggedIn": ..., "reason": ...}
+try:
+    r = await create_media(style).video("waves on a beach", seconds=6)
+    print(r.files[0].path)
+except MediaUnavailableError as e:
+    print("grok unavailable:", e)
+except MediaError as e:           # e.status: failed | timeout | cancelled
+    print(e.status, e)
+```
+</TabItem>
+<TabItem label="Go">
+```go
+style, err := toolnexus.LoadMediaStyle(toolnexus.MediaStyleXaiGrokCli)
+if err != nil {
+	log.Fatal(err)
+}
+fmt.Println(style.Available(ctx).Reason)
+r, err := toolnexus.MustCreateMedia(style).Video(ctx, toolnexus.VideoInput{Prompt: "waves on a beach", Seconds: 6})
+var me *toolnexus.MediaError
+switch {
+case errors.Is(err, toolnexus.ErrMediaUnavailable):
+	log.Print("grok unavailable: ", err)
+case errors.As(err, &me):
+	log.Print(me.Status, ": ", me) // failed | timeout | cancelled
+case err != nil:
+	log.Fatal(err)
+default:
+	fmt.Println(r.Files[0].Path)
+}
+```
+</TabItem>
+<TabItem label="Java">
+```java
+var style = Media.loadMediaStyle(MediaStyle.XAI_GROK_CLI);
+System.out.println(style.available());
+try {
+    var r = Media.create(style).video(new Media.VideoInput("waves on a beach"));
+    System.out.println(r.files().get(0).path());
+} catch (Media.MediaUnavailableException e) {
+    System.err.println("grok unavailable: " + e.getMessage());
+} catch (Media.MediaException e) {               // status(): failed | timeout | cancelled
+    System.err.println(e.status() + ": " + e.getMessage());
+}
+```
+</TabItem>
+<TabItem label="C#">
+```csharp
+var style = MediaStyle.Load(MediaStyle.XaiGrokCli);
+Console.WriteLine(style.Available().Reason);
+try
+{
+    var r = await Media.Create(style).VideoAsync(new VideoInput("waves on a beach"));
+    Console.WriteLine(r.Files[0].Path);
+}
+catch (MediaUnavailableException e) { Console.Error.WriteLine($"grok unavailable: {e.Message}"); }
+catch (MediaException e) { Console.Error.WriteLine($"{e.Status}: {e.Message}"); } // failed | timeout | cancelled
+```
+</TabItem>
+<TabItem label="Elixir">
+```elixir
+alias Toolnexus.Media
+
+{:ok, style} = Media.load_style(Media.xai_grok_cli())
+IO.inspect(Media.available(style))
+
+case Media.video(Media.create!(style), %{"prompt" => "waves on a beach", "seconds" => 6}) do
+  {:ok, %{files: [f | _]}} -> IO.puts(f.path)
+  {:error, %Media.Error{status: :unavailable, message: m}} -> IO.puts("grok unavailable: " <> m)
+  {:error, %Media.Error{status: s, message: m}} -> IO.puts("#{s}: #{m}")   # failed | timeout | cancelled
+end
+```
+</TabItem>
+<TabItem label="Clojure">
+```clojure
+(require '[toolnexus.media :as media])
+
+(def style (media/load-media-style media/xai-grok-cli))
+(println (media/available style))
+
+(try
+  (println (-> (media/video (media/create-media style) {:prompt "waves on a beach" :seconds 6}) :files first :path))
+  (catch clojure.lang.ExceptionInfo e
+    (if (media/unavailable? e)
+      (println "grok unavailable:" (ex-message e))
+      (println (:status (ex-data e)) (ex-message e)))))   ; :failed | :timeout | :cancelled
+```
+</TabItem>
+<TabItem label="Rust">
+```rust
+use toolnexus::{MediaStyle, VideoInput, create_media, load_media_style};
+
+let style = load_media_style(MediaStyle::XAI_GROK_CLI)?;
+println!("{}", style.available().reason);
+let media = create_media([style])?;
+match media.video(VideoInput { prompt: "waves on a beach".into(), seconds: Some(6), ..Default::default() }).await {
+    Ok(r) => println!("{}", r.files[0].path),
+    Err(e) if e.is_unavailable() => eprintln!("grok unavailable: {e}"),
+    Err(e) => eprintln!("{}: {e}", e.status()), // failed | timeout | cancelled
+}
+```
+</TabItem>
+</Tabs>
+
+### Error messages
+
+The messages are the same in every language.
+
+| when | status | message |
+|---|---|---|
+| verb the preset does not declare (e.g. `video` on Codex or Antigravity) | `failed` | `media: no style supports "video"` (no process starts) |
+| an argument a CLI cannot express | `failed` | `image: argument "seed" not supported` |
+| CLI not on `PATH` | `unavailable` | `grok: "grok" not found on PATH` |
+| not logged in | `unavailable` | `codex: installed, not logged in (/Users/you/.codex/auth.json missing)` |
+| usage limit reached | `unavailable` | `grok: You have reached your usage limit for today` · `codex: You've hit your usage limit. Try again later.` · agy: anything mentioning `quota` |
+| Grok video under Zero Data Retention | `unavailable` | `grok: video blocked by Zero Data Retention — run /privacy and opt in, …` |
+| run took too long | `timeout` | `grok: timed out after 600000ms` (the process is killed) |
+
+From the shell, `toolnexus media` prints the message on stderr as `error: <message>` and exits non-zero.
 
 ## Size hints become prompt text
 
@@ -269,65 +520,3 @@ the model you configured (absent when you set none). `usage` appears only when t
 Each preset runs headless and never stops for a prompt: Grok with `--yolo`, Antigravity with
 `--dangerously-skip-permissions`, Codex with `exec -s workspace-write`. Codex stays sandboxed
 because writing into its own workspace is enough to save the image.
-
-## Test without a CLI: the mock presets
-
-`XaiGrokCliMock`, `OpenAICodexCliMock`, `GoogleAgyCliMock` (strings `xai-grok-cli-mock`, …) are the
-same presets with the CLI replaced: same verbs, tools, errors and prompt folding, no process, no
-account, no network. Each writes `<gather.dir>/<grok|codex|agy>-mock-<verb>.png|mp4` holding the
-bytes `toolnexus mock <verb>`, then gathers it like a real CLI file (so `result.files[0].path` is the
-gathered copy, e.g. `grok-image-<ts>-1.png`), and the result's `text` is the exact prompt the CLI would have got.
-
-```ts
-// app.ts
-export const makeCover = (style = MediaStyle.XaiGrokCli) =>
-  generateMedia(style, "image", { prompt: "a red apple", aspectRatio: "16:9" })
-
-// app.test.ts
-const r = await makeCover(MediaStyle.XaiGrokCliMock)
-assert.equal(r.text, "Generate exactly one image with your image generation tool: a red apple (aspect ratio 16:9). Do not write code. Reply only with the file path.")
-assert.equal(r.style, "xai-grok-cli-mock")
-await assert.rejects(createMedia(loadMediaStyle(MediaStyle.OpenAICodexCliMock)).video({ prompt: "x" }),
-  /media: no style supports "video"/)
-```
-
-`available()` on a mock is `{installed: true, loggedIn: true}`; set
-`TOOLNEXUS_MEDIA_MOCK_AVAILABLE=0` to test your "not installed" path.
-
-## Test the whole agent offline
-
-The mock model from the [mock kit](/toolnexus/cookbook/mock-server/) (`tools/mock-llm/mock_llm.py`)
-calls the first tool it is offered, with arguments built from its schema. Give it a toolkit whose
-only tool is a mock preset's `generate_image`, and the full path runs with no model, no CLI, no
-key and no network: client loop → `generate_image` call → mock CLI file → `RunResult.files`.
-
-Start the mock first: `python3 tools/mock-llm/mock_llm.py --port 8787` (it prints its base URL).
-
-<Tabs syncKey="lang">
-<TabItem label="TypeScript">
-```ts
-const media = createMedia(loadMediaStyle(MediaStyle.XaiGrokCliMock, { gather: { dir } }))
-const toolkit = await createToolkit({ builtins: false, media })
-const client = createClient({ baseUrl: "http://127.0.0.1:8787/v1", style: "openai", model: "mock-model", apiKey: "mock-key" })
-const r = await client.run("Draw a red apple.", { toolkit })
-assert.equal(r.toolCalls[0].name, "generate_image")
-assert.equal(fs.readFileSync(r.files[0].path!, "utf8"), "toolnexus mock image")
-```
-</TabItem>
-<TabItem label="Go">
-```go
-style, _ := toolnexus.LoadMediaStyle(toolnexus.MediaStyleXaiGrokCliMock,
-	toolnexus.MediaConfig{Gather: toolnexus.MediaGather{Dir: dir}})
-tk, _ := toolnexus.CreateToolkit(ctx, toolnexus.Options{Builtins: false, Media: toolnexus.MustCreateMedia(style)})
-client := toolnexus.CreateClient(toolnexus.ClientOptions{BaseURL: "http://127.0.0.1:8787/v1",
-	Style: toolnexus.StyleOpenAI, Model: "mock-model", APIKey: "mock-key"})
-res, _ := client.Run(ctx, "Draw a red apple.", tk)
-// res.ToolCalls[0].Name == "generate_image"; os.ReadFile(res.Files[0].Path) == "toolnexus mock image"
-```
-</TabItem>
-</Tabs>
-
-These two are runnable tests in the repo (`js/test/mock-llm.test.ts`,
-`golang/mock_llm_test.go` → `TestMockLLMMediaOffline`). The other ports have the same pieces
-(the mock preset, `createToolkit({ media })` and a client pointed at the mock); their offline
-end-to-end test is not written yet.
