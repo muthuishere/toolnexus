@@ -111,6 +111,7 @@ per-request overhead over MCP in Python, JavaScript, C# and Rust, level with Ein
 ## Built on Toolnexus
 
 - **[wfnexus](https://muthuishere.github.io/wfnexus/)**: typed pipelines for coding agents. Each step is a whole agent with scoped tools, a budget, guardrails and a JSON-schema output.
+- **[Spot](https://spot.deemwar.com)**: press a key and ask; a local-first desktop assistant that answers with citations. Its coding-agent bridge (ACP) and image generation run on Toolnexus.
 
 Built something on Toolnexus? Open a PR adding one line here.
 
