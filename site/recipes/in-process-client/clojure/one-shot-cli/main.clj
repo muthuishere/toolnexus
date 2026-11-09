@@ -1,4 +1,4 @@
-;; deps.edn: {:paths ["."] :deps {net.clojars.muthuishere/toolnexus {:mvn/version "0.29.0"}}}
+;; deps.edn: {:paths ["."] :deps {net.clojars.muthuishere/toolnexus {:mvn/version "0.29.1"}}}
 ;; run:      clojure -M -m main claude -p        (any CLI that reads a prompt on stdin)
 (ns main
   (:require [koine.json :as json]

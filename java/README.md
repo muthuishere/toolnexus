@@ -17,17 +17,17 @@ servers run on an in-house client; remote HTTP/SSE servers and the serve side us
 
 ## Install
 
-Maven Central coordinate: **`io.github.muthuishere:toolnexus:0.29.0`**
+Maven Central coordinate: **`io.github.muthuishere:toolnexus:0.29.1`**
 
 ```gradle
-implementation 'io.github.muthuishere:toolnexus:0.29.0'
+implementation 'io.github.muthuishere:toolnexus:0.29.1'
 ```
 
 ```xml
 <dependency>
   <groupId>io.github.muthuishere</groupId>
   <artifactId>toolnexus</artifactId>
-  <version>0.29.0</version>
+  <version>0.29.1</version>
 </dependency>
 ```
 

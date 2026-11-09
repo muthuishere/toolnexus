@@ -768,7 +768,7 @@ func mediaSortedKeys(m map[string]any) []string {
 
 // mediaVersionFallback is the package version used when the build carries no
 // module version (a local checkout, go run inside this repo).
-const mediaVersionFallback = "0.29.0"
+const mediaVersionFallback = "0.29.1"
 
 // MediaUserAgent is the default User-Agent of every media HTTP request
 // (§7G.12 D23): "toolnexus/<version> (golang)". A client/style User-Agent header wins.

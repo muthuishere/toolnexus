@@ -8,6 +8,8 @@ GitHub Releases `vX.Y.Z` via `release.yml` (see `PUBLISHING.md`).
 
 ## Unreleased
 
+## 0.29.1 — 2026-11-09
+
 **Fix: Grok CLI videos honour `seconds` and are no longer ~1 second long.** In 0.29.0 the
 `xai-grok-cli` preset (and its `-mock` twin) asked Grok for the "shortest duration available", so a
 real video came back about one second long even when you passed `seconds`. The video template is
