@@ -1,4 +1,4 @@
-;; deps.edn: {:deps {net.clojars.muthuishere/toolnexus {:mvn/version "0.29.1"}}}
+;; deps.edn: {:deps {net.clojars.muthuishere/toolnexus {:mvn/version "0.30.0"}}}
 ;; run:      clojure -M main.clj
 (ns main
   (:require [toolnexus.client :as client]

@@ -8,6 +8,8 @@ GitHub Releases `vX.Y.Z` via `release.yml` (see `PUBLISHING.md`).
 
 ## Unreleased
 
+## 0.30.0 — 2026-11-12
+
 **Fix: images now reach, and come back from, an ACP agent.** Before, a picture you sent through the
 ACP model source (`loadACP`) was JSON-encoded, base64 and all, into the prompt text, so the agent
 never saw an image and the prompt ballooned; and an image the agent sent back, from its own tool or
