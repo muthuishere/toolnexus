@@ -4345,6 +4345,42 @@ Wire behaviour:
 - Permission requests go to the caller's permission hook (default: first allow-kind option, as in §8).
   Which agent tools to allow is policy, and policy belongs to the caller.
 
+#### ACP content parts (§1B over ACP; `openspec/changes/fix-acp-image-parts`)
+
+**Outbound (`session/prompt`).**
+
+- At `initialize` the client reads `agentCapabilities.promptCapabilities {image, audio,
+  embeddedContext}` (each absent ⇒ `false`). Text is always allowed.
+- Every message's content is flattened into **one** text block (the usual `role: content` lines +
+  supersedes marker). A text part renders as its text; each non-text part renders **in its place** as
+  its §1B description `<type> (<mimeType>, <N> bytes)` (N = decoded byte count; e.g.
+  `image (image/png, 67 bytes)`), parts joined by `\n`. **Base64 never appears inside a text block.**
+- `prompt` = `[ {type:"text", text}, …one block per non-text part, in message order… ]`:
+  - image part with `data`, `image` advertised ⇒ `{type:"image", mimeType, data}`;
+  - audio part with `data`, `audio` advertised ⇒ `{type:"audio", mimeType, data}`;
+  - file part with `data`, `embeddedContext` advertised ⇒ `{type:"resource", resource:{uri:
+    "attachment:///<name>", mimeType, blob:data}}` (`<name>` = the part's `name`, else `attachment`);
+  - anything else — capability not advertised, or a URL-only part (no `data`) — gets **no block**;
+    it reaches the agent only as its description in the text.
+
+**Inbound (session updates).**
+
+- An ACP `image` / `audio` ContentBlock (`{type, mimeType, data, uri?}`) becomes a §1B part: `data`
+  set ⇒ `{type, mimeType, data}`; else `uri` set ⇒ `{type, mimeType, url:uri}`; neither ⇒ ignored.
+  Other block types are not parts.
+- **Completed/failed `tool_call_update`** — `content` is `[{type:"content", content:ContentBlock}, …]`.
+  Text blocks concatenate into `output`; image/audio blocks become the `tool_result` event's `parts`
+  (in order). With no text, `output` = the parts' §1B descriptions joined by `\n` (the §0.4 MCP rule).
+  Each part is also a `RunResult.files` entry with `from` = the tool call's current name (its
+  `title`, else `kind`, renamed by a later non-empty `title`) and `callId` = the `toolCallId`.
+- **`agent_message_chunk`** carrying an image/audio block is never answer text: it becomes a
+  `RunResult.files` entry with `from:"acp"`, `callId:""`. If the turn's answer text is empty and the
+  agent sent such parts, the answer is their §1B descriptions joined by `\n`.
+- These files travel out of the in-process seam as the response's `files`
+  (`InProcessResponse.Files` in Go) and are appended to `RunResult.files` **after** the files of the
+  client's own tool calls, in arrival order — for `run` and for `stream`'s `done` result alike.
+  `toolCalls` / `toolCallCount` are unchanged (agent-side tool calls are not client tool calls).
+
 ### `toolkit.asMcpServer(config?) -> { url, token, close() }`
 
 Serves the toolkit for a local agent to call, built on the §7C server (same tool mapping, same
