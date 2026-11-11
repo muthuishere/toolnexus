@@ -87,6 +87,12 @@ public final class InProcess {
         public String content;
         public List<ToolCall> toolCalls;
         public Usage usage;
+        /**
+         * Media the model produced on its own side this turn (an ACP agent's own tools and image
+         * message chunks, SPEC §8C "ACP content parts"). They reach {@link LlmClient.RunResult#files}
+         * after the client-tool files; they are not tool calls of this run.
+         */
+        public List<LlmClient.RunFile> files;
 
         public static Response content(String text) {
             Response r = new Response();
@@ -232,6 +238,7 @@ public final class InProcess {
             Response answer = generate != null ? generate.apply(request)
                     : generateStream.apply(request, ev -> {});
             if (answer == null) answer = Response.content("");
+            addAgentFiles(AGENT_FILES.get(), answer.files);
 
             Map<String, Object> message = new LinkedHashMap<>();
             message.put("role", "assistant");
@@ -297,6 +304,7 @@ public final class InProcess {
          */
         private HttpResponse<java.util.stream.Stream<String>> streamResponse(HttpRequest req, Request request) {
             Consumer<LlmClient.StreamEvent> side = STREAM_SIDE.get();
+            List<LlmClient.RunFile> filesSink = AGENT_FILES.get();
             java.util.concurrent.LinkedBlockingQueue<Object> q = new java.util.concurrent.LinkedBlockingQueue<>();
             Thread.ofVirtual().name("toolnexus-inprocess-stream").start(() -> {
                 boolean[] sawText = {false};
@@ -315,6 +323,7 @@ public final class InProcess {
                         q.add(ev);
                     });
                     if (answer == null) answer = Response.content("");
+                    addAgentFiles(filesSink, answer.files);
                     String finish = "stop";
                     if (answer.toolCalls != null && !answer.toolCalls.isEmpty()) {
                         List<Object> calls = new ArrayList<>();
@@ -451,6 +460,20 @@ public final class InProcess {
 
     /** Set by the client's streaming loop around its model calls: where non-text events go. */
     static final ThreadLocal<Consumer<LlmClient.StreamEvent>> STREAM_SIDE = new ThreadLocal<>();
+
+    /**
+     * The run's sink for {@link Response#files} (SPEC §8C "ACP content parts"): set by the client
+     * on the run thread for the length of one run/stream, read by the shim inside http.send, and
+     * appended to {@link LlmClient.RunResult#files} after the client-tool files.
+     */
+    static final ThreadLocal<List<LlmClient.RunFile>> AGENT_FILES = new ThreadLocal<>();
+
+    private static void addAgentFiles(List<LlmClient.RunFile> sink, List<LlmClient.RunFile> files) {
+        if (sink == null || files == null || files.isEmpty()) return;
+        synchronized (sink) {
+            sink.addAll(files);
+        }
+    }
 
     record LinesResponse(HttpRequest req, java.util.stream.Stream<String> lines)
             implements HttpResponse<java.util.stream.Stream<String>> {

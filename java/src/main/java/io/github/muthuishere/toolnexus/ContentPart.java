@@ -383,7 +383,7 @@ public record ContentPart(String type, String text, String mimeType, String data
     }
 
     /** The part type an explicit mime type implies: {@code image/*}, {@code audio/*}, else file. */
-    static String typeForMime(String mimeType) {
+    public static String typeForMime(String mimeType) {
         String m = mimeType == null ? "" : mimeType.toLowerCase(Locale.ROOT);
         if (m.startsWith("image/")) return IMAGE;
         if (m.startsWith("audio/")) return AUDIO;

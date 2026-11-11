@@ -57,6 +57,10 @@ public sealed class AcpClient : IDisposable
     private volatile Action<JsonElement>? _updateSink;
     private int _closed;
 
+    // initialize agentCapabilities.promptCapabilities: which non-text ContentBlocks session/prompt
+    // may carry (SPEC §8C ACP content parts). Text is always allowed; absent means false.
+    private bool _capImage, _capAudio, _capEmbeddedContext;
+
     // SPEC §8C "ACP model source additions" — set by the options overload of StartAsync.
     private Func<JsonElement, string?>? _onPermission;
     private Action<JsonElement>? _onUpdate;
@@ -139,11 +143,20 @@ public sealed class AcpClient : IDisposable
                 ["terminal"] = false,
             };
             if (options.ClientCapsMeta != null) caps["_meta"] = options.ClientCapsMeta;
-            await client.CallAsync("initialize", new Dictionary<string, object?>
+            var init = await client.CallAsync("initialize", new Dictionary<string, object?>
             {
                 ["protocolVersion"] = 1,
                 ["clientCapabilities"] = caps,
             }, ct).ConfigureAwait(false);
+            if (init.ValueKind == JsonValueKind.Object
+                && init.TryGetProperty("agentCapabilities", out var ac) && ac.ValueKind == JsonValueKind.Object
+                && ac.TryGetProperty("promptCapabilities", out var pc) && pc.ValueKind == JsonValueKind.Object)
+            {
+                static bool Flag(JsonElement o, string k) => o.TryGetProperty(k, out var v) && v.ValueKind == JsonValueKind.True;
+                client._capImage = Flag(pc, "image");
+                client._capAudio = Flag(pc, "audio");
+                client._capEmbeddedContext = Flag(pc, "embeddedContext");
+            }
 
             var sessionCwd = cwd ?? Directory.GetCurrentDirectory();
             if (!Path.IsPathRooted(sessionCwd))
@@ -253,8 +266,11 @@ public sealed class AcpClient : IDisposable
     public async Task<InProcess.Response> GenerateStreamAsync(InProcess.Request request,
         Action<LlmClient.StreamEvent>? emit, CancellationToken ct = default)
     {
-        var text = await PromptStreamAsync(BuildPromptText(request), emit, ct).ConfigureAwait(false);
-        return InProcess.Response.FromContent(text);
+        var (prompt, parts) = BuildPrompt(request);
+        var (text, files) = await PromptTurnAsync(prompt, parts, emit, ct).ConfigureAwait(false);
+        var resp = InProcess.Response.FromContent(text);
+        if (files.Count > 0) resp.Files = files;
+        return resp;
     }
 
     /// <summary>Assembles <paramref name="request"/> into a full prompt (with the supersedes
@@ -275,10 +291,17 @@ public sealed class AcpClient : IDisposable
     /// <paramref name="emit"/> as it arrives (see <see cref="GenerateStreamAsync"/>).</summary>
     public async Task<string> PromptStreamAsync(string fullText, Action<LlmClient.StreamEvent>? emit, CancellationToken ct = default)
     {
+        var (text, _) = await PromptTurnAsync(fullText, Array.Empty<ContentPart>(), emit, ct).ConfigureAwait(false);
+        return text;
+    }
+
+    private async Task<(string Text, List<LlmClient.RunFile> Files)> PromptTurnAsync(string fullText,
+        IReadOnlyList<ContentPart> parts, Action<LlmClient.StreamEvent>? emit, CancellationToken ct)
+    {
         await _turnLock.WaitAsync(ct).ConfigureAwait(false);
         try
         {
-            return await SendPromptAsync(fullText, emit, ct).ConfigureAwait(false);
+            return await SendPromptAsync(fullText, parts, emit, ct).ConfigureAwait(false);
         }
         finally
         {
@@ -291,14 +314,20 @@ public sealed class AcpClient : IDisposable
     /// <c>role: content</c> on its own line, followed by the library-assembled supersedes marker
     /// naming the freshest user turn as authoritative.
     /// </summary>
-    public static string BuildPromptText(InProcess.Request request)
+    public static string BuildPromptText(InProcess.Request request) => BuildPrompt(request).Text;
+
+    /// <summary><see cref="BuildPromptText"/> plus the request's non-text parts, in message order:
+    /// each is named in the text by its §1B description (never its bytes) and returned separately,
+    /// to travel as a native ACP block (SPEC §8C ACP content parts).</summary>
+    private static (string Text, List<ContentPart> Parts) BuildPrompt(InProcess.Request request)
     {
+        var parts = new List<ContentPart>();
         var sb = new StringBuilder();
         var lastUserText = "";
         var sawUser = false;
         for (var i = 0; i < request.Messages.Count; i++)
         {
-            var (role, content) = ExtractRoleContent(request.Messages[i]);
+            var (role, content) = ExtractRoleContent(request.Messages[i], parts);
             if (i > 0) sb.Append('\n');
             sb.Append(role).Append(": ").Append(content);
             if (string.Equals(role, "user", StringComparison.OrdinalIgnoreCase))
@@ -309,40 +338,132 @@ public sealed class AcpClient : IDisposable
         }
         if (!sawUser && request.Messages.Count > 0)
         {
-            var (_, content) = ExtractRoleContent(request.Messages[^1]);
+            var (_, content) = ExtractRoleContent(request.Messages[^1], null);
             lastUserText = content;
         }
         if (sb.Length > 0) sb.Append('\n');
         sb.Append(SupersedesMarker).Append(' ').Append(lastUserText);
-        return sb.ToString();
+        return (sb.ToString(), parts);
     }
 
-    private static (string Role, string Content) ExtractRoleContent(object? message)
+    private static (string Role, string Content) ExtractRoleContent(object? message, List<ContentPart>? parts)
     {
         var normalized = message is JsonElement je ? Json.FromElement(je) : message;
         if (normalized is Dictionary<string, object?> dict)
         {
             var role = dict.TryGetValue("role", out var r) ? r?.ToString() ?? "" : "";
-            var content = ContentToText(dict.TryGetValue("content", out var c) ? c : null);
+            var content = ContentToText(dict.TryGetValue("content", out var c) ? c : null, parts);
             return (role, content);
         }
         return ("", normalized?.ToString() ?? "");
     }
 
-    private static string ContentToText(object? content) => content switch
+    /// <summary>Content is usually a string. A parts array (the OpenAI chat wire shape the
+    /// in-process seam receives) renders text parts as text and each media part as its §1B
+    /// description <c>"&lt;type&gt; (&lt;mimeType&gt;, &lt;bytes&gt; bytes)"</c>, joined by
+    /// <c>\n</c>; the media parts are collected into <paramref name="parts"/> (when non-null).
+    /// Anything unrecognised is JSON-encoded so it still renders as text.</summary>
+    private static string ContentToText(object? content, List<ContentPart>? parts)
     {
-        null => "",
-        string s => s,
-        List<object?> parts => string.Join(" ", parts.Select(PartToText)),
-        _ => Json.Stringify(content),
-    };
+        switch (content)
+        {
+            case null: return "";
+            case string s: return s;
+            case List<object?> items:
+                var texts = new List<string>();
+                foreach (var item in items)
+                {
+                    var p = WirePart(item);
+                    if (p is null) texts.Add(Json.Stringify(item));
+                    else if (p.Type == "text") texts.Add(p.Text ?? "");
+                    else
+                    {
+                        texts.Add(p.DescribeInText());
+                        parts?.Add(p);
+                    }
+                }
+                return string.Join("\n", texts);
+            default: return Json.Stringify(content);
+        }
+    }
 
-    private static string PartToText(object? part) =>
-        part is Dictionary<string, object?> d && d.TryGetValue("text", out var t)
-            ? t?.ToString() ?? ""
-            : Json.Stringify(part);
+    /// <summary>Reads one OpenAI chat content block back into a §1B part, or null.</summary>
+    private static ContentPart? WirePart(object? item)
+    {
+        if (item is not Dictionary<string, object?> blk) return null;
+        string Str(string key, string? sub = null)
+        {
+            var v = blk.TryGetValue(key, out var x) ? x : null;
+            if (sub != null) v = v is Dictionary<string, object?> d && d.TryGetValue(sub, out var y) ? y : null;
+            return v as string ?? "";
+        }
+        switch (blk.TryGetValue("type", out var t) ? t as string : null)
+        {
+            case "text":
+                return ContentPart.FromText(Str("text"));
+            case "image_url":
+            {
+                var u = Str("image_url", "url");
+                if (ParseDataUrl(u) is var (mime, b64))
+                    return new ContentPart { Type = "image", MimeType = mime, Data = b64 };
+                return u.Length > 0 ? new ContentPart { Type = "image", Url = u } : null;
+            }
+            case "input_audio":
+            {
+                var mime = "audio/" + Str("input_audio", "format");
+                if (mime == "audio/mp3") mime = "audio/mpeg";
+                return new ContentPart { Type = "audio", MimeType = mime, Data = Str("input_audio", "data") };
+            }
+            case "file":
+                if (ParseDataUrl(Str("file", "file_data")) is var (fm, fb))
+                    return new ContentPart { Type = ContentPart.TypeForMime(fm), MimeType = fm, Data = fb, Name = Str("file", "filename") };
+                return null;
+        }
+        return null;
+    }
 
-    private async Task<string> SendPromptAsync(string text, Action<LlmClient.StreamEvent>? emit, CancellationToken ct)
+    /// <summary><c>data:&lt;mime&gt;;base64,&lt;b64&gt;</c> ⇒ (mime, b64 verbatim); anything else ⇒ null.</summary>
+    private static (string Mime, string B64)? ParseDataUrl(string url)
+    {
+        if (!url.StartsWith("data:", StringComparison.OrdinalIgnoreCase)) return null;
+        var comma = url.IndexOf(',');
+        if (comma < 0) return null;
+        var header = url[5..comma];
+        if (!header.EndsWith(";base64", StringComparison.OrdinalIgnoreCase)) return null;
+        var mime = header[..^7].Trim();
+        return mime.Length == 0 ? null : (mime, url[(comma + 1)..]); // SPEC §8C: non-empty mime
+    }
+
+    /// <summary>The session/prompt ContentBlock array: the text block, then one native block per
+    /// media part the agent advertised support for. A part it cannot take stays named only by its
+    /// description in the text.</summary>
+    private List<object?> PromptBlocks(string text, IReadOnlyList<ContentPart> parts)
+    {
+        var blocks = new List<object?> { new Dictionary<string, object?> { ["type"] = "text", ["text"] = text } };
+        foreach (var p in parts)
+        {
+            if (string.IsNullOrEmpty(p.Data)) continue; // ACP media blocks require inline data
+            if (p.Type == "image" && _capImage)
+                blocks.Add(new Dictionary<string, object?> { ["type"] = "image", ["mimeType"] = p.MimeType, ["data"] = p.Data });
+            else if (p.Type == "audio" && _capAudio)
+                blocks.Add(new Dictionary<string, object?> { ["type"] = "audio", ["mimeType"] = p.MimeType, ["data"] = p.Data });
+            else if (p.Type == "file" && _capEmbeddedContext)
+                blocks.Add(new Dictionary<string, object?>
+                {
+                    ["type"] = "resource",
+                    ["resource"] = new Dictionary<string, object?>
+                    {
+                        ["uri"] = "attachment:///" + (string.IsNullOrEmpty(p.Name) ? "attachment" : p.Name),
+                        ["mimeType"] = p.MimeType,
+                        ["blob"] = p.Data,
+                    },
+                });
+        }
+        return blocks;
+    }
+
+    private async Task<(string Text, List<LlmClient.RunFile> Files)> SendPromptAsync(string text,
+        IReadOnlyList<ContentPart> parts, Action<LlmClient.StreamEvent>? emit, CancellationToken ct)
     {
         var id = NextId();
         var tcs = new TaskCompletionSource<JsonElement>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -351,6 +472,8 @@ public sealed class AcpClient : IDisposable
 
         var sb = new StringBuilder();
         var toolNames = new Dictionary<string, string>();
+        var files = new List<LlmClient.RunFile>();     // inbound media, in arrival order (lock sb)
+        var messageParts = new List<ContentPart>();    // media the agent sent as message chunks
         _updateSink = el =>
         {
             if (el.ValueKind != JsonValueKind.Object) return;
@@ -365,6 +488,16 @@ public sealed class AcpClient : IDisposable
             {
                 case "agent_message_chunk":
                 {
+                    if (upd.TryGetProperty("content", out var mc) && BlockPart(mc) is { } mp)
+                    {
+                        // An image/audio chunk is a part, never text (SPEC §8C ACP content parts).
+                        lock (sb)
+                        {
+                            messageParts.Add(mp);
+                            files.Add(RunFileOf(mp, "acp", ""));
+                        }
+                        break;
+                    }
                     var t = ChunkText(upd);
                     lock (sb) sb.Append(t);
                     if (emit != null && t.Length > 0) emit(new LlmClient.StreamEvent(LlmClient.StreamKind.Text, Delta: t));
@@ -403,16 +536,26 @@ public sealed class AcpClient : IDisposable
                         if (title.Length > 0) toolNames[callId] = title;
                         toolNames.TryGetValue(callId, out name);
                     }
+                    var status = StrProp(upd, "status");
+                    var final = status == "completed" || status == "failed";
+                    var output = "";
+                    List<ContentPart>? tparts = null;
+                    if (final)
+                    {
+                        (output, tparts) = ToolContent(upd);
+                        lock (sb)
+                            foreach (var p in tparts) files.Add(RunFileOf(p, name ?? "", callId));
+                    }
                     if (emit == null) break;
                     if (upd.TryGetProperty("rawInput", out var ri) && ri.ValueKind == JsonValueKind.Object
                         && ri.EnumerateObject().Any()
                         && Json.FromElement(ri) is IDictionary<string, object?> rawArgs)
                         emit(new LlmClient.StreamEvent(LlmClient.StreamKind.ToolCallArgs, Id: callId, Name: name ?? "",
                             Args: rawArgs, Via: "acp"));
-                    var status = StrProp(upd, "status");
-                    if (status != "completed" && status != "failed") break;
+                    if (!final) break;
                     emit(new LlmClient.StreamEvent(LlmClient.StreamKind.ToolResult, Id: callId, Name: name ?? "",
-                        Output: ToolContentText(upd), IsError: status == "failed", Via: "acp"));
+                        Output: output, IsError: status == "failed", Via: "acp")
+                        { Parts = tparts is { Count: > 0 } ? tparts : null });
                     break;
                 }
             }
@@ -428,10 +571,7 @@ public sealed class AcpClient : IDisposable
                 ["params"] = new Dictionary<string, object?>
                 {
                     ["sessionId"] = SessionId,
-                    ["prompt"] = new List<object?>
-                    {
-                        new Dictionary<string, object?> { ["type"] = "text", ["text"] = text },
-                    },
+                    ["prompt"] = PromptBlocks(text, parts),
                 },
             }, ct).ConfigureAwait(false);
 
@@ -464,7 +604,14 @@ public sealed class AcpClient : IDisposable
             }
 
             await tcs.Task.ConfigureAwait(false); // surfaces AcpRpcException, if any
-            lock (sb) return sb.ToString();
+            lock (sb)
+            {
+                // The clean message text — or, when the agent sent only media, its §1B description.
+                var answer = sb.ToString();
+                if (answer.Length == 0 && messageParts.Count > 0)
+                    answer = string.Join("\n", messageParts.Select(p => p.DescribeInText()));
+                return (answer, new List<LlmClient.RunFile>(files));
+            }
         }
         finally
         {
@@ -480,16 +627,43 @@ public sealed class AcpClient : IDisposable
     private static string ChunkText(JsonElement upd) =>
         upd.TryGetProperty("content", out var c) && c.ValueKind == JsonValueKind.Object ? StrProp(c, "text") : "";
 
-    /// <summary>The text of a tool_call_update's <c>content</c> array (<c>[{content:{text}}]</c>), joined.</summary>
-    private static string ToolContentText(JsonElement upd)
+    /// <summary>A tool_call_update's <c>content</c> array (<c>[{type:"content", content:ContentBlock}]</c>):
+    /// text blocks join into the output; image/audio blocks become parts. With no text, the output
+    /// is the parts' §1B descriptions joined by <c>\n</c>.</summary>
+    private static (string Output, List<ContentPart> Parts) ToolContent(JsonElement upd)
     {
-        if (!upd.TryGetProperty("content", out var arr) || arr.ValueKind != JsonValueKind.Array) return "";
+        var parts = new List<ContentPart>();
+        if (!upd.TryGetProperty("content", out var arr) || arr.ValueKind != JsonValueKind.Array) return ("", parts);
         var b = new StringBuilder();
         foreach (var p in arr.EnumerateArray())
-            if (p.ValueKind == JsonValueKind.Object && p.TryGetProperty("content", out var c) && c.ValueKind == JsonValueKind.Object)
-                b.Append(StrProp(c, "text"));
-        return b.ToString();
+        {
+            if (p.ValueKind != JsonValueKind.Object || !p.TryGetProperty("content", out var c) || c.ValueKind != JsonValueKind.Object)
+                continue;
+            if (BlockPart(c) is { } part) parts.Add(part);
+            else b.Append(StrProp(c, "text"));
+        }
+        var output = b.ToString();
+        if (output.Length == 0 && parts.Count > 0)
+            output = string.Join("\n", parts.Select(x => x.DescribeInText()));
+        return (output, parts);
     }
+
+    /// <summary>An ACP image/audio ContentBlock (<c>{type, mimeType, data, uri?}</c>) as a §1B part:
+    /// data wins; a uri-only block becomes a URL part; anything else is not a part.</summary>
+    private static ContentPart? BlockPart(JsonElement blk)
+    {
+        if (blk.ValueKind != JsonValueKind.Object) return null;
+        var type = StrProp(blk, "type");
+        if (type != "image" && type != "audio") return null;
+        var mime = StrProp(blk, "mimeType");
+        var data = StrProp(blk, "data");
+        if (data.Length > 0) return new ContentPart { Type = type, MimeType = mime, Data = data };
+        var uri = StrProp(blk, "uri");
+        return uri.Length > 0 ? new ContentPart { Type = type, MimeType = mime, Url = uri } : null;
+    }
+
+    private static LlmClient.RunFile RunFileOf(ContentPart p, string from, string callId) =>
+        new(p.Type, p.MimeType ?? "", p.Url, p.Data, from, callId);
 
     private async Task<JsonElement> CallAsync(string method, object? @params, CancellationToken ct)
     {

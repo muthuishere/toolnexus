@@ -23,6 +23,9 @@ Scenarios:
   noisy      - interleaves ``agent_thought_chunk`` and ``tool_call``/
                ``tool_call_update`` notifications around the real
                ``agent_message_chunk`` content, split across >= 2 notifications.
+  image      - advertises promptCapabilities {image: true} at initialize; echoes.
+  image_out  - per prompt: a tool_call "screenshot" whose completed update carries
+               an image block, a text message chunk "here", then an image chunk.
   serialize  - records reentrancy (a "busy" flag) if a second ``session/prompt``
                arrives while one is already being handled on this session — proves
                the client serialises turns.
@@ -40,6 +43,11 @@ import threading
 import time
 
 _STDOUT_LOCK = threading.Lock()
+
+# A 1x1 transparent PNG (67 bytes), base64.
+_PNG_B64 = (
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGMAAQAABQABDQottAAAAABJRU5ErkJggg=="
+)
 
 
 def _send(obj: dict) -> None:
@@ -67,6 +75,7 @@ def main() -> None:
         "received_mcp_servers": None,
         "cancel_pending": None,
         "cancel_seen": False,
+        "last_prompt": None,
     }
     next_srv_id = [0]
     perm_replies: dict[str, dict] = {}
@@ -189,6 +198,20 @@ def main() -> None:
             reply(msg_id, {"stopReason": "end_turn"})
             return
 
+        if scenario == "image_out":
+            png = _PNG_B64
+            img = {"type": "image", "mimeType": "image/png", "data": png}
+            for upd in (
+                {"sessionUpdate": "tool_call", "toolCallId": "t1", "title": "screenshot", "kind": "other", "status": "pending"},
+                {"sessionUpdate": "tool_call_update", "toolCallId": "t1", "status": "completed",
+                 "content": [{"type": "content", "content": img}]},
+                {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "here"}},
+                {"sessionUpdate": "agent_message_chunk", "content": img},
+            ):
+                send_notification("session/update", {"sessionId": session_id, "update": upd})
+            reply(msg_id, {"stopReason": "end_turn"})
+            return
+
         if scenario == "serialize":
             with state_lock:
                 if state["busy"]:
@@ -226,7 +249,10 @@ def main() -> None:
             continue
 
         if method == "initialize":
-            reply(msg_id, {"protocolVersion": 1, "agentCapabilities": {"loadSession": False}})
+            caps: dict = {"loadSession": False}
+            if scenario == "image":
+                caps["promptCapabilities"] = {"image": True}
+            reply(msg_id, {"protocolVersion": 1, "agentCapabilities": caps})
         elif method == "session/new":
             params = msg.get("params") or {}
             with state_lock:
@@ -248,6 +274,8 @@ def main() -> None:
         elif method == "session/prompt":
             params = msg.get("params") or {}
             session_id = params.get("sessionId")
+            with state_lock:
+                state["last_prompt"] = params.get("prompt")
             text = "".join(p.get("text", "") for p in (params.get("prompt") or []))
             threading.Thread(target=handle_prompt, args=(msg_id, session_id, text), daemon=True).start()
         elif method == "session/cancel":

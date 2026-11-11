@@ -23,6 +23,10 @@
 #                 output while filtering to agent_message_chunk stays clean.
 #   slow        - sleeps before replying, so a test can prove turns on one
 #                 session are serialised (never sent concurrently).
+#   image_caps / image_nocaps - reply with the session/prompt `prompt` blocks
+#                 as JSON; image_caps advertises promptCapabilities.image.
+#   image_out   - a tool_call whose completed update carries an image block,
+#                 then a text chunk and an image chunk (SPEC §8C content parts).
 #   seam        - conformance/acp-client/cases.json: records the params of
 #                 initialize / session/new / set_config_option / set_model and
 #                 replies to a prompt with them as JSON, honouring the fakeEnv
@@ -54,8 +58,26 @@ defmodule FakeAcpServer do
     end
   end
 
-  defp handle(_scenario, %{"method" => "initialize", "id" => id} = msg, state) do
-    reply(id, %{"protocolVersion" => 1, "agentCapabilities" => %{"loadSession" => false}})
+  defp handle(scenario, %{"method" => "initialize", "id" => id} = msg, state) do
+    caps = %{"loadSession" => false}
+
+    caps =
+      case scenario do
+        "image_caps" ->
+          Map.put(caps, "promptCapabilities", %{"image" => true})
+
+        "media_caps" ->
+          Map.put(caps, "promptCapabilities", %{
+            "image" => true,
+            "audio" => true,
+            "embeddedContext" => true
+          })
+
+        _ ->
+          caps
+      end
+
+    reply(id, %{"protocolVersion" => 1, "agentCapabilities" => caps})
     record(state, "initialize", msg)
   end
 
@@ -105,6 +127,13 @@ defmodule FakeAcpServer do
     end
 
     record(state, "session/set_mode", msg)
+  end
+
+  defp handle(scenario, %{"method" => "session/prompt", "id" => id, "params" => params}, state)
+       when scenario in ["image_caps", "image_nocaps", "media_caps"] do
+    emit_chunk(Jason.encode!(params["prompt"]))
+    reply(id, %{"stopReason" => "end_turn"})
+    state
   end
 
   defp handle(scenario, %{"method" => "session/prompt", "id" => id, "params" => params}, state) do
@@ -204,6 +233,29 @@ defmodule FakeAcpServer do
         emit_chunk(Jason.encode!(state.rec))
         reply(id, %{"stopReason" => "end_turn"})
     end
+  end
+
+  defp dispatch("image_out", id, _text, _state) do
+    img = %{"type" => "image", "mimeType" => "image/png", "data" => png_b64()}
+
+    emit_notification(%{
+      "sessionUpdate" => "tool_call",
+      "toolCallId" => "t1",
+      "title" => "screenshot",
+      "kind" => "other",
+      "status" => "pending"
+    })
+
+    emit_notification(%{
+      "sessionUpdate" => "tool_call_update",
+      "toolCallId" => "t1",
+      "status" => "completed",
+      "content" => [%{"type" => "content", "content" => img}]
+    })
+
+    emit_chunk("here")
+    emit_notification(%{"sessionUpdate" => "agent_message_chunk", "content" => img})
+    reply(id, %{"stopReason" => "end_turn"})
   end
 
   defp dispatch("stale", id, text, state) do
@@ -321,6 +373,17 @@ defmodule FakeAcpServer do
           _ -> await_error_code(want_id)
         end
     end
+  end
+
+  # A 1x1 transparent PNG (67 bytes).
+  defp png_b64 do
+    Base.encode64(
+      Base.decode16!(
+        "89504E470D0A1A0A0000000D49484452000000010000000108060000001F15C4" <>
+          "890000000D49444154789C63000100000500010D0A2DB40000000049454E44AE" <>
+          "426082"
+      )
+    )
   end
 
   defp emit_chunk(text) do

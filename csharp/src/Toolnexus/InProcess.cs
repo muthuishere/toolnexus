@@ -54,6 +54,11 @@ public static class InProcess
         public List<ToolCall>? ToolCalls { get; set; }
         public Usage? Usage { get; set; }
 
+        /// <summary>Non-text parts the model produced itself (e.g. an ACP agent's own tool results
+        /// and image message chunks). The client appends them to <c>RunResult.Files</c> after the
+        /// files of its own tool calls.</summary>
+        public List<LlmClient.RunFile>? Files { get; set; }
+
         public static Response FromContent(string text) => new() { Content = text };
         public static Response FromToolCalls(params ToolCall[] calls) => new() { ToolCalls = calls.ToList() };
     }
@@ -184,6 +189,7 @@ public static class InProcess
                 ? _generate(ipReq)
                 : await _stream!(ipReq, static _ => { }, cancellationToken).ConfigureAwait(false))
                 ?? Response.FromContent("");
+            LlmClient.AddAgentFiles(LlmClient.AgentFiles.Value, answer.Files);
 
             var sb = new StringBuilder();
             sb.Append("{\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\"");
@@ -243,6 +249,7 @@ public static class InProcess
         {
             var ipReq = BuildRequest(root, raw);
             var side = LlmClient.StreamSide.Value;
+            var agentFiles = LlmClient.AgentFiles.Value;
             var ch = System.Threading.Channels.Channel.CreateUnbounded<byte[]>(
                 new System.Threading.Channels.UnboundedChannelOptions { SingleReader = true });
             void Chunk(object v) => ch.Writer.TryWrite(Encoding.UTF8.GetBytes("data: " + JsonSerializer.Serialize(v) + "\n\n"));
@@ -271,6 +278,7 @@ public static class InProcess
                         }
                         side?.Invoke(ev);
                     }, ct).ConfigureAwait(false) ?? Response.FromContent("");
+                    LlmClient.AddAgentFiles(agentFiles, answer.Files);
                     var finish = "stop";
                     if (answer.ToolCalls is { Count: > 0 })
                     {

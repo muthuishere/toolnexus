@@ -835,7 +835,20 @@ public sealed partial class LlmClient
 
         /// <summary>(SPEC §8) Every non-text part the run's tool calls produced, in call order — never
         /// null (<c>[]</c> when none). Derived from <see cref="ToolCalls"/>, so every run path fills it.</summary>
-        public IReadOnlyList<RunFile> Files => RunFilesOf(ToolCalls);
+        public IReadOnlyList<RunFile> Files
+        {
+            get
+            {
+                var own = RunFilesOf(ToolCalls);
+                if (_agentFiles is null) return own;
+                lock (_agentFiles)
+                    return _agentFiles.Count == 0 ? own : own.Concat(_agentFiles).ToList();
+            }
+        }
+
+        // Files the model produced itself (InProcess.Response.Files — e.g. an ACP agent's own
+        // tools): the run's sink, appended after the client's own tool-call files.
+        private readonly List<RunFile>? _agentFiles = AgentFiles.Value;
         public int Turns { get; }
         public Usage Usage { get; }
         public string Model { get; }
@@ -889,6 +902,10 @@ public sealed partial class LlmClient
         int? Attempt = null, int? Max = null, long? DelayMs = null, int? Status = null, string? Reason = null,
         string? From = null, string? To = null)
     {
+        /// <summary>A <c>ToolResult</c>'s non-text parts (SPEC §8C ACP content parts: an ACP agent's
+        /// own tool returning an image); null when it had none.</summary>
+        public IReadOnlyList<ContentPart>? Parts { get; init; }
+
         /// <summary>§8 Retry event: <c>Attempt</c> is the 1-based retry about to happen, <c>Max</c> the
         /// configured retries, <c>DelayMs</c> the exact wait, <c>Status</c> the HTTP status (null on a
         /// network error), <c>Reason</c> <c>"HTTP &lt;status&gt;"</c> or <c>"network"</c>.</summary>
@@ -920,12 +937,13 @@ public sealed partial class LlmClient
     public Task<RunResult> RunAsync(IReadOnlyList<ContentPart> prompt, Toolkit? toolkit, List<object?>? history = null, CancellationToken cancellationToken = default)
         => RunAsync((object)prompt, toolkit, history, cancellationToken);
 
-    private Task<RunResult> RunAsync(object prompt, Toolkit? toolkit, List<object?>? history, CancellationToken cancellationToken)
+    private async Task<RunResult> RunAsync(object prompt, Toolkit? toolkit, List<object?>? history, CancellationToken cancellationToken)
     {
+        AgentFiles.Value = new List<RunFile>(); // async method: scoped to this run, never leaks to the caller
         var deadline = new Deadline(_opts.TimeoutMs);
         return _opts.Style == "anthropic"
-            ? RunAnthropicAsync(prompt, toolkit, history, deadline, cancellationToken)
-            : RunOpenAIAsync(prompt, toolkit, history, deadline, cancellationToken);
+            ? await RunAnthropicAsync(prompt, toolkit, history, deadline, cancellationToken).ConfigureAwait(false)
+            : await RunOpenAIAsync(prompt, toolkit, history, deadline, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -1084,6 +1102,7 @@ public sealed partial class LlmClient
 
         if (id == null)
             return await RunAsync(prompt, toolkit, (List<object?>?)null, cancellationToken).ConfigureAwait(false);
+        AgentFiles.Value = new List<RunFile>();
         var history = await _store.GetAsync(id).ConfigureAwait(false) ?? new List<object?>();
         var intr = new Interrupt();
         RunResult result;
@@ -1126,10 +1145,22 @@ public sealed partial class LlmClient
     /// never through the wire, where the loop would execute them.</summary>
     internal static readonly AsyncLocal<Action<StreamEvent>?> StreamSide = new();
 
+    /// <summary>The run's sink for <see cref="InProcess.Response.Files"/> (files a model produced
+    /// itself, e.g. an ACP agent's own tool results), which never cross the OpenAI wire. Set per
+    /// run; every <see cref="RunResult"/> built in that run appends it to <see cref="RunResult.Files"/>.</summary>
+    internal static readonly AsyncLocal<List<RunFile>?> AgentFiles = new();
+
+    internal static void AddAgentFiles(List<RunFile>? sink, List<RunFile>? files)
+    {
+        if (sink is null || files is not { Count: > 0 }) return;
+        lock (sink) sink.AddRange(files);
+    }
+
     private async Task<RunResult> StreamAsync(object prompt, Toolkit? toolkit, Action<StreamEvent> onEvent,
         string? id, CancellationToken cancellationToken)
     {
         StreamSide.Value = onEvent;
+        AgentFiles.Value = new List<RunFile>();
         var deadline = new Deadline(_opts.TimeoutMs);
         var history = id != null ? (await _store.GetAsync(id).ConfigureAwait(false) ?? new List<object?>()) : null;
         var intr = id != null ? new Interrupt() : null;

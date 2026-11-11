@@ -23,6 +23,7 @@ Memory: ``run(prompt, toolkit, history=...)`` continues a prior transcript;
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import inspect
 import json
 import os
@@ -228,6 +229,20 @@ class _CallRecord(dict):
     part_paths: Optional[list[Optional[str]]] = None
 
 
+# Per-run sink for files an in-process model produced itself (e.g. an ACP agent's own
+# tool calls, which are never RunResult.tool_calls). Set by run/ask/stream; the worker
+# thread sees it through the copied context; appended after the client-tool files.
+_AGENT_FILES: "contextvars.ContextVar[Optional[list[dict[str, Any]]]]" = contextvars.ContextVar(
+    "toolnexus_agent_files", default=None
+)
+
+
+def _add_agent_files(answer: dict[str, Any], sink: Optional[list[dict[str, Any]]]) -> None:
+    files = answer.get("files")
+    if sink is not None and isinstance(files, list):
+        sink.extend(f for f in files if isinstance(f, dict))
+
+
 def _run_files(tool_calls: list[dict[str, Any]]) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for rec in tool_calls:
@@ -241,6 +256,7 @@ def _run_files(tool_calls: list[dict[str, Any]]) -> list[dict[str, Any]]:
             f["from"] = rec.get("name")
             f["callId"] = getattr(rec, "call_id", None)
             out.append(f)
+    out.extend(_AGENT_FILES.get() or [])
     return out
 
 
@@ -2467,9 +2483,13 @@ class Client:
         *latency* differs from the mid-request-abort ports (JS/Go/C#/Elixir); the
         observable outcome is identical.
         """
-        if self.style == "anthropic":
-            return await self._run_anthropic(prompt, toolkit, history, cancel)
-        return await self._run_openai(prompt, toolkit, history, cancel)
+        token = _AGENT_FILES.set([])
+        try:
+            if self.style == "anthropic":
+                return await self._run_anthropic(prompt, toolkit, history, cancel)
+            return await self._run_openai(prompt, toolkit, history, cancel)
+        finally:
+            _AGENT_FILES.reset(token)
 
     async def ask(
         self,
@@ -2510,6 +2530,7 @@ class Client:
             return await self.run(prompt, toolkit, cancel=cancel)
         history = await self.store.get(id) or []
         log = _TurnLog()
+        token = _AGENT_FILES.set([])
         try:
             if self.style == "anthropic":
                 result = await self._run_anthropic(prompt, toolkit, history, cancel, log)
@@ -2520,6 +2541,8 @@ class Client:
             # message survive a failure or a cancel; the original error still raises.
             await self._save_interrupted(id, log, prompt, toolkit, history)
             raise
+        finally:
+            _AGENT_FILES.reset(token)
         await self.store.save(id, result.messages)
         return result
 
@@ -2569,6 +2592,7 @@ class Client:
         else:
             gen = self._stream_openai(prompt, toolkit, cancel, history, log)
         saved = False
+        token = _AGENT_FILES.set([])
         try:
             async for ev in gen:
                 if ev["type"] == "done" and id:
@@ -2582,6 +2606,11 @@ class Client:
                 await gen.aclose()
                 await self._save_interrupted(id, log, prompt, toolkit, history or [])
             raise
+        finally:
+            try:
+                _AGENT_FILES.reset(token)
+            except ValueError:  # finalised from another context (an abandoned generator)
+                pass
 
     # ----------------------------------------------------------------------- #
     # OpenAI-style: POST {base_url}/chat/completions
@@ -3594,6 +3623,7 @@ class InProcessTransport:
         else:
             # Only a streaming generate: a non-stream request runs it with a no-op emit.
             answer = self._checked(self._generate_stream(request, lambda _ev: None))  # type: ignore[misc]
+        _add_agent_files(answer, _AGENT_FILES.get())
         message = _in_process_message(answer)
         return {
             "choices": [{
@@ -3667,6 +3697,7 @@ class _InProcessStream:
         self._closed = threading.Event()
         self._gs = generate_stream
         self._request = request
+        self._agent_files = _AGENT_FILES.get()  # the run's sink; the stream thread has no context
         threading.Thread(target=self._run, name="in-process-stream", daemon=True).start()
 
     @staticmethod
@@ -3694,6 +3725,7 @@ class _InProcessStream:
 
         try:
             answer = InProcessTransport._checked(self._gs(self._request, emit))
+            _add_agent_files(answer, self._agent_files)
             message = _in_process_message(answer)
             finish = "stop"
             if message.get("tool_calls"):

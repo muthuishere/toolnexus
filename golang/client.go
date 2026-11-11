@@ -541,6 +541,9 @@ type StreamEvent struct {
 	Output string
 	// IsError flags a tool error (Type == "tool_result").
 	IsError bool
+	// Parts is the tool result's non-text output (Type == "tool_result", §1B),
+	// e.g. an image an ACP agent's own tool returned.
+	Parts []ContentPart
 	// Metadata is the tool result's metadata (Type == "tool_result"), e.g. the
 	// files/diff of an edit (SPEC §4 Edit diffs).
 	Metadata map[string]any
@@ -964,10 +967,16 @@ func (c *Client) runAny(ctx context.Context, prompt any, tk *Toolkit, history []
 	}
 	ctx, cancel := c.withDeadline(ctx)
 	defer cancel()
+	ctx, _ = withAgentFiles(ctx)
+	var res RunResult
+	var err error
 	if c.opts.Style == StyleAnthropic {
-		return c.runAnthropic(ctx, prompt, tk, history)
+		res, err = c.runAnthropic(ctx, prompt, tk, history)
+	} else {
+		res, err = c.runOpenAI(ctx, prompt, tk, history)
 	}
-	return c.runOpenAI(ctx, prompt, tk, history)
+	withAgentFilesResult(ctx, &res)
+	return res, err
 }
 
 // Ask is the stateful counterpart to Run. With a non-empty id, the client's
@@ -1953,6 +1962,7 @@ func (c *Client) StreamWithID(ctx context.Context, prompt string, tk *Toolkit, i
 		var sideMu sync.Mutex
 		sideOpen := true
 		defer func() { sideMu.Lock(); sideOpen = false; sideMu.Unlock() }()
+		dctx, _ = withAgentFiles(dctx)
 		dctx = withStreamSide(dctx, func(ev StreamEvent) {
 			sideMu.Lock()
 			defer sideMu.Unlock()
@@ -2213,6 +2223,7 @@ func (c *Client) streamOpenAI(ctx context.Context, prompt any, tk *Toolkit, hist
 			u := usage
 			ch <- StreamEvent{Type: "usage", Usage: &u}
 			res := c.endRun(lastModel, runStart, rec.final(text), messages, toolCalls, turns, usage)
+			withAgentFilesResult(ctx, &res)
 			ch <- StreamEvent{Type: "done", Result: &res, Usage: &u}
 			return nil
 		}
@@ -2296,6 +2307,7 @@ func (c *Client) streamOpenAI(ctx context.Context, prompt any, tk *Toolkit, hist
 			if haltedAt[i] != nil {
 				res := c.pendingRun(lastModel, runStart, *haltedAt[i], messages, toolCalls, turns, usage)
 				u := usage
+				withAgentFilesResult(ctx, &res)
 				ch <- StreamEvent{Type: "done", Result: &res, Usage: &u}
 				return nil
 			}
@@ -2307,6 +2319,7 @@ func (c *Client) streamOpenAI(ctx context.Context, prompt any, tk *Toolkit, hist
 	}
 	res := c.endRunExhausted(lastModel, runStart, lastText(messages), messages, toolCalls, turns, usage)
 	u := usage
+	withAgentFilesResult(ctx, &res)
 	ch <- StreamEvent{Type: "done", Result: &res, Usage: &u}
 	return nil
 }
@@ -2551,6 +2564,7 @@ func (c *Client) streamAnthropic(ctx context.Context, prompt any, tk *Toolkit, h
 			u := usage
 			ch <- StreamEvent{Type: "usage", Usage: &u}
 			res := c.endRun(lastModel, runStart, text, messages, toolCalls, turns, usage)
+			withAgentFilesResult(ctx, &res)
 			ch <- StreamEvent{Type: "done", Result: &res, Usage: &u}
 			return nil
 		}
@@ -2618,6 +2632,7 @@ func (c *Client) streamAnthropic(ctx context.Context, prompt any, tk *Toolkit, h
 				messages = append(messages, map[string]any{"role": "user", "content": resultBlocks})
 				res := c.pendingRun(lastModel, runStart, *haltedAt[i], messages, toolCalls, turns, usage)
 				u := usage
+				withAgentFilesResult(ctx, &res)
 				ch <- StreamEvent{Type: "done", Result: &res, Usage: &u}
 				return nil
 			}
@@ -2630,6 +2645,7 @@ func (c *Client) streamAnthropic(ctx context.Context, prompt any, tk *Toolkit, h
 	}
 	res := c.endRunExhausted(lastModel, runStart, "", messages, toolCalls, turns, usage)
 	u := usage
+	withAgentFilesResult(ctx, &res)
 	ch <- StreamEvent{Type: "done", Result: &res, Usage: &u}
 	return nil
 }

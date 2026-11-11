@@ -58,7 +58,8 @@
             [koine.env :as env]
             [koine.process :as proc]
             [koine.time :as ktime]
-            [toolnexus.builtin :as builtin]))
+            [toolnexus.builtin :as builtin]
+            [toolnexus.content :as content]))
 
 ;; ---------------------------------------------------------------------------
 ;; config
@@ -113,24 +114,67 @@
 (defn- msg-role [m]
   (str (or (:role m) (get m "role") "user")))
 
-(defn- part-text
-  "One element of a multimodal `:content` list rendered as text."
-  [p]
-  (cond
-    (string? p) p
-    (map? p)    (str (or (:text p) (get p "text") ""))
-    :else       ""))
+(defn- g
+  "`k` from a map read with keyword OR string keys."
+  [m k]
+  (when (map? m) (let [v (get m k)] (if (some? v) v (get m (name k))))))
 
-(defn- msg-text
-  "A message's `:content` (string, a list of parts, or absent) as plain
-  text."
+(defn- base64-data-url
+  "`data:<mime>;base64,<payload>` with a non-empty mime -> {:mimeType :data};
+  anything else (no `;base64`, no mime) is not a data URL (SPEC §8C)."
+  [u]
+  (when (str/starts-with? u "data:")
+    (let [comma (str/index-of u ",")
+          meta  (when comma (subs u 5 comma))]
+      (when (and meta (str/ends-with? meta ";base64"))
+        (let [mime (subs meta 0 (- (count meta) 7))]
+          (when-not (= "" mime)
+            {:mimeType mime :data (subs u (inc comma))}))))))
+
+(defn- wire-part
+  "One OpenAI chat content block read back into a §1B part (Go acpWirePart),
+  or nil when it is not one: text -> text part; image_url data URL -> image
+  part (any other URL -> url-only image part); input_audio -> audio part
+  (mp3 -> audio/mpeg); file with a data-URL file_data -> part by mime, named
+  by filename."
+  [blk]
+  (case (str (g blk :type))
+    "text"        {:type "text" :text (str (g blk :text))}
+    "image_url"   (let [u (str (g (g blk :image_url) :url))
+                        p (base64-data-url u)]
+                    (cond
+                      p           (assoc p :type "image")
+                      ;; URL-only: an EMPTY mimeType, never inferred (SPEC §8C).
+                      (not= "" u) {:type "image" :mimeType "" :url u}
+                      :else       nil))
+    "input_audio" (let [a    (g blk :input_audio)
+                        mime (str "audio/" (g a :format))]
+                    {:type "audio" :mimeType (if (= "audio/mp3" mime) "audio/mpeg" mime)
+                     :data (str (g a :data))})
+    "file"        (let [f (g blk :file)
+                        p (base64-data-url (str (g f :file_data)))]
+                    (when p
+                      (cond-> (assoc p :type (content/part-type-for-mime (:mimeType p)))
+                        (not (str/blank? (str (g f :filename)))) (assoc :name (str (g f :filename))))))
+    nil))
+
+(defn- flatten-content
+  "A message's `:content` as [text media-parts] (Go acpFlattenMessage): a
+  string as-is; a parts list renders text parts as text and each media part as
+  its §1B description — the part itself travels as a native ACP block, its
+  base64 never enters the text; pieces join with \n. Anything else is
+  JSON-encoded."
   [m]
-  (let [c (or (:content m) (get m "content"))]
+  (let [c (g m :content)]
     (cond
-      (string? c)     c
-      (sequential? c) (str/join "" (map part-text c))
-      (nil? c)        ""
-      :else           (json/write-str c))))
+      (string? c)     [c []]
+      (nil? c)        ["" []]
+      (sequential? c) (let [ps (map (fn [item] (or (wire-part item) (json/write-str item))) c)]
+                        [(str/join "\n" (map (fn [p] (if (map? p) (content/summarize-part p) (str p))) ps))
+                         (filterv #(and (map? %) (not= "text" (:type %))) ps)])
+      :else           [(json/write-str c) []])))
+
+(defn- msg-text [m] (first (flatten-content m)))
 
 (defn assemble-prompt-text
   "Flatten `messages` into \"role: content\" lines — the FULL request, every
@@ -191,13 +235,33 @@
            (reply-outcome! client (:id req) chosen))))
       (reply-outcome! client (:id req) (first-option-of-kind options "allow")))))
 
-(defn- tool-content-text
-  "The text of a tool_call_update's content blocks, concatenated (Go
-  acpToolContentText)."
-  [content]
-  (if (sequential? content)
-    (str/join "" (map #(str (get-in % [:content :text])) content))
-    ""))
+(defn- block-part
+  "An ACP image/audio ContentBlock {type mimeType data uri?} as a §1B part (Go
+  acpBlockPart): data wins, else a uri-only url part; anything else is nil."
+  [blk]
+  (when (and (map? blk) (contains? #{"image" "audio"} (:type blk)))
+    (cond
+      (not (str/blank? (str (:data blk)))) {:type (:type blk) :mimeType (:mimeType blk) :data (:data blk)}
+      (not (str/blank? (str (:uri blk))))  {:type (:type blk) :mimeType (:mimeType blk) :url (:uri blk)}
+      :else nil)))
+
+(defn- describe-parts [parts] (str/join "\n" (map content/summarize-part parts)))
+
+(defn- tool-content
+  "A tool_call_update's content [{type content, content ContentBlock}, ...] as
+  [output parts] (Go acpToolContent): text blocks concatenate into output,
+  image/audio blocks become parts; with no text the output is the parts'
+  §1B description."
+  [items]
+  (let [items (if (sequential? items) items [])
+        parts (vec (keep #(block-part (:content %)) items))
+        out   (str/join "" (map #(if (block-part (:content %)) "" (str (get-in % [:content :text]))) items))]
+    [(if (and (= "" out) (seq parts)) (describe-parts parts) out) parts]))
+
+(defn- run-file
+  "One inbound part as a RunResult.files entry."
+  [p from call-id]
+  (assoc p :from from :callId (or call-id "")))
 
 (defn- stream-update!
   "Hand one session/update to the CURRENT turn's emitter (if any), as it is
@@ -220,6 +284,12 @@
       (swap! st assoc-in [:tool-names id] (if (str/blank? (str (:title upd))) (:kind upd) (:title upd))))
     (when (and (= "tool_call_update" kind) (not (str/blank? (str (:title upd)))))
       (swap! st assoc-in [:tool-names id] (:title upd)))
+    (let [final?   (and (= "tool_call_update" kind) (contains? #{"completed" "failed"} (:status upd)))
+          [out tp] (when final? (tool-content (:content upd)))]
+    ;; inbound media files are collected even with no emitter (a plain run)
+    (when final?
+      (let [nm (get-in @st [:tool-names id])]
+        (swap! st update :files into (map #(run-file % nm id) tp))))
     (when-let [emit (:emit @st)]
       (let [txt (get-in upd [:content :text])
             ev  (case (str kind)
@@ -233,13 +303,14 @@
                                             (and (map? args) (seq args))
                                             (conj {:type "tool_call_args" :id id :name nm
                                                    :args args :via "acp"})
-                                            (contains? #{"completed" "failed"} (:status upd))
-                                            (conj {:type "tool_result" :id id :name nm
-                                                   :output (tool-content-text (:content upd))
-                                                   :isError (= "failed" (:status upd)) :via "acp"})))
+                                            final?
+                                            (conj (cond-> {:type "tool_result" :id id :name nm
+                                                           :output out
+                                                           :isError (= "failed" (:status upd)) :via "acp"}
+                                                    (seq tp) (assoc :parts tp)))))
                   nil)]
         (doseq [e (if (sequential? ev) ev (when ev [ev]))]
-          (try (emit e) (catch Throwable _ nil)))))))
+          (try (emit e) (catch Throwable _ nil))))))))
 
 (defn- route!
   "Dispatch one parsed JSON-RPC line from the child:
@@ -261,7 +332,11 @@
       (when-let [on (:on-update client)]
         (try (on (:params msg)) (catch Throwable _ nil)))
       (when (= "agent_message_chunk" (:sessionUpdate upd))
-        (swap! (:state client) update :chunks conj (get-in upd [:content :text])))
+        (if-let [mp (block-part (:content upd))]
+          ;; an image/audio chunk is a part, never text (SPEC §8C ACP content parts)
+          (swap! (:state client) #(-> % (update :message-parts conj mp)
+                                      (update :files conj (run-file mp "acp" ""))))
+          (swap! (:state client) update :chunks conj (get-in upd [:content :text]))))
       (stream-update! client upd))
 
     (and (= "session/request_permission" (:method msg)) (some? (:id msg)))
@@ -494,7 +569,8 @@
                        {:cwd cwd})))
      (let [env-map    (merge (or environment {}) (or env {}))
            [child pidfile] (spawn-agent! (vec command) cwd env-map)
-           state      (atom {:inbox {} :closed? false :close-reason nil :chunks []})
+           state      (atom {:inbox {} :closed? false :close-reason nil :chunks []
+                              :files [] :message-parts []})
            write-lock (atom false)
            client     {:child               child
                        :pidfile             pidfile
@@ -503,6 +579,7 @@
                        :prompt-lock         (atom false)
                        :id-counter          (atom 0)
                        :session-id          nil
+                       :prompt-caps         (atom {})
                        :timeout-ms          timeout-ms
                        :permission-timeout-ms permission-timeout-ms
                        :on-permission       on-permission
@@ -520,6 +597,11 @@
                            (catch Throwable e {:error (ex-message e)}))]
          (when (:error init-res)
            (kill-and-throw! client "initialize" init-res))
+         ;; which non-text ContentBlocks session/prompt may carry (absent => false)
+         (let [pc (get-in init-res [:ok :agentCapabilities :promptCapabilities])]
+           (reset! (:prompt-caps client) {:image           (true? (:image pc))
+                                          :audio           (true? (:audio pc))
+                                          :embeddedContext (true? (:embeddedContext pc))}))
          (let [new-res (call! client "session/new"
                               (cond-> {:cwd cwd :mcpServers (vec (or mcp-servers []))}
                                 session-meta (assoc :_meta session-meta)))]
@@ -563,25 +645,47 @@
 ;; prompt / generate
 ;; ---------------------------------------------------------------------------
 
+(defn- prompt-blocks
+  "The session/prompt ContentBlocks (Go promptBlocks): the text block, then one
+  native block per media part with data the agent advertised support for."
+  [client text parts]
+  (let [caps @(:prompt-caps client)]
+    (into [{:type "text" :text text}]
+          (keep (fn [p]
+                  (when-not (str/blank? (str (:data p)))
+                    (cond
+                      (and (= "image" (:type p)) (:image caps))
+                      {:type "image" :mimeType (:mimeType p) :data (:data p)}
+                      (and (= "audio" (:type p)) (:audio caps))
+                      {:type "audio" :mimeType (:mimeType p) :data (:data p)}
+                      (and (= "file" (:type p)) (:embeddedContext caps))
+                      {:type "resource"
+                       :resource {:uri (str "attachment:///" (if (str/blank? (str (:name p))) "attachment" (:name p)))
+                                  :mimeType (:mimeType p) :blob (:data p)}}))))
+          parts)))
+
 (defn- send-prompt!
   "One session/prompt turn, accumulating only agent_message_chunk text.
   Not serialised itself — the caller (`prompt`) holds :prompt-lock for the
-  whole call, matching golang/acp.go's `promptMu`."
-  [client text emit]
+  whole call, matching golang/acp.go's `promptMu`. {:ok text :files [...]}."
+  [client text parts emit]
   (if (:closed? @(:state client))
     {:error (if (= "peer-eof" (:close-reason @(:state client)))
               "agent exited before replying to session/prompt"
               (or (:close-reason @(:state client)) "closed"))}
     (let [id (next-id! (:id-counter client))]
-      (swap! (:state client) assoc :chunks [] :emit emit :tool-names {})
+      (swap! (:state client) assoc :chunks [] :emit emit :tool-names {} :files [] :message-parts [])
       (send-msg! client {:jsonrpc "2.0" :id id :method "session/prompt"
                          :params {:sessionId (:session-id client)
-                                  :prompt    [{:type "text" :text text}]}})
+                                  :prompt    (prompt-blocks client text parts)}})
       (let [res (unwrap-reply (await-reply! client id "session/prompt" (:permission-timeout-ms client)))]
         (swap! (:state client) #(-> % (update :inbox dissoc id) (assoc :emit nil)))
         (if (:error res)
           res
-          {:ok (str/join "" (:chunks @(:state client)))})))))
+          (let [s    @(:state client)
+                text (str/join "" (:chunks s))]
+            {:ok    (if (and (= "" text) (seq (:message-parts s))) (describe-parts (:message-parts s)) text)
+             :files (:files s)}))))))
 
 (defn prompt
   "Send one turn's FULL prompt text and wait for the accumulated
@@ -589,8 +693,9 @@
   {:ok content} or {:error reason}. With `emit`, every session/update of the
   turn is also handed to it AS IT ARRIVES (see `stream-update!`)."
   ([client text] (prompt client text nil))
-  ([client text emit]
-   (with-lock! (:prompt-lock client) (fn [] (send-prompt! client text emit)))))
+  ([client text emit] (prompt client text [] emit))
+  ([client text parts emit]
+   (with-lock! (:prompt-lock client) (fn [] (send-prompt! client text parts emit)))))
 
 (defn generate-stream
   "Build a streaming semantic generate — (fn [req emit] -> {:content ...}) —
@@ -601,12 +706,14 @@
   `generate` on an ACP-level failure."
   [client]
   (fn [req emit]
-    (let [text (assemble-prompt-text (:messages req))
-          res  (prompt client text emit)]
+    (let [text  (assemble-prompt-text (:messages req))
+          parts (vec (mapcat #(second (flatten-content %)) (:messages req)))
+          res   (prompt client text parts emit)]
       (if (:error res)
         (throw (ex-info (str "toolnexus: acp: generate failed: " (pr-str (:error res)))
                         {:acp-error (:error res)}))
-        {:content (:ok res)}))))
+        (cond-> {:content (:ok res)}
+          (seq (:files res)) (assoc :files (:files res)))))))
 
 (defn generate
   "Build a semantic `generate` fn — (fn [req] -> {:content ...}) — backed by

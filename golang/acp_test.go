@@ -128,9 +128,16 @@ func runACPFakeServer() {
 
 		switch msg.Method {
 		case "initialize":
+			caps := map[string]any{"loadSession": false}
+			switch scenario {
+			case "image":
+				caps["promptCapabilities"] = map[string]any{"image": true}
+			case "media":
+				caps["promptCapabilities"] = map[string]any{"image": true, "audio": true, "embeddedContext": true}
+			}
 			reply(msg.ID, map[string]any{
 				"protocolVersion":   1,
-				"agentCapabilities": map[string]any{"loadSession": false},
+				"agentCapabilities": caps,
 			})
 
 		case "session/new":
@@ -151,6 +158,11 @@ func runACPFakeServer() {
 				} `json:"prompt"`
 			}
 			_ = json.Unmarshal(msg.Params, &params)
+			var rawPrompt struct {
+				Prompt []any `json:"prompt"`
+			}
+			_ = json.Unmarshal(msg.Params, &rawPrompt)
+			emit(acpEvent{Type: "prompt_blocks", Data: map[string]any{"prompt": rawPrompt.Prompt}})
 			var text strings.Builder
 			for _, p := range params.Prompt {
 				text.WriteString(p.Text)
@@ -221,6 +233,10 @@ func runACPFakeServer() {
 					reply(id, map[string]any{"stopReason": "end_turn"})
 					atomic.StoreInt32(&busy, 0)
 				}()
+			case "image_out":
+				// The agent's own tool returns an image, then the agent
+				// replies with text and an image of its own (inbound blocks).
+				acpHandleImageOutForTest(sendNotification, reply, id, sid)
 			default: // warm
 				sendNotification("session/update", map[string]any{
 					"sessionId": sid,

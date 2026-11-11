@@ -4345,6 +4345,54 @@ Wire behaviour:
 - Permission requests go to the caller's permission hook (default: first allow-kind option, as in §8).
   Which agent tools to allow is policy, and policy belongs to the caller.
 
+#### ACP content parts (§1B over ACP; `openspec/changes/fix-acp-image-parts`)
+
+**Outbound (`session/prompt`).**
+
+- At `initialize` the client reads `agentCapabilities.promptCapabilities {image, audio,
+  embeddedContext}` (each absent ⇒ `false`). Text is always allowed.
+- Every message's content is flattened into **one** text block (the usual `role: content` lines +
+  supersedes marker). A text part renders as its text; each non-text part renders **in its place** as
+  its §1B description `<type> (<mimeType>, <N> bytes)` (N = decoded byte count; e.g.
+  `image (image/png, 67 bytes)`), parts joined by `\n`. **Base64 never appears inside a text block.**
+- Reading the OpenAI chat content array the seam receives: `text` ⇒ its text; `image_url` with a
+  base64 data URL ⇒ image part; `image_url` with any other URL (including a non-base64 `data:` URL)
+  ⇒ URL-only image part with an **empty** `mimeType` — never inferred from the URL — so its
+  description is `image (, 0 bytes)`; `input_audio` ⇒ audio part `audio/<format>` (`mp3` ⇒
+  `audio/mpeg`); `file` whose `file_data` is a base64 data URL ⇒ a part typed **by its mime**
+  (`image/*` ⇒ image, `audio/*` ⇒ audio, else file) with `name` = `filename`. Any other item renders
+  as its JSON. A data URL is accepted only as `data:<mime>;base64,<payload>` with a non-empty
+  `<mime>`; anything else is not a data URL.
+- `prompt` = `[ {type:"text", text}, …one block per non-text part, in message order… ]`:
+  - image part with `data`, `image` advertised ⇒ `{type:"image", mimeType, data}`;
+  - audio part with `data`, `audio` advertised ⇒ `{type:"audio", mimeType, data}`;
+  - file part with `data`, `embeddedContext` advertised ⇒ `{type:"resource", resource:{uri:
+    "attachment:///<name>", mimeType, blob:data}}` (`<name>` = the part's `name`, else `attachment`);
+  - anything else — capability not advertised, or a URL-only part (no `data`) — gets **no block**;
+    it reaches the agent only as its description in the text.
+
+**Inbound (session updates).**
+
+- An ACP `image` / `audio` ContentBlock (`{type, mimeType, data, uri?}`) becomes a §1B part: `data`
+  set ⇒ `{type, mimeType, data}`; else `uri` set ⇒ `{type, mimeType, url:uri}`; neither ⇒ ignored.
+  Other block types are not parts.
+- **Completed/failed `tool_call_update`** — `content` is `[{type:"content", content:ContentBlock}, …]`.
+  Text blocks concatenate into `output` with **no separator** (unlike the outbound `\n` join);
+  image/audio blocks become the `tool_result` event's `parts`
+  (in order). With no text, `output` = the parts' §1B descriptions joined by `\n` (the §0.4 MCP rule).
+  Each part is also a `RunResult.files` entry with `from` = the tool call's current name (its
+  `title`, else `kind`, renamed by a later non-empty `title`) and `callId` = the `toolCallId`.
+  The event's `parts` are full §1B parts **with `data`** (as in `RunResult.files`): a stream event
+  is a value handed to the host, not a log line, so the §8 "never render `data`" rule (logs,
+  observability events, error text) does not strip it.
+- **`agent_message_chunk`** carrying an image/audio block is never answer text: it becomes a
+  `RunResult.files` entry with `from:"acp"`, `callId:""`. If the turn's answer text is empty and the
+  agent sent such parts, the answer is their §1B descriptions joined by `\n`.
+- These files travel out of the in-process seam as the response's `files`
+  (`InProcessResponse.Files` in Go) and are appended to `RunResult.files` **after** the files of the
+  client's own tool calls, in arrival order — for `run` and for `stream`'s `done` result alike.
+  `toolCalls` / `toolCallCount` are unchanged (agent-side tool calls are not client tool calls).
+
 ### `toolkit.asMcpServer(config?) -> { url, token, close() }`
 
 Serves the toolkit for a local agent to call, built on the §7C server (same tool mapping, same

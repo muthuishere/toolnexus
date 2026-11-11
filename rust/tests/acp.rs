@@ -391,6 +391,7 @@ async fn generate_stream_emits_text_and_agent_tool_events_via_acp() {
                 id: "t1".into(),
                 name: "Read file".into(),
                 output: "file body".into(),
+                parts: vec![],
                 is_error: false,
                 via: "acp"
             },
@@ -404,6 +405,7 @@ async fn generate_stream_emits_text_and_agent_tool_events_via_acp() {
                 id: "t2".into(),
                 name: "execute".into(),
                 output: "boom".into(),
+                parts: vec![],
                 is_error: true,
                 via: "acp"
             },

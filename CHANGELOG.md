@@ -8,6 +8,24 @@ GitHub Releases `vX.Y.Z` via `release.yml` (see `PUBLISHING.md`).
 
 ## Unreleased
 
+**Fix: images now reach, and come back from, an ACP agent.** Before, a picture you sent through the
+ACP model source (`loadACP`) was JSON-encoded, base64 and all, into the prompt text, so the agent
+never saw an image and the prompt ballooned; and an image the agent sent back, from its own tool or
+in its reply, was read as text and silently dropped. Now `session/prompt` carries a native `image`
+/ `audio` block (or a `resource` block for a file) whenever the agent advertises that capability at
+`initialize`, and otherwise names the part in the text as `image (image/png, 67 bytes)`, with no
+base64 in any text. Images the agent returns become real parts: on the `tool_result` stream event
+and in `RunResult.files` (`from` = the agent's tool name, or `"acp"` for an image in the reply). All
+eight ports; contract in SPEC §8C "ACP content parts", tracked in `openspec/changes/fix-acp-image-parts`.
+
+**BREAKING (rust only):** `AcpStreamEvent::ToolResult` gained a `parts` field and `InProcessResponse`
+gained `files`, so code that builds either with every field spelled out must add them. New:
+`AcpClient::generate_turn` returns the reply text plus the agent's files.
+
+**Not done:** an image given only as a URL (no inline data) is never sent as a block, because an ACP
+image block needs the bytes; it is described in the text as `image (, 0 bytes)`. A `data:` URL with
+extra parameters (`;charset=…;base64`) is not pinned and may be typed differently per port.
+
 ## 0.29.1 — 2026-11-09
 
 **Fix: Grok CLI videos honour `seconds` and are no longer ~1 second long.** In 0.29.0 the

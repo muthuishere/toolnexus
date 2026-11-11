@@ -572,15 +572,19 @@
           prompt  (or (:prompt-tokens usage) (:prompt_tokens usage) 0)
           compl   (or (:completion-tokens usage) (:completion_tokens usage) 0)
           total   (or (:total-tokens usage) (:total_tokens usage) (+ prompt compl))]
-      {:status 200
-       :headers {"content-type" "application/json"}
-       :body (json/write-str
-              {:choices [{:index 0
-                          :message message
-                          :finish_reason (if (seq calls) "tool_calls" "stop")}]
-               :usage {:prompt_tokens prompt
-                       :completion_tokens compl
-                       :total_tokens total}})}))))
+      (cond-> {:status 200
+               :headers {"content-type" "application/json"}
+               :body (json/write-str
+                      {:choices [{:index 0
+                                  :message message
+                                  :finish_reason (if (seq calls) "tool_calls" "stop")}]
+                       :usage {:prompt_tokens prompt
+                               :completion_tokens compl
+                               :total_tokens total}})}
+        ;; agent-side files (an ACP agent's own tool results / media chunks)
+        ;; are not this loop's tool calls: they bypass the wire and reach
+        ;; RunResult.files through the run's sink (see post-llm).
+        (seq (:files answer)) (assoc ::agent-files (vec (:files answer))))))))
 
 (defn- stream-emitter
   "The `emit` handed to a `:generate-stream` fn: every non-empty `text` event
@@ -1041,6 +1045,8 @@
     (- d (ktime/now-ms))
     (:timeout-ms client)))
 
+(declare post-llm*)
+
 (defn- post-llm
   "The one HTTP call. `:http-client` lets a host supply the transport — for a
   proxy, mTLS, or credentials this library must never see — and it takes the
@@ -1049,6 +1055,13 @@
 
   Scope is the LLM path only, per the capability spec: MCP transports are their
   own seam and are NOT routed through this."
+  [client url headers body]
+  (let [resp (post-llm* client url headers body)]
+    (when-let [fs (and (map? resp) (seq (::agent-files resp)))]
+      (when-let [sink (::agent-files client)] (swap! sink into fs)))
+    resp))
+
+(defn- post-llm*
   [client url headers body]
   (if-let [sf (::stream-http-client client)]
     ;; an in-process :generate-stream: the run's :on-event sink rides along so
@@ -1878,6 +1891,15 @@
 ;; RunResult
 ;; ---------------------------------------------------------------------------
 
+(declare run-files)
+
+(defn- result-files
+  "RunResult.files: the run's own tool-call files first, then any agent-side
+  files an in-process model reported (an ACP agent's tool results and media
+  chunks, SPEC §8C)."
+  [client tool-calls]
+  (into (run-files tool-calls) (some-> (::agent-files client) deref)))
+
 (defn run-files
   "§8 `RunResult.files` — every non-text part the run's tool calls produced, in
   call order, each tagged `:from` (tool name) and `:callId` (the model's
@@ -1895,7 +1917,7 @@
     (cond-> {:text text
              :messages messages
              :tool-calls tool-calls
-             :files (run-files tool-calls)
+             :files (result-files client tool-calls)
              :tool-call-count (count tool-calls)
              :turns turns
              :usage usage
@@ -1912,7 +1934,7 @@
   {:text (:error err)
    :messages messages
    :tool-calls tool-calls
-   :files (run-files tool-calls)
+   :files (result-files client tool-calls)
    :tool-call-count (count tool-calls)
    :turns turns
    :usage usage
@@ -1925,7 +1947,7 @@
   {:text (:prompt request)
    :messages messages
    :tool-calls tool-calls
-   :files (run-files tool-calls)
+   :files (result-files client tool-calls)
    :tool-call-count (count tool-calls)
    :turns turns
    :usage usage
@@ -2055,7 +2077,9 @@
                      ;; SPEC §4C: the run's cancel token, for wait-for-ctx and tools
                      cancel (assoc ::cancel cancel)
                      ;; an in-process :generate-stream emits into this sink
-                     on-event (assoc ::on-event on-event))
+                     on-event (assoc ::on-event on-event)
+                     ;; agent-side files an in-process model reports (SPEC §8C)
+                     true (assoc ::agent-files (atom [])))
         anthropic? (= "anthropic" (:style client))
         system     (system-message client toolkit)
         ;; §0.7 schema comes from toolnexus.adapter — one source of truth for

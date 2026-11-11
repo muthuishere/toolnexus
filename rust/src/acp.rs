@@ -37,6 +37,10 @@ use tokio::process::{ChildStdin, Command};
 use tokio::sync::{Mutex, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
+use crate::client::RunFile;
+use crate::mcp::describe_part;
+use crate::tool::ContentPart;
+
 /// The marker [`AcpClient::generate`] appends, naming the latest user turn as
 /// superseding everything earlier in the (stateful) session — same text as Go.
 pub const SUPERSEDES_MARKER: &str = "SUPERSEDES-ALL-PRIOR:";
@@ -133,13 +137,33 @@ pub enum AcpStreamEvent {
         args: Value,
         via: &'static str,
     },
+    /// `parts`: the result's image/audio blocks as §1B parts (SPEC §8C); with
+    /// no text, `output` is their descriptions.
     ToolResult {
         id: String,
         name: String,
         output: String,
+        parts: Vec<ContentPart>,
         is_error: bool,
         via: &'static str,
     },
+}
+
+/// One [`AcpClient::generate_turn`]: the reply text and every inbound media
+/// part as a `RunResult.files` entry, in arrival order (SPEC §8C).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct AcpTurn {
+    pub text: String,
+    pub files: Vec<RunFile>,
+}
+
+/// The agent's `initialize` `agentCapabilities.promptCapabilities`: which
+/// non-text blocks `session/prompt` may carry (absent ⇒ false).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PromptCaps {
+    pub image: bool,
+    pub audio: bool,
+    pub embedded_context: bool,
 }
 
 /// Async host permission handler.
@@ -315,6 +339,7 @@ pub struct AcpClient {
     request_timeout: Duration,
     permission_timeout: Duration,
     agent_info: Value,
+    prompt_caps: PromptCaps,
     pid: Option<u32>,
 }
 
@@ -395,6 +420,7 @@ impl AcpClient {
             request_timeout: opts.request_timeout,
             permission_timeout: opts.permission_timeout,
             agent_info: Value::Null,
+            prompt_caps: PromptCaps::default(),
             pid,
         };
         let mut caps = json!({
@@ -420,6 +446,16 @@ impl AcpClient {
                 client.close().await;
                 return Err(e);
             }
+        };
+        let cap = |k: &str| {
+            init.pointer(&format!("/agentCapabilities/promptCapabilities/{k}"))
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+        };
+        client.prompt_caps = PromptCaps {
+            image: cap("image"),
+            audio: cap("audio"),
+            embedded_context: cap("embeddedContext"),
         };
         client.agent_info = init;
         let mut session_new = json!({"cwd": cwd.to_string_lossy(), "mcpServers": opts.mcp_servers});
@@ -535,6 +571,41 @@ impl AcpClient {
     /// The session id from `session/new`.
     pub fn session_id(&self) -> &str {
         &self.session_id
+    }
+
+    /// The agent's advertised `promptCapabilities`.
+    pub fn prompt_caps(&self) -> PromptCaps {
+        self.prompt_caps
+    }
+
+    /// The `session/prompt` blocks for `text` + media `parts` (SPEC §8C): the
+    /// text block, then one native block per part with data that the agent
+    /// advertised support for. Any other part is named only by its
+    /// description in the text.
+    pub fn prompt_content(&self, text: &str, parts: &[ContentPart]) -> Vec<Value> {
+        let caps = self.prompt_caps;
+        let mut blocks = vec![json!({"type": "text", "text": text})];
+        for p in parts.iter().filter(|p| !p.data.is_empty()) {
+            match p.kind.as_str() {
+                "image" if caps.image => {
+                    blocks.push(json!({"type": "image", "mimeType": p.mime_type, "data": p.data}))
+                }
+                "audio" if caps.audio => {
+                    blocks.push(json!({"type": "audio", "mimeType": p.mime_type, "data": p.data}))
+                }
+                "file" if caps.embedded_context => {
+                    let name = if p.name.is_empty() {
+                        "attachment"
+                    } else {
+                        &p.name
+                    };
+                    blocks.push(json!({"type": "resource", "resource": {
+                        "uri": format!("attachment:///{name}"), "mimeType": p.mime_type, "blob": p.data}}));
+                }
+                _ => {}
+            }
+        }
+        blocks
     }
 
     /// The agent's `initialize` result (protocol version, capabilities, agentInfo).
@@ -664,13 +735,36 @@ impl AcpClient {
         &self,
         messages: &[(String, String)],
         cancel: &CancellationToken,
-        mut emit: F,
+        emit: F,
     ) -> Result<String, AcpError>
     where
         F: FnMut(AcpStreamEvent),
     {
-        let mut turn = self.prompt(&render_prompt(messages)).await?;
+        Ok(self
+            .generate_turn(&render_prompt(messages), &[], cancel, emit)
+            .await?
+            .text)
+    }
+
+    /// [`generate_stream`](Self::generate_stream) over an already-rendered
+    /// prompt `text` plus its media `parts` (sent as native blocks per
+    /// [`prompt_content`](Self::prompt_content)). Inbound image/audio blocks —
+    /// in a completed/failed tool call's content or as a message chunk —
+    /// become [`AcpTurn::files`] (SPEC §8C); they never enter the text.
+    pub async fn generate_turn<F>(
+        &self,
+        text: &str,
+        parts: &[ContentPart],
+        cancel: &CancellationToken,
+        mut emit: F,
+    ) -> Result<AcpTurn, AcpError>
+    where
+        F: FnMut(AcpStreamEvent),
+    {
+        let mut turn = self.prompt_blocks(self.prompt_content(text, parts)).await?;
         let mut names: HashMap<String, String> = HashMap::new();
+        let mut files: Vec<RunFile> = Vec::new();
+        let mut message_parts: Vec<ContentPart> = Vec::new();
         let mut cancelled = false;
         loop {
             let u = tokio::select! {
@@ -695,7 +789,10 @@ impl AcpClient {
             let (id, title) = (field("toolCallId"), field("title"));
             match u.kind.as_str() {
                 "agent_message_chunk" => {
-                    if let Some(t) = u.text().filter(|t| !t.is_empty()) {
+                    if let Some(p) = u.update.get("content").and_then(block_part) {
+                        files.push(run_file(&p, "acp", ""));
+                        message_parts.push(p);
+                    } else if let Some(t) = u.text().filter(|t| !t.is_empty()) {
                         emit(AcpStreamEvent::Text {
                             delta: t.to_owned(),
                         });
@@ -747,10 +844,14 @@ impl AcpClient {
                     if status != "completed" && status != "failed" {
                         continue;
                     }
+                    let (output, tparts) =
+                        tool_content(u.update.get("content").unwrap_or(&Value::Null));
+                    files.extend(tparts.iter().map(|p| run_file(p, &name, &id)));
                     emit(AcpStreamEvent::ToolResult {
                         id,
                         name,
-                        output: tool_content_text(u.update.get("content").unwrap_or(&Value::Null)),
+                        output,
+                        parts: tparts,
                         is_error: status == "failed",
                         via: "acp",
                     });
@@ -762,7 +863,11 @@ impl AcpClient {
             let _ = tokio::time::timeout(self.request_timeout, turn.finish()).await;
             return Err(AcpError::Cancelled);
         }
-        Ok(turn.finish().await?.text)
+        let mut text = turn.finish().await?.text;
+        if text.is_empty() && !message_parts.is_empty() {
+            text = describe_parts(&message_parts);
+        }
+        Ok(AcpTurn { text, files })
     }
 
     /// Ask the agent to stop the running turn (`session/cancel`). The turn then
@@ -1037,26 +1142,70 @@ fn first_reject(options: &[PermissionOption]) -> PermissionOutcome {
         .unwrap_or(PermissionOutcome::Cancelled)
 }
 
-/// The text of a tool call's `content` (ACP tool content
-/// `[{type:"content", content:{type:"text", text}}]`, or bare text blocks), joined by newlines.
-fn tool_content_text(v: &Value) -> String {
-    match v {
-        Value::Array(items) => items
-            .iter()
-            .map(tool_content_text)
-            .filter(|s| !s.is_empty())
-            .collect::<Vec<_>>()
-            .join("\n"),
-        Value::Object(m) => {
-            if let Some(t) = m.get("text").and_then(Value::as_str) {
-                t.to_owned()
-            } else if let Some(c) = m.get("content") {
-                tool_content_text(c)
-            } else {
-                String::new()
-            }
+/// A tool call's `content` (SPEC §8C): its text blocks, concatenated with no
+/// separator, and its image/audio blocks as parts. With no text, the output is the
+/// parts' descriptions.
+fn tool_content(v: &Value) -> (String, Vec<ContentPart>) {
+    let mut parts = Vec::new();
+    let mut out = String::new();
+    for it in v.as_array().map(Vec::as_slice).unwrap_or_default() {
+        match it.get("content").and_then(block_part) {
+            Some(p) => parts.push(p),
+            // Text blocks concatenate with no separator, as in Go (SPEC §8C).
+            None => out.push_str(
+                it.pointer("/content/text")
+                    .and_then(Value::as_str)
+                    .unwrap_or(""),
+            ),
         }
-        _ => String::new(),
+    }
+    if out.is_empty() && !parts.is_empty() {
+        out = describe_parts(&parts);
+    }
+    (out, parts)
+}
+
+/// An ACP image/audio ContentBlock (`{type, mimeType, data, uri?}`) as a §1B
+/// part: data wins, else a uri-only block is a URL part; anything else is none.
+fn block_part(b: &Value) -> Option<ContentPart> {
+    let kind = b.get("type").and_then(Value::as_str)?;
+    if kind != "image" && kind != "audio" {
+        return None;
+    }
+    let s = |k: &str| b.get(k).and_then(Value::as_str).unwrap_or("").to_owned();
+    let (data, uri) = (s("data"), s("uri"));
+    let mut p = ContentPart {
+        kind: kind.into(),
+        mime_type: s("mimeType"),
+        ..Default::default()
+    };
+    if !data.is_empty() {
+        p.data = data;
+    } else if !uri.is_empty() {
+        p.url = uri;
+    } else {
+        return None;
+    }
+    Some(p)
+}
+
+fn describe_parts(parts: &[ContentPart]) -> String {
+    parts
+        .iter()
+        .map(describe_part)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn run_file(p: &ContentPart, from: &str, call_id: &str) -> RunFile {
+    RunFile {
+        kind: p.kind.clone(),
+        mime_type: p.mime_type.clone(),
+        url: p.url.clone(),
+        data: p.data.clone(),
+        from: from.into(),
+        call_id: call_id.into(),
+        ..Default::default()
     }
 }
 

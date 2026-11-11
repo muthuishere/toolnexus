@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sync"
 )
 
 // ---------------------------------------------------------------------------
@@ -47,6 +48,10 @@ type InProcessResponse struct {
 	Content   string
 	ToolCalls []InProcessToolCall
 	Usage     *InProcessUsage
+	// Files are non-text parts the model produced itself (e.g. an ACP agent's
+	// own tool results and image message chunks). The client appends them to
+	// RunResult.Files after the files of its own tool calls.
+	Files []RunFile
 }
 
 // InProcessOptions is every client option EXCEPT the three that describe a wire —
@@ -114,6 +119,39 @@ func withStreamSide(ctx context.Context, emit func(StreamEvent)) context.Context
 	return context.WithValue(ctx, streamSideKey{}, emit)
 }
 
+// agentFilesKey carries the run's sink for InProcessResponse.Files (files a
+// model produced itself, e.g. an ACP agent's own tools), so they reach
+// RunResult.Files even though they never cross the OpenAI wire.
+type agentFilesKey struct{}
+
+type agentFiles struct {
+	mu    sync.Mutex
+	files []RunFile
+}
+
+func withAgentFiles(ctx context.Context) (context.Context, *agentFiles) {
+	sink := &agentFiles{}
+	return context.WithValue(ctx, agentFilesKey{}, sink), sink
+}
+
+func addAgentFiles(ctx context.Context, files []RunFile) {
+	if sink, ok := ctx.Value(agentFilesKey{}).(*agentFiles); ok && len(files) > 0 {
+		sink.mu.Lock()
+		sink.files = append(sink.files, files...)
+		sink.mu.Unlock()
+	}
+}
+
+// withAgentFilesResult appends the run's agent files to res.Files (after the
+// files of the client's own tool calls).
+func withAgentFilesResult(ctx context.Context, res *RunResult) {
+	if sink, ok := ctx.Value(agentFilesKey{}).(*agentFiles); ok {
+		sink.mu.Lock()
+		res.Files = append(res.Files, sink.files...)
+		sink.mu.Unlock()
+	}
+}
+
 func (rt *inProcessRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
 	var body map[string]any
 	if req.Body != nil {
@@ -148,6 +186,7 @@ func (rt *inProcessRoundTripper) RoundTrip(req *http.Request) (*http.Response, e
 	if err != nil {
 		return nil, err
 	}
+	addAgentFiles(req.Context(), answer.Files)
 
 	message := map[string]any{"role": "assistant"}
 	if len(answer.ToolCalls) > 0 {
@@ -228,6 +267,7 @@ func (rt *inProcessRoundTripper) roundTripStream(req *http.Request, body map[str
 			pw.CloseWithError(err)
 			return
 		}
+		addAgentFiles(req.Context(), answer.Files)
 		finish := "stop"
 		if len(answer.ToolCalls) > 0 {
 			calls := make([]any, 0, len(answer.ToolCalls))

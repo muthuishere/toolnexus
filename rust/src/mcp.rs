@@ -964,7 +964,7 @@ fn content_parts(content: &[Value]) -> Vec<ContentPart> {
     out
 }
 
-fn describe_part(p: &ContentPart) -> String {
+pub(crate) fn describe_part(p: &ContentPart) -> String {
     use base64::Engine as _;
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(&p.data)

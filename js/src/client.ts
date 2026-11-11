@@ -3,6 +3,7 @@
  * ("openai" | "anthropic"), and it runs the tool-calling agent loop against a
  * Toolkit. See ../../SPEC.md §8.
  */
+import { AsyncLocalStorage } from "node:async_hooks"
 import { mediaPartPath } from "./media.js"
 import type { Toolkit } from "./toolkit.js"
 import type { Tool, ToolHints, ToolResult, Request, Answer } from "./types.js"
@@ -465,7 +466,8 @@ export type StreamEvent =
   /** An ACP agent's `tool_call_update` carrying `rawInput`: the call's arguments, known after
    *  the initial `tool_call` (#188). Reported only; never executed by the loop. */
   | { type: "tool_call_args"; id: string; name: string; args: Record<string, unknown>; via: "acp" }
-  | { type: "tool_result"; id: string; name: string; output: string; isError: boolean; metadata?: Record<string, unknown>; via?: "call_tool" | "acp" }
+  /** `parts`: the result's non-text output (§1B), e.g. an image an ACP agent's own tool returned. */
+  | { type: "tool_result"; id: string; name: string; output: string; isError: boolean; parts?: ContentPart[]; metadata?: Record<string, unknown>; via?: "call_tool" | "acp" }
   | { type: "usage"; usage: Usage }
   /** Only with `fallbackModels`: switching from model `from` to `to` after overload (§8). */
   | { type: "fallback"; from: string; to: string }
@@ -744,9 +746,13 @@ export class Client {
    */
   async run(prompt: PromptInput, ctx?: { toolkit?: Toolkit; signal?: AbortSignal; history?: any[] }): Promise<RunResult> {
     checkPromptParts(prompt, this.wireOpts())
-    return this.opts.style === "anthropic"
+    const agentFiles: RunFile[] = []
+    const r = await agentFilesSink.run(agentFiles, () => this.opts.style === "anthropic"
       ? this.runAnthropic(prompt, ctx?.toolkit, ctx?.signal, ctx?.history)
-      : this.runOpenAI(prompt, ctx?.toolkit, ctx?.signal, ctx?.history)
+      : this.runOpenAI(prompt, ctx?.toolkit, ctx?.signal, ctx?.history))
+    // Agent-side media (an in-process model's own tools) follow the loop's tool files.
+    if (agentFiles.length) r.files = [...r.files, ...agentFiles]
+    return r
   }
 
   /**
@@ -1631,6 +1637,9 @@ export class Client {
     messages.push({ role: "user", content: prompt })
     let tools = toOpenAI(this.requestTools(toolkit))
     const toolCalls: ToolCallRecord[] = []
+    // Agent-side media from an in-process answer (§8C ACP content parts), after the loop's own.
+    const agentFiles: RunFile[] = []
+    const withAgentFiles = (r: RunResult): RunResult => (agentFiles.length ? { ...r, files: [...r.files, ...agentFiles] } : r)
     const usage: Usage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 }
     let turns = 0
     // The model of the last call this run made (a beforeLLM override when one applied) — §8.
@@ -1682,6 +1691,10 @@ export class Client {
               yield j[IN_PROCESS_SIDE_KEY] as StreamEvent
               continue
             }
+            if (j && j[IN_PROCESS_FILES_KEY] && this.opts.baseUrl === IN_PROCESS_BASE_URL) {
+              agentFiles.push(...j[IN_PROCESS_FILES_KEY])
+              continue
+            }
             if (j?.usage) addUsage(usage, j.usage, "openai")
             const choice = j?.choices?.[0]
             const d = choice?.delta
@@ -1710,7 +1723,7 @@ export class Client {
         if (calls.length === 0) {
           if (await this.roundEnd(messages, turn, true, (rs?.carry ?? "") + content)) { if (rs) rs.carry = ""; continue }
           yield { type: "usage", usage }
-          yield { type: "done", result: this.endRun(runStart, lastModel, (rs?.carry ?? "") + content, messages, toolCalls, turns, usage) }
+          yield { type: "done", result: withAgentFiles(this.endRun(runStart, lastModel, (rs?.carry ?? "") + content, messages, toolCalls, turns, usage)) }
           return
         }
         if (rs) rs.carry = ""
@@ -1732,7 +1745,7 @@ export class Client {
             if (r.halted) {
               toolCalls.push(this.toolCallRecord(c.name, args, result, c.id))
               messages.push(toolMessage(c.id, c.name, result))
-              yield { type: "done", result: this.pendingRun(runStart, lastModel, r.halted, messages, toolCalls, turns, usage) }
+              yield { type: "done", result: withAgentFiles(this.pendingRun(runStart, lastModel, r.halted, messages, toolCalls, turns, usage)) }
               return
             }
           }
@@ -1742,7 +1755,7 @@ export class Client {
         }
         await this.roundEnd(messages, turn, false, "")
       }
-      yield { type: "done", result: this.endRun(runStart, lastModel, lastText(messages), messages, toolCalls, turns, usage, true) }
+      yield { type: "done", result: withAgentFiles(this.endRun(runStart, lastModel, lastText(messages), messages, toolCalls, turns, usage, true)) }
     } catch (e) {
       this.emitRunError(runStart, lastModel, toolCalls, turns, usage, e)
       onInterrupt?.(interruptedTranscript(messages, this.opts.style === "anthropic", done))
@@ -1905,6 +1918,9 @@ export interface InProcessResponse {
   content?: string
   toolCalls?: InProcessToolCall[]
   usage?: { promptTokens?: number; completionTokens?: number; totalTokens?: number }
+  /** Media the model's own agent-side tools or messages produced (e.g. an ACP agent's
+   *  images). Appended to RunResult.files after the loop's own tool files. */
+  files?: RunFile[]
 }
 
 /** A streaming in-process model: `emit` each event as it happens — `text` deltas become
@@ -1940,6 +1956,12 @@ const IN_PROCESS_BASE_URL = "http://in-process.invalid/v1"
  *  streaming generate to the consumer (honoured only on {@link IN_PROCESS_BASE_URL}). */
 const IN_PROCESS_SIDE_KEY = "toolnexus_event"
 
+/** The in-band SSE key carrying an in-process answer's `files` to `stream()` (same sentinel rule). */
+const IN_PROCESS_FILES_KEY = "toolnexus_files"
+
+/** Per-`run()` sink for an in-process answer's `files` — they are agent-side, not loop tool calls. */
+const agentFilesSink = new AsyncLocalStorage<RunFile[]>()
+
 /**
  * Build a `fetch`-shaped adapter over a semantic `generate` function (ADR 0030):
  * the reusable piece of {@link createInProcessClient} — assembles the wire request,
@@ -1974,6 +1996,7 @@ export function createInProcessFetch(generate?: InProcessGenerate, generateStrea
     }
 
     const answer = generate ? await generate(request) : await generateStream!(request, () => {})
+    if (answer.files?.length) agentFilesSink.getStore()?.push(...answer.files)
 
     const message: Record<string, any> = { role: "assistant" }
     if (answer.toolCalls && answer.toolCalls.length > 0) {
@@ -2041,6 +2064,7 @@ function inProcessStream(generateStream: InProcessGenerateStream, request: InPro
             }
             chunk({ [IN_PROCESS_SIDE_KEY]: ev })
           })
+          if (answer.files?.length) chunk({ [IN_PROCESS_FILES_KEY]: answer.files })
           let finish = "stop"
           if (answer.toolCalls && answer.toolCalls.length > 0) {
             chunk({ choices: [{ index: 0, delta: { tool_calls: wireToolCalls(answer.toolCalls, true) } }] })

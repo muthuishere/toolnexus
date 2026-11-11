@@ -179,6 +179,22 @@
   (fake-chunk! ctx sid "agent_message_chunk" "done")
   (fake-reply! ctx id {:stopReason "end_turn"}))
 
+;; fix-acp-image-parts: a 1x1 transparent PNG (67 bytes), standard padded base64.
+(def ^:private png-b64
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGMAAQAABQABDQottAAAAABJRU5ErkJggg==")
+
+(defn- fake-handle-image-out!
+  "golang/acp_test.go scenario image_out: an image as a tool result and as a
+  message chunk, around one text chunk."
+  [ctx id sid]
+  (doseq [u [{:sessionUpdate "tool_call" :toolCallId "t1" :title "screenshot" :kind "other" :status "pending"}
+             {:sessionUpdate "tool_call_update" :toolCallId "t1" :status "completed"
+              :content [{:type "content" :content {:type "image" :mimeType "image/png" :data png-b64}}]}
+             {:sessionUpdate "agent_message_chunk" :content {:type "text" :text "here"}}
+             {:sessionUpdate "agent_message_chunk" :content {:type "image" :mimeType "image/png" :data png-b64}}]]
+    (fake-notify! ctx "session/update" {:sessionId sid :update u}))
+  (fake-reply! ctx id {:stopReason "end_turn"}))
+
 (defn- fake-handle-fs-request!
   "conformance/acp-client unknownRequest: ask the client for something it does
   not implement, record the answer, then finish the turn with \"ok\"."
@@ -201,6 +217,7 @@
     "permission" (fake-handle-permission! ctx id sid text)
     "noisy"      (fake-handle-noisy! ctx id sid text)
     "serialize"  (fake-handle-serialize! ctx id sid text)
+    "image_out"  (fake-handle-image-out! ctx id sid)
     (fake-handle-warm! ctx id sid text))))
 
 (defn- fake-lock []
@@ -247,7 +264,11 @@
 
                 (= "initialize" (:method msg))
                 (do (fake-emit! ctx {:type "initialize" :data (:params msg)})
-                    (fake-reply! ctx (:id msg) {:protocolVersion 1 :agentCapabilities {:loadSession false}}))
+                    (fake-reply! ctx (:id msg) {:protocolVersion 1
+                                                :agentCapabilities
+                                                (cond-> {:loadSession false}
+                                                  (= "1" (env/get-env "TN_FAKE_IMAGE_CAPS"))
+                                                  (assoc :promptCapabilities {:image true}))}))
 
                 (= "session/set_config_option" (:method msg))
                 (do (fake-emit! ctx {:type "session/set_config_option" :data (:params msg)})
@@ -276,7 +297,7 @@
                       sid    (:sessionId params)
                       text   (str/join "" (map :text (:prompt params)))
                       id     (:id msg)]
-                  (fake-emit! ctx {:type "session/prompt" :data {:text text}})
+                  (fake-emit! ctx {:type "session/prompt" :data {:text text :blocks (:prompt params)}})
                   (if (= "1" (env/get-env "TN_FAKE_EXIT_ON_PROMPT"))
                     ;; conformance agentExit: never reply — just exit
                     (reset! stop true)
@@ -733,3 +754,91 @@
         (acp/close a)
         (is (:error (acp/set-mode! a "plan")))
         (is (:error (acp/set-model! a "m")))))))
+
+;; ===========================================================================
+;; fix-acp-image-parts — SPEC §8C "ACP content parts" (golang/acp_image_test.go)
+;; ===========================================================================
+
+(def ^:private png-desc "image (image/png, 67 bytes)")
+
+(defn- image-prompt-blocks
+  "Send the brief's multimodal user message through generate; return the
+  session/prompt blocks the fake agent saw."
+  [extra-env]
+  (let [out (str (fs/temp-dir! "acp") "/events.ndjson")
+        a   (connect-with! extra-env {} :out-file out)]
+    (try
+      ((acp/generate a) {:messages [{:role "user"
+                                     :content [{:type "text" :text "what is in this picture?"}
+                                               {:type "image_url"
+                                                :image_url {:url (str "data:image/png;base64," png-b64)}}]}]})
+      (finally (acp/close a)))
+    (:blocks (:data (first (events-of out "session/prompt"))))))
+
+(deftest acp-image-outbound-advertised
+  (let [blocks (image-prompt-blocks {"TN_FAKE_IMAGE_CAPS" "1"})
+        imgs   (filterv #(= "image" (:type %)) blocks)
+        texts  (filterv #(= "text" (:type %)) blocks)]
+    (is (= [{:type "image" :mimeType "image/png" :data png-b64}] imgs))
+    (is (some #(str/includes? (str (:text %)) "what is in this picture?") texts))
+    (is (not-any? #(str/includes? (str (:text %)) png-b64) texts))))
+
+(deftest acp-image-outbound-not-advertised
+  (let [blocks (image-prompt-blocks {})
+        texts  (filterv #(= "text" (:type %)) blocks)]
+    (is (empty? (filter #(= "image" (:type %)) blocks)))
+    (is (some #(str/includes? (str (:text %)) png-desc) texts))
+    (is (not-any? #(str/includes? (str (:text %)) png-b64) texts))))
+
+(def ^:private want-files
+  [{:type "image" :mimeType "image/png" :data png-b64 :from "screenshot" :callId "t1"}
+   {:type "image" :mimeType "image/png" :data png-b64 :from "acp" :callId ""}])
+
+(defn- file-keys [fs] (mapv #(select-keys % [:type :mimeType :data :url :from :callId]) fs))
+
+(deftest acp-image-inbound-generate-stream
+  (let [a   (acp/connect (fake-server-command)
+                         {:environment (fake-env "image_out" nil {}) :timeout 20000 :permission-timeout 20000})
+        evs (atom [])]
+    (try
+      (let [ans (acp/generate-stream a)
+            r   (ans {:messages [{:role "user" :content "shoot"}]} #(swap! evs conj %))
+            trs (filterv #(= "tool_result" (:type %)) @evs)]
+        (is (= 1 (count trs)))
+        (is (= png-desc (:output (first trs))))
+        (is (= [{:type "image" :mimeType "image/png" :data png-b64}]
+               (mapv #(select-keys % [:type :mimeType :data]) (:parts (first trs)))))
+        (is (= "here" (:content r)))
+        (is (= want-files (file-keys (:files r)))))
+      (finally (acp/close a)))))
+
+(deftest acp-image-inbound-in-process-client
+  (let [a  (acp/connect (fake-server-command)
+                        {:environment (fake-env "image_out" nil {}) :timeout 20000 :permission-timeout 20000})
+        c  (client/create-in-process-client {:model "m" :generate-stream (acp/generate-stream a)})
+        tk (toolnexus/build {:builtins false})]
+    (try
+      (testing "run"
+        (let [r (client/run c "shoot" {:toolkit tk})]
+          (is (= "here" (:text r)))
+          (is (= want-files (file-keys (:files r))))))
+      (testing "stream (run with :on-event): done carries the files"
+        (let [evs  (atom [])
+              _    (client/run c "shoot" {:toolkit tk :on-event #(swap! evs conj %)})
+              done (:result (last @evs))]
+          (is (= "done" (:type (last @evs))))
+          (is (= want-files (file-keys (:files done))))
+          (is (= "t1" (:callId (first (:files done)))))))
+      (finally (acp/close a)))))
+
+(deftest acp-wire-parts-url-only-and-file-by-mime
+  ;; SPEC §8C: a URL-only image (any non-base64-data URL) has an EMPTY mimeType;
+  ;; a `file` block is typed by its mime.
+  (let [[text parts] (#'acp/flatten-content
+                      {:content [{:type "image_url" :image_url {:url "https://example.com/cat.png"}}
+                                 {:type "image_url" :image_url {:url "data:text/plain,hi"}}
+                                 {:type "file" :file {:filename "x.png"
+                                                      :file_data (str "data:image/png;base64," png-b64)}}]})]
+    (is (= (str "image (, 0 bytes)\nimage (, 0 bytes)\n" png-desc) text))
+    (is (= ["image" "image" "image"] (mapv :type parts)))
+    (is (= [nil nil png-b64] (mapv :data parts)))))

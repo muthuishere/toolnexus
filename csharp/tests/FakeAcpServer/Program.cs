@@ -14,6 +14,9 @@
 //                before finishing the turn.
 //   noisy      - emits agent_thought_chunk + tool-call narration interleaved with the real
 //                agent_message_chunk, to prove naive accumulation corrupts structured output.
+//   image      - warm, but initialize advertises promptCapabilities {image:true}.
+//   image_out  - a tool_call whose completed update carries an image, a text chunk "here" and an
+//                image agent_message_chunk (inbound ACP media, SPEC §8C ACP content parts).
 //   warm       - trivial echo. Every reply is prefixed with `sessionNewCalls=<n>;promptN=<n>;`
 //                so a test can prove a session was opened once and the session/prompt count keeps
 //                climbing across calls made on the SAME AcpClient (warm session reuse).
@@ -201,6 +204,9 @@ void Chunk(string sessionId, string kind, string text) =>
         },
     });
 
+// A 1x1 transparent PNG (67 bytes), base64 — the "image_out" scenario's media.
+const string OnePixelPngB64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGMAAQAABQABDQottAAAAABJRU5ErkJggg==";
+
 var stdin = Console.OpenStandardInput();
 using var reader = new StreamReader(stdin, Encoding.UTF8);
 
@@ -248,7 +254,10 @@ while ((line = await reader.ReadLineAsync().ConfigureAwait(false)) is not null)
                 Reply(IdValue(idEl), new Dictionary<string, object?>
                 {
                     ["protocolVersion"] = 1,
-                    ["agentCapabilities"] = new Dictionary<string, object?> { ["loadSession"] = false },
+                    ["agentCapabilities"] = scenario == "image"
+                        ? new Dictionary<string, object?> { ["loadSession"] = false,
+                            ["promptCapabilities"] = new Dictionary<string, object?> { ["image"] = true } }
+                        : new Dictionary<string, object?> { ["loadSession"] = false },
                 });
                 break;
 
@@ -404,6 +413,26 @@ while ((line = await reader.ReadLineAsync().ConfigureAwait(false)) is not null)
                     case "noisy":
                         _ = Task.Run(() => HandleNoisy(id, sessionId, userText));
                         break;
+                    case "image_out":
+                    {
+                        // An agent whose own tool returns an image, then a text and an image chunk.
+                        var img = new Dictionary<string, object?> { ["type"] = "image", ["mimeType"] = "image/png", ["data"] = OnePixelPngB64 };
+                        var ups = new[]
+                        {
+                            new Dictionary<string, object?> { ["sessionUpdate"] = "tool_call", ["toolCallId"] = "t1",
+                                ["title"] = "screenshot", ["kind"] = "other", ["status"] = "pending" },
+                            new Dictionary<string, object?> { ["sessionUpdate"] = "tool_call_update", ["toolCallId"] = "t1",
+                                ["status"] = "completed",
+                                ["content"] = new object[] { new Dictionary<string, object?> { ["type"] = "content", ["content"] = img } } },
+                            new Dictionary<string, object?> { ["sessionUpdate"] = "agent_message_chunk",
+                                ["content"] = new Dictionary<string, object?> { ["type"] = "text", ["text"] = "here" } },
+                            new Dictionary<string, object?> { ["sessionUpdate"] = "agent_message_chunk", ["content"] = img },
+                        };
+                        foreach (var u in ups)
+                            SendNotification("session/update", new Dictionary<string, object?> { ["sessionId"] = sessionId, ["update"] = u });
+                        Reply(id, new Dictionary<string, object?> { ["stopReason"] = "end_turn" });
+                        break;
+                    }
                     default: // warm
                         var prefix = $"sessionNewCalls={Volatile.Read(ref sessionNewCalls)};promptN={n};";
                         SendNotification("session/update", new Dictionary<string, object?>

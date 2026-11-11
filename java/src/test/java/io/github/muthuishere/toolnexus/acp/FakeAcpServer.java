@@ -98,6 +98,7 @@ public final class FakeAcpServer {
             case "initialize" -> {
                 Map<String, Object> caps = new LinkedHashMap<>();
                 caps.put("loadSession", false);
+                if ("image".equals(scenario)) caps.put("promptCapabilities", Map.of("image", true));
                 Map<String, Object> result = new LinkedHashMap<>();
                 result.put("protocolVersion", 1);
                 result.put("agentCapabilities", caps);
@@ -120,6 +121,7 @@ public final class FakeAcpServer {
             case "session/prompt" -> {
                 Map<String, Object> params = (Map<String, Object>) msg.get("params");
                 String userText = extractPromptText(params);
+                lastPromptBlocks = params == null ? null : params.get("prompt");
                 Object sid = params != null ? params.getOrDefault("sessionId", "sess-1") : "sess-1";
                 history.add(userText);
                 List<String> snapshot = new ArrayList<>(history);
@@ -132,6 +134,17 @@ public final class FakeAcpServer {
             }
         }
     }
+
+    /** The raw session/prompt ContentBlock array of the latest turn ("image"/"blocks" echo it). */
+    private static volatile Object lastPromptBlocks;
+
+    /** A 1x1 transparent PNG, base64 — the image the "image_out" agent returns. */
+    static final String PNG_B64 = java.util.Base64.getEncoder().encodeToString(new byte[]{
+            (byte) 0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
+            0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1f, 0x15, (byte) 0xc4,
+            (byte) 0x89, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x44, 0x41, 0x54, 0x78, (byte) 0x9c, 0x63, 0x00, 0x01, 0x00, 0x00,
+            0x05, 0x00, 0x01, 0x0d, 0x0a, 0x2d, (byte) 0xb4, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, (byte) 0xae,
+            0x42, 0x60, (byte) 0x82});
 
     // "cancel" scenario: the first turn is held open until a session/cancel arrives.
     private static volatile Object cancelHeldId;
@@ -157,6 +170,12 @@ public final class FakeAcpServer {
             // ^ deliberately never replies to session/prompt after this.
             case "permission" -> handlePermission(id, sid, userText);
             case "noisy" -> handleNoisy(id, sid, userText);
+            case "image", "blocks" -> {
+                // Echo the raw prompt blocks back, so a test can assert what went on the wire.
+                sendUpdate(sid, "agent_message_chunk", Json.stringify(lastPromptBlocks));
+                reply(id, Map.of("stopReason", "end_turn"));
+            }
+            case "image_out" -> handleImageOut(id, sid);
             default -> {
                 sendUpdate(sid, "agent_message_chunk", "echo:" + userText + " sessionNewCount=" + sessionNewCount);
                 reply(id, Map.of("stopReason", "end_turn"));
@@ -212,6 +231,33 @@ public final class FakeAcpServer {
         sendToolCallUpdate(sid, "t1", "completed");
         sendUpdate(sid, "agent_thought_chunk", "now double-checking the number... ");
         sendUpdate(sid, "agent_message_chunk", "\"" + userText + "\"}");
+        reply(id, Map.of("stopReason", "end_turn"));
+    }
+
+    /** The agent's own tool returns an image, then it replies with text and an image chunk. */
+    private static void handleImageOut(Object id, Object sid) {
+        Map<String, Object> img = new LinkedHashMap<>();
+        img.put("type", "image");
+        img.put("mimeType", "image/png");
+        img.put("data", PNG_B64);
+        Map<String, Object> call = new LinkedHashMap<>();
+        call.put("sessionUpdate", "tool_call");
+        call.put("toolCallId", "t1");
+        call.put("title", "screenshot");
+        call.put("kind", "other");
+        call.put("status", "pending");
+        sendUpdateNotification(sid, call);
+        Map<String, Object> upd = new LinkedHashMap<>();
+        upd.put("sessionUpdate", "tool_call_update");
+        upd.put("toolCallId", "t1");
+        upd.put("status", "completed");
+        upd.put("content", List.of(Map.of("type", "content", "content", img)));
+        sendUpdateNotification(sid, upd);
+        sendUpdate(sid, "agent_message_chunk", "here");
+        Map<String, Object> chunk = new LinkedHashMap<>();
+        chunk.put("sessionUpdate", "agent_message_chunk");
+        chunk.put("content", img);
+        sendUpdateNotification(sid, chunk);
         reply(id, Map.of("stopReason", "end_turn"));
     }
 
