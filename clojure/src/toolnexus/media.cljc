@@ -406,7 +406,7 @@
 
 (def version
   "The package version (kept equal to build.clj's `version`; a test pins it)."
-  "0.29.1")
+  "0.30.0")
 
 (def user-agent
   "§7G.12 D23: the default User-Agent of every media HTTP request."

@@ -1,5 +1,5 @@
 // run: java -cp 'lib/*' Main.java npx -y @agentclientprotocol/claude-agent-acp@0.100.0
-//      (lib/ = toolnexus-0.29.1.jar + its runtime deps)
+//      (lib/ = toolnexus-0.30.0.jar + its runtime deps)
 import io.github.muthuishere.toolnexus.InProcess;
 import io.github.muthuishere.toolnexus.LlmClient;
 import io.github.muthuishere.toolnexus.McpServe;
