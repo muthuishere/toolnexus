@@ -34,7 +34,8 @@
 import { spawn } from "node:child_process"
 import { createInterface } from "node:readline"
 import path from "node:path"
-import type { InProcessRequest, InProcessResponse, StreamEvent } from "./client.js"
+import type { InProcessRequest, InProcessResponse, RunFile, StreamEvent } from "./client.js"
+import { isContentPart, summarizePart, type ContentPart } from "./content.js"
 
 /** Options for {@link loadACP}. `command`/`args` spawn the ACP agent as a child
  *  process; everything else tunes the session handshake. */
@@ -135,18 +136,64 @@ interface RpcMessage {
   error?: { code: number; message: string }
 }
 
-function renderContentPart(part: any): string {
+function renderContentPart(part: any, media?: ContentPart[]): string {
   if (typeof part === "string") return part
   if (part == null) return ""
   if (typeof part === "object" && "text" in part && typeof part.text === "string") return part.text
+  // A media part (OpenAI chat wire shape) is named by its §1B one-liner, never its bytes;
+  // the part itself travels as a native ACP block (SPEC §8C "ACP content parts").
+  const p = acpWirePart(part)
+  if (p && p.type !== "text") {
+    media?.push(p)
+    return summarizePart(p)
+  }
   return JSON.stringify(part)
 }
 
-/** Flattens `content` (a string, or an array of content parts) to plain text. */
-function renderContent(content: any): string {
+/** `data:<mime>;base64,<payload>` (non-empty mime) ⇒ {mimeType, data}; anything else ⇒ undefined (SPEC §8C). */
+function parseBase64DataUrl(u: string): { mimeType: string; data: string } | undefined {
+  if (!u.startsWith("data:")) return undefined
+  const comma = u.indexOf(",")
+  if (comma < 0) return undefined
+  const meta = u.slice(5, comma)
+  if (!meta.endsWith(";base64")) return undefined
+  const mimeType = meta.slice(0, -";base64".length)
+  return mimeType ? { mimeType, data: u.slice(comma + 1) } : undefined
+}
+
+/** One OpenAI chat media block read back into a §1B part, as SPEC §8C pins it (Go acpWirePart). */
+function acpWirePart(part: any): ContentPart | undefined {
+  switch (part?.type) {
+    case "image_url": {
+      const url = typeof part.image_url?.url === "string" ? part.image_url.url : ""
+      const d = parseBase64DataUrl(url)
+      if (d) return { type: "image", ...d } as ContentPart
+      // A URL-only image part: EMPTY mimeType, never inferred from the URL.
+      return url ? ({ type: "image", mimeType: "", url } as ContentPart) : undefined
+    }
+    case "input_audio": {
+      let mimeType = "audio/" + String(part.input_audio?.format ?? "")
+      if (mimeType === "audio/mp3") mimeType = "audio/mpeg"
+      return { type: "audio", mimeType, data: String(part.input_audio?.data ?? "") } as ContentPart
+    }
+    case "file": {
+      const d = parseBase64DataUrl(String(part.file?.file_data ?? ""))
+      if (!d) return undefined
+      const type = d.mimeType.startsWith("image/") ? "image" : d.mimeType.startsWith("audio/") ? "audio" : "file"
+      const p: any = { type, ...d }
+      if (part.file?.filename) p.name = String(part.file.filename)
+      return p as ContentPart
+    }
+  }
+  return isContentPart(part) && part.type !== "text" ? part : undefined
+}
+
+/** Flattens `content` (a string, or an array of content parts) to plain text; media parts
+ *  found along the way are appended to `media`. */
+function renderContent(content: any, media?: ContentPart[]): string {
   if (typeof content === "string") return content
-  if (Array.isArray(content)) return content.map(renderContentPart).join(" ")
-  return renderContentPart(content)
+  if (Array.isArray(content)) return content.map((p) => renderContentPart(p, media)).join("\n")
+  return renderContentPart(content, media)
 }
 
 /** Renders the FULL assembled request as one prompt string — role + content
@@ -155,9 +202,10 @@ function renderContent(content: any): string {
  *  every turn, not a delta, so this stays stateless like every other
  *  toolnexus model source and never risks a shadow transcript drifting from
  *  the caller's own conversation state. */
-function renderPrompt(request: InProcessRequest): string {
+function renderPrompt(request: InProcessRequest): { text: string; parts: ContentPart[] } {
   const messages = request.messages ?? []
-  const lines = messages.map((m) => `${m?.role ?? "user"}: ${renderContent(m?.content)}`)
+  const parts: ContentPart[] = []
+  const lines = messages.map((m) => `${m?.role ?? "user"}: ${renderContent(m?.content, parts)}`)
 
   let latest = ""
   for (let i = messages.length - 1; i >= 0; i--) {
@@ -169,7 +217,30 @@ function renderPrompt(request: InProcessRequest): string {
   if (!latest && messages.length > 0) latest = renderContent(messages[messages.length - 1]?.content)
 
   lines.push(`${SUPERSEDES_MARKER} ${latest}`)
-  return lines.join("\n")
+  return { text: lines.join("\n"), parts }
+}
+
+/** The agent's `initialize` `agentCapabilities.promptCapabilities` (absent ⇒ false). */
+interface PromptCaps {
+  image: boolean
+  audio: boolean
+  embeddedContext: boolean
+}
+
+/** The session/prompt ContentBlock array: the text block, then one native block per media
+ *  part the agent advertised support for. A part it cannot take stays named only by its
+ *  description in the text; base64 never enters the text block. */
+function promptBlocks(text: string, parts: ContentPart[], caps: PromptCaps): Record<string, unknown>[] {
+  const blocks: Record<string, unknown>[] = [{ type: "text", text }]
+  for (const p of parts) {
+    if (p.type === "text" || !p.data) continue // ACP media blocks require inline data
+    if (p.type === "image" && caps.image) blocks.push({ type: "image", mimeType: p.mimeType, data: p.data })
+    else if (p.type === "audio" && caps.audio) blocks.push({ type: "audio", mimeType: p.mimeType, data: p.data })
+    else if (p.type === "file" && caps.embeddedContext) {
+      blocks.push({ type: "resource", resource: { uri: `attachment:///${p.name || "attachment"}`, mimeType: p.mimeType, blob: p.data } })
+    }
+  }
+  return blocks
 }
 
 /**
@@ -364,6 +435,8 @@ export async function loadACP(opts: ACPOptions): Promise<ACPClient> {
   const initializeResult = await step("initialize", () =>
     call("initialize", { protocolVersion: opts.protocolVersion ?? 1, clientCapabilities }),
   )
+  const pc = initializeResult?.agentCapabilities?.promptCapabilities ?? {}
+  const promptCaps: PromptCaps = { image: pc.image === true, audio: pc.audio === true, embeddedContext: pc.embeddedContext === true }
   const sessionParams: Record<string, unknown> = { cwd, mcpServers: opts.mcpServers ?? [] }
   if (opts.sessionMeta) sessionParams._meta = opts.sessionMeta
   const sessionResult = await step("session/new", () => call("session/new", sessionParams))
@@ -401,10 +474,12 @@ export async function loadACP(opts: ACPOptions): Promise<ACPClient> {
     signal?: AbortSignal,
   ): Promise<InProcessResponse> {
     if (signal?.aborted) throw acpAbortError()
-    const text = renderPrompt(request)
+    const { text, parts } = renderPrompt(request)
     const id = `c-${++nextId}`
 
     let content = ""
+    const files: RunFile[] = [] // inbound media, in arrival order
+    const messageParts: ContentPart[] = [] // media the agent sent as message chunks
     const toolNames = new Map<string, string>()
     const send = (ev: StreamEvent) => {
       try {
@@ -419,6 +494,13 @@ export async function loadACP(opts: ACPOptions): Promise<ACPClient> {
       const u = params?.update
       switch (u?.sessionUpdate) {
         case "agent_message_chunk": {
+          const mp = acpBlockPart(u?.content)
+          if (mp) {
+            // An image/audio chunk is a part, never text (SPEC §8C ACP content parts).
+            messageParts.push(mp)
+            files.push(acpRunFile(mp, "acp", ""))
+            break
+          }
           const t: string = u?.content?.text ?? ""
           content += t
           if (t) send({ type: "text", delta: t })
@@ -447,11 +529,14 @@ export async function loadACP(opts: ACPOptions): Promise<ACPClient> {
             send({ type: "tool_call_args", id: callId, name, args: raw, via: "acp" })
           }
           if (u.status !== "completed" && u.status !== "failed") break
+          const { output, parts: toolParts } = acpToolContent(u.content)
+          for (const p of toolParts) files.push(acpRunFile(p, name, callId))
           send({
             type: "tool_result",
             id: callId,
             name,
-            output: acpToolContentText(u.content),
+            output,
+            ...(toolParts.length ? { parts: toolParts } : {}),
             isError: u.status === "failed",
             via: "acp",
           })
@@ -462,7 +547,7 @@ export async function loadACP(opts: ACPOptions): Promise<ACPClient> {
 
     if (exited) throw new Error(exitMessage("session/prompt"))
     const replyPromise = new Promise<RpcMessage>((resolve) => pending.set(id, { method: "session/prompt", cb: resolve }))
-    write({ jsonrpc: "2.0", id, method: "session/prompt", params: { sessionId, prompt: [{ type: "text", text }] } })
+    write({ jsonrpc: "2.0", id, method: "session/prompt", params: { sessionId, prompt: promptBlocks(text, parts, promptCaps) } })
 
     let timer: NodeJS.Timeout | undefined
     const timeout = new Promise<never>((_, reject) => {
@@ -498,7 +583,9 @@ export async function loadACP(opts: ACPOptions): Promise<ACPClient> {
       }
       if (msg.error && msg.error.code === 0) throw new Error(msg.error.message)
       if (msg.error) throw new Error(`toolnexus: ACP error ${msg.error.code}: ${msg.error.message}`)
-      return { content }
+      // With no message text but media chunks, the answer is their §1B description.
+      const answer = content === "" && messageParts.length ? messageParts.map(summarizePart).join("\n") : content
+      return files.length ? { content: answer, files } : { content: answer }
     } finally {
       clearTimeout(timer)
       if (onAbort) signal!.removeEventListener("abort", onAbort)
@@ -583,8 +670,36 @@ function killGroup(pid: number, signal: NodeJS.Signals): void {
   }
 }
 
-/** Joins the text of an ACP tool_call_update's `content` array ({content:{text}} parts). */
-function acpToolContentText(content: any): string {
-  if (!Array.isArray(content)) return ""
-  return content.map((p: any) => (typeof p?.content?.text === "string" ? p.content.text : "")).join("")
+/** Reads an ACP tool_call_update's `content` array ([{type:"content", content:ContentBlock}]):
+ *  text blocks join into the output; image/audio blocks become parts. With no text, the
+ *  output is the parts' §1B description (as for an image-only MCP result, §0.4). */
+function acpToolContent(content: any): { output: string; parts: ContentPart[] } {
+  if (!Array.isArray(content)) return { output: "", parts: [] }
+  const parts: ContentPart[] = []
+  let output = ""
+  for (const item of content) {
+    const p = acpBlockPart(item?.content)
+    if (p) parts.push(p)
+    else if (typeof item?.content?.text === "string") output += item.content.text
+  }
+  if (output === "" && parts.length) output = parts.map(summarizePart).join("\n")
+  return { output, parts }
+}
+
+/** An ACP image/audio ContentBlock ({type, mimeType, data, uri?}) as a §1B part: data wins,
+ *  a uri-only block is a URL part; any other block is not a part. */
+function acpBlockPart(blk: any): ContentPart | undefined {
+  if (!blk || (blk.type !== "image" && blk.type !== "audio")) return undefined
+  const mimeType: string = blk.mimeType ?? ""
+  if (typeof blk.data === "string" && blk.data) return { type: blk.type, mimeType, data: blk.data }
+  if (typeof blk.uri === "string" && blk.uri) return { type: blk.type, mimeType, url: blk.uri }
+  return undefined
+}
+
+/** One inbound part as a RunResult.files entry. */
+function acpRunFile(p: ContentPart, from: string, callId: string): RunFile {
+  const f: RunFile = { type: p.type as RunFile["type"], mimeType: (p as any).mimeType, from, callId }
+  if ((p as any).url) f.url = (p as any).url
+  if ((p as any).data) f.data = (p as any).data
+  return f
 }

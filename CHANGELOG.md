@@ -18,6 +18,14 @@ base64 in any text. Images the agent returns become real parts: on the `tool_res
 and in `RunResult.files` (`from` = the agent's tool name, or `"acp"` for an image in the reply). All
 eight ports; contract in SPEC §8C "ACP content parts", tracked in `openspec/changes/fix-acp-image-parts`.
 
+**BREAKING (rust only):** `AcpStreamEvent::ToolResult` gained a `parts` field and `InProcessResponse`
+gained `files`, so code that builds either with every field spelled out must add them. New:
+`AcpClient::generate_turn` returns the reply text plus the agent's files.
+
+**Not done:** an image given only as a URL (no inline data) is never sent as a block, because an ACP
+image block needs the bytes; it is described in the text as `image (, 0 bytes)`. A `data:` URL with
+extra parameters (`;charset=…;base64`) is not pinned and may be typed differently per port.
+
 ## 0.29.1 — 2026-11-09
 
 **Fix: Grok CLI videos honour `seconds` and are no longer ~1 second long.** In 0.29.0 the

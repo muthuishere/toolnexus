@@ -86,6 +86,7 @@ pub fn answer_with(msg: Value, prompt: i64, completion: i64) -> InProcessRespons
             completion_tokens: completion,
             total_tokens: prompt + completion,
         }),
+        files: Vec::new(),
     }
 }
 

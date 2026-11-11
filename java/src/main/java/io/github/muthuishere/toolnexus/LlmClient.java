@@ -1170,7 +1170,18 @@ public final class LlmClient {
             this.status = status;
             this.pending = pending;
             this.limit = limit;
-            this.files = runFiles(toolCalls);
+            List<RunFile> fs = runFiles(toolCalls);
+            List<RunFile> agent = InProcess.AGENT_FILES.get();
+            if (agent != null) {
+                synchronized (agent) {
+                    if (!agent.isEmpty()) {
+                        List<RunFile> all = new ArrayList<>(fs);
+                        all.addAll(agent);
+                        fs = List.copyOf(all);
+                    }
+                }
+            }
+            this.files = fs;
         }
     }
 
@@ -1297,9 +1308,29 @@ public final class LlmClient {
         }
         /** §9: parts are rendered as {@code {type, mimeType, bytes}} — a part's {@code data}
          * never appears in an event payload. */
-        static StreamEvent toolResult(String id, String name, String output, boolean isError,
+        public static StreamEvent toolResult(String id, String name, String output, boolean isError,
                                       List<ContentPart> parts) {
             return toolResult(id, name, output, isError, parts, null);
+        }
+        /** A tool result whose {@code parts} carry the full §1B part — {@code data} or {@code url}
+         * included — as an ACP agent's tool result does (SPEC §8C): an event value, not a log line. */
+        public static StreamEvent toolResultWithData(String id, String name, String output, boolean isError,
+                                                     List<ContentPart> parts) {
+            List<Map<String, Object>> full = null;
+            if (parts != null && !parts.isEmpty()) {
+                full = new java.util.ArrayList<>(parts.size());
+                for (ContentPart p : parts) {
+                    Map<String, Object> m = new java.util.LinkedHashMap<>();
+                    m.put("type", p.type());
+                    m.put("mimeType", p.mimeType());
+                    if (p.data() != null) m.put("data", p.data());
+                    if (p.url() != null) m.put("url", p.url());
+                    if (p.name() != null) m.put("name", p.name());
+                    full.add(m);
+                }
+            }
+            return new StreamEvent(Kind.TOOL_RESULT, null, id, name, null, output, isError, null, null,
+                    null, full, null);
         }
         /** The result's {@code metadata} rides on the event (e.g. edit diffs, SPEC §5). */
         static StreamEvent toolResult(String id, String name, String output, boolean isError,
@@ -1940,6 +1971,18 @@ public final class LlmClient {
 
     private RunResult runAny(Object prompt, Toolkit toolkit, List<Object> history, CancelToken cancel,
                              Consumer<List<Object>> onAbort) {
+        // §8C: an in-process model's own media (an ACP agent's) reaches RunResult.files.
+        List<RunFile> prevFiles = InProcess.AGENT_FILES.get();
+        InProcess.AGENT_FILES.set(new ArrayList<>());
+        try {
+            return runAnyInner(prompt, toolkit, history, cancel, onAbort);
+        } finally {
+            InProcess.AGENT_FILES.set(prevFiles);
+        }
+    }
+
+    private RunResult runAnyInner(Object prompt, Toolkit toolkit, List<Object> history, CancelToken cancel,
+                                  Consumer<List<Object>> onAbort) {
         if (cancel == null) {
             Deadline deadline = newDeadline();
             return "anthropic".equals(opts.style)
@@ -2115,6 +2158,16 @@ public final class LlmClient {
 
     /** The one stream seam both prompt shapes go through. */
     private RunResult streamAny(Object prompt, Toolkit toolkit, Consumer<StreamEvent> onEvent, String id) {
+        List<RunFile> prevFiles = InProcess.AGENT_FILES.get();
+        InProcess.AGENT_FILES.set(new ArrayList<>());
+        try {
+            return streamAnyInner(prompt, toolkit, onEvent, id);
+        } finally {
+            InProcess.AGENT_FILES.set(prevFiles);
+        }
+    }
+
+    private RunResult streamAnyInner(Object prompt, Toolkit toolkit, Consumer<StreamEvent> onEvent, String id) {
         Deadline deadline = newDeadline();
         boolean stateful = id != null && !id.isEmpty();
         List<Object> history = null;

@@ -11,7 +11,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::{
     BodyTransformFn, BoxFuture, Client, ClientOptions, Hooks, OnErrorFn, OnMetricFn, RawResponse,
-    RespBody, StreamEvent, Style, Transport, Tx, WaitForCtxFn, WaitForFn,
+    RespBody, RunFile, StreamEvent, Style, Transport, Tx, WaitForCtxFn, WaitForFn,
 };
 use crate::store::ConversationStore;
 
@@ -48,6 +48,9 @@ pub struct InProcessResponse {
     pub content: String,
     pub tool_calls: Vec<InProcessToolCall>,
     pub usage: Option<InProcessUsage>,
+    /// Media the model's side produced (e.g. an ACP agent's own tool calls);
+    /// appended to `RunResult.files` after the client's own tool files (§8C).
+    pub files: Vec<RunFile>,
 }
 
 /// Emit a streaming event from `generate_stream`: `text` deltas become the
@@ -187,6 +190,7 @@ impl InProcess {
             retry_after: String::new(),
             should_retry: None,
             body: RespBody::Full(serde_json::to_vec(&out).unwrap_or_default()),
+            agent_files: Some(Arc::new(std::sync::Mutex::new(answer.files))),
         })
     }
 
@@ -197,6 +201,8 @@ impl InProcess {
         side: Option<Tx>,
     ) -> RawResponse {
         let (ctx, crx) = mpsc::unbounded_channel::<Result<Vec<u8>, String>>();
+        let agent_files: Arc<std::sync::Mutex<Vec<RunFile>>> = Arc::default();
+        let files_out = agent_files.clone();
         tokio::spawn(async move {
             let saw_text = Arc::new(std::sync::atomic::AtomicBool::new(false));
             let emit: EmitFn = {
@@ -223,6 +229,8 @@ impl InProcess {
                     return;
                 }
             };
+            // before [DONE]: the reader drains these once the body ends
+            files_out.lock().unwrap().extend(answer.files);
             let mut finish = "stop";
             if !answer.tool_calls.is_empty() {
                 let calls: Vec<Value> = answer
@@ -261,6 +269,7 @@ impl InProcess {
             retry_after: String::new(),
             should_retry: None,
             body: RespBody::Chunks(crx),
+            agent_files: Some(agent_files),
         }
     }
 }

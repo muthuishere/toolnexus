@@ -24,17 +24,24 @@ var acpTestPNG = []byte{
 // returns the session/prompt blocks the fake agent recorded.
 func acpImagePrompt(t *testing.T, scenario string) []any {
 	t.Helper()
+	b64 := base64.StdEncoding.EncodeToString(acpTestPNG)
+	return acpPromptBlocks(t, scenario, []any{
+		map[string]any{"type": "text", "text": "what is in this picture?"},
+		map[string]any{"type": "image_url", "image_url": map[string]any{"url": "data:image/png;base64," + b64}},
+	})
+}
+
+// acpPromptBlocks runs one turn whose user content is the given OpenAI chat
+// parts array and returns the session/prompt blocks the fake agent recorded.
+func acpPromptBlocks(t *testing.T, scenario string, content []any) []any {
+	t.Helper()
 	outFile := filepath.Join(t.TempDir(), "events.ndjson")
 	c, err := LoadACP(context.Background(), acpTestOptions(t, scenario, outFile))
 	if err != nil {
 		t.Fatalf("LoadACP: %v", err)
 	}
 	defer c.Close()
-	b64 := base64.StdEncoding.EncodeToString(acpTestPNG)
-	req := InProcessRequest{Messages: []any{map[string]any{"role": "user", "content": []any{
-		map[string]any{"type": "text", "text": "what is in this picture?"},
-		map[string]any{"type": "image_url", "image_url": map[string]any{"url": "data:image/png;base64," + b64}},
-	}}}}
+	req := InProcessRequest{Messages: []any{map[string]any{"role": "user", "content": content}}}
 	if _, err := c.Generate(req); err != nil {
 		t.Fatalf("Generate: %v", err)
 	}
@@ -187,5 +194,34 @@ func TestACP_InboundImageReachesRunResultFiles(t *testing.T) {
 	}
 	if done == nil || len(done.Files) != 2 || done.Files[0].CallID != "t1" {
 		t.Fatalf("stream done Files = %+v", done)
+	}
+}
+
+func TestACP_AudioAndFilePartsSentAsAudioAndResourceBlocks(t *testing.T) {
+	b64 := base64.StdEncoding.EncodeToString(acpTestPNG)
+	blocks := acpPromptBlocks(t, "media", []any{
+		map[string]any{"type": "input_audio", "input_audio": map[string]any{"data": b64, "format": "mp3"}},
+		map[string]any{"type": "file", "file": map[string]any{"filename": "a.pdf", "file_data": "data:application/pdf;base64," + b64}},
+		map[string]any{"type": "file", "file": map[string]any{"file_data": "data:text/plain;base64," + b64}},
+		map[string]any{"type": "image_url", "image_url": map[string]any{"url": "https://example.com/cat.png"}},
+	})
+	if len(blocks) != 4 {
+		t.Fatalf("want text + audio + 2 resource blocks (URL-only image gets none), got %v", blocks)
+	}
+	text, _ := blocks[0].(map[string]any)["text"].(string)
+	if strings.Contains(text, b64) || !strings.Contains(text, "audio (audio/mpeg, 67 bytes)") ||
+		!strings.Contains(text, "image (, 0 bytes)") {
+		t.Fatalf("text block: %q", text)
+	}
+	a := blocks[1].(map[string]any)
+	if a["type"] != "audio" || a["mimeType"] != "audio/mpeg" || a["data"] != b64 {
+		t.Fatalf("audio block: %v", a)
+	}
+	for i, wantURI := range []string{"attachment:///a.pdf", "attachment:///attachment"} {
+		r := blocks[2+i].(map[string]any)
+		res, _ := r["resource"].(map[string]any)
+		if r["type"] != "resource" || res["uri"] != wantURI || res["blob"] != b64 {
+			t.Fatalf("resource block %d: %v", i, r)
+		}
 	}
 }

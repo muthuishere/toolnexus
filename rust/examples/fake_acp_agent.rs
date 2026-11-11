@@ -9,6 +9,9 @@
 //!   cancel      waits for session/cancel, then ends the turn with stopReason cancelled
 //!   fsrequest   asks the client for fs/read_text_file before answering
 //!   echo        replies with the prompt text as one chunk
+//!   image       echo, but initialize advertises promptCapabilities {image: true}
+//!   image_out   a tool_call whose completed update carries an image block, then a
+//!               text chunk "here" and an image message chunk (inbound media)
 //! session/new rejects a relative cwd with -32602.
 //! Conformance flags (conformance/acp-client/cases.json), read from the env:
 //!   TN_FAKE_RECORD=<file>     append every received request as `{method,params}` JSON lines
@@ -129,8 +132,13 @@ fn main() {
             }
             "initialize" => {
                 std::thread::sleep(std::time::Duration::from_millis(init_delay));
+                let caps = if scenario == "image" {
+                    serde_json::json!({"promptCapabilities":{"image":true}})
+                } else {
+                    serde_json::json!({})
+                };
                 send(
-                    serde_json::json!({"jsonrpc":"2.0","id":id,"result":{"protocolVersion":1,"agentInfo":{"name":"fake","version":"0"},"agentCapabilities":{}}}),
+                    serde_json::json!({"jsonrpc":"2.0","id":id,"result":{"protocolVersion":1,"agentInfo":{"name":"fake","version":"0"},"agentCapabilities":caps}}),
                 );
             }
             "session/new" => {
@@ -243,6 +251,26 @@ fn main() {
                             }
                         }
                         chunk(session, "agent_message_chunk", &format!("chose:{chose}"));
+                        send(
+                            serde_json::json!({"jsonrpc":"2.0","id":id,"result":{"stopReason":"end_turn"}}),
+                        );
+                    }
+                    "image_out" => {
+                        // A 1x1 transparent PNG (67 bytes).
+                        let img = serde_json::json!({"type":"image","mimeType":"image/png","data":"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGMAAQAABQABDQottAAAAABJRU5ErkJggg=="});
+                        update(
+                            session,
+                            serde_json::json!({"sessionUpdate":"tool_call","toolCallId":"t1","title":"screenshot","kind":"other","status":"pending"}),
+                        );
+                        update(
+                            session,
+                            serde_json::json!({"sessionUpdate":"tool_call_update","toolCallId":"t1","status":"completed","content":[{"type":"content","content":img}]}),
+                        );
+                        chunk(session, "agent_message_chunk", "here");
+                        update(
+                            session,
+                            serde_json::json!({"sessionUpdate":"agent_message_chunk","content":img}),
+                        );
                         send(
                             serde_json::json!({"jsonrpc":"2.0","id":id,"result":{"stopReason":"end_turn"}}),
                         );

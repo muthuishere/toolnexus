@@ -136,11 +136,13 @@ defmodule Toolnexus.Acp do
   @spec generate_stream(pid()) :: (map(), (map() -> any()) | nil -> map())
   def generate_stream(pid) do
     fn req, emit ->
-      text = assemble_prompt_text(Map.get(req, :messages) || Map.get(req, "messages") || [])
+      messages = Map.get(req, :messages) || Map.get(req, "messages") || []
+      text = assemble_prompt_text(messages)
+      parts = Enum.flat_map(messages, &msg_parts/1)
 
-      case prompt(pid, text, :infinity, emit) do
-        {:ok, answer} ->
-          %{content: answer}
+      case call_prompt(pid, {text, parts}, :infinity, emit) do
+        {:ok, answer, files} ->
+          %{content: answer, files: files}
 
         {:error, reason} ->
           raise "toolnexus: ACP generate failed: " <> describe_error(reason)
@@ -158,7 +160,14 @@ defmodule Toolnexus.Acp do
   @spec prompt(pid(), String.t(), timeout(), (map() -> any()) | nil) ::
           {:ok, String.t()} | {:error, term()}
   def prompt(pid, text, timeout \\ :infinity, emit \\ nil) do
-    GenServer.call(pid, {:prompt, text, emit}, timeout)
+    case call_prompt(pid, {text, []}, timeout, emit) do
+      {:ok, answer, _files} -> {:ok, answer}
+      err -> err
+    end
+  end
+
+  defp call_prompt(pid, turn, timeout, emit) do
+    GenServer.call(pid, {:prompt, turn, emit}, timeout)
   catch
     :exit, reason -> {:error, {:acp_exit, exit_brief(reason)}}
   end
@@ -233,19 +242,146 @@ defmodule Toolnexus.Acp do
 
   defp msg_role(m), do: to_string(Map.get(m, "role") || Map.get(m, :role) || "user")
 
+  # A parts array (the OpenAI chat wire shape the in-process seam receives)
+  # renders text parts as text and each media part as its §1B description —
+  # never its base64; the media parts travel separately as ACP blocks.
   defp msg_text(m) do
     content = Map.get(m, "content") || Map.get(m, :content)
 
     cond do
       is_binary(content) -> content
-      is_list(content) -> content |> Enum.map(&extract_part_text/1) |> Enum.join("")
+      is_list(content) -> content |> Enum.map(&item_text/1) |> Enum.join("\n")
       true -> ""
     end
   end
 
-  defp extract_part_text(%{"text" => t}), do: to_string(t)
-  defp extract_part_text(%{text: t}), do: to_string(t)
-  defp extract_part_text(_), do: ""
+  defp msg_parts(m) do
+    case Map.get(m, "content") || Map.get(m, :content) do
+      items when is_list(items) ->
+        for item <- items, {:ok, %{"type" => t} = p} <- [wire_part(item)], t != "text", do: p
+
+      _ ->
+        []
+    end
+  end
+
+  defp item_text(item) do
+    case wire_part(item) do
+      {:ok, %{"type" => "text", "text" => t}} -> t
+      {:ok, p} -> describe_part(p)
+      :error -> Jason.encode!(item)
+    end
+  end
+
+  # One OpenAI chat content block read back into a §1B part (string-keyed).
+  defp wire_part(%{text: t}), do: {:ok, %{"type" => "text", "text" => to_string(t)}}
+
+  defp wire_part(%{"type" => "text"} = b),
+    do: {:ok, %{"type" => "text", "text" => to_string(b["text"] || "")}}
+
+  defp wire_part(%{"type" => "image_url"} = b) do
+    url = get_in(b, ["image_url", "url"]) || ""
+
+    case parse_data_url(url) do
+      {:ok, mime, data} -> {:ok, %{"type" => "image", "mimeType" => mime, "data" => data}}
+      # URL-only: an EMPTY mimeType, never inferred from the URL (SPEC §8C).
+      :error when url != "" -> {:ok, %{"type" => "image", "mimeType" => "", "url" => url}}
+      :error -> :error
+    end
+  end
+
+  defp wire_part(%{"type" => "input_audio"} = b) do
+    mime =
+      case "audio/" <> to_string(get_in(b, ["input_audio", "format"]) || "") do
+        "audio/mp3" -> "audio/mpeg"
+        m -> m
+      end
+
+    {:ok,
+     %{"type" => "audio", "mimeType" => mime, "data" => get_in(b, ["input_audio", "data"]) || ""}}
+  end
+
+  defp wire_part(%{"type" => "file"} = b) do
+    case parse_data_url(get_in(b, ["file", "file_data"]) || "") do
+      {:ok, mime, data} ->
+        type =
+          cond do
+            String.starts_with?(mime, "image/") -> "image"
+            String.starts_with?(mime, "audio/") -> "audio"
+            true -> "file"
+          end
+
+        {:ok,
+         %{
+           "type" => type,
+           "mimeType" => mime,
+           "data" => data,
+           "name" => get_in(b, ["file", "filename"]) || ""
+         }}
+
+      :error ->
+        :error
+    end
+  end
+
+  defp wire_part(%{"text" => t}), do: {:ok, %{"type" => "text", "text" => to_string(t)}}
+  defp wire_part(_), do: :error
+
+  defp parse_data_url("data:" <> rest) do
+    case String.split(rest, ",", parts: 2) do
+      [meta, data] ->
+        case String.split(meta, ";") do
+          [mime | flags] when mime != "" ->
+            if "base64" in flags, do: {:ok, mime, data}, else: :error
+
+          _ ->
+            :error
+        end
+
+      _ ->
+        :error
+    end
+  end
+
+  defp parse_data_url(_), do: :error
+
+  # SPEC §8C/§1B: an empty mimeType renders empty — `image (, 0 bytes)` — as in every port.
+  defp describe_part(%{"mimeType" => m} = p) when m in [nil, ""],
+    do:
+      p |> Toolnexus.ContentPart.summary() |> String.replace(" (unknown, ", " (, ", global: false)
+
+  defp describe_part(p), do: Toolnexus.ContentPart.summary(p)
+  defp describe_parts(ps), do: Enum.map_join(ps, "\n", &describe_part/1)
+
+  # session/prompt blocks: the text, then one native block per media part the
+  # agent advertised (initialize promptCapabilities); the rest stay described.
+  defp prompt_blocks(text, parts, caps) do
+    media =
+      for %{"data" => d} = p <- parts,
+          is_binary(d) and d != "",
+          block = media_block(p, caps),
+          do: block
+
+    [%{"type" => "text", "text" => text} | media]
+  end
+
+  defp media_block(%{"type" => t, "mimeType" => m, "data" => d}, caps)
+       when t in ["image", "audio"] do
+    if caps[t] == true, do: %{"type" => t, "mimeType" => m, "data" => d}
+  end
+
+  defp media_block(%{"type" => "file", "mimeType" => m, "data" => d} = p, caps) do
+    if caps["embeddedContext"] == true do
+      name = if p["name"] in [nil, ""], do: "attachment", else: p["name"]
+
+      %{
+        "type" => "resource",
+        "resource" => %{"uri" => "attachment:///" <> name, "mimeType" => m, "blob" => d}
+      }
+    end
+  end
+
+  defp media_block(_p, _caps), do: nil
 
   # --------------------------------------------------------------------------
   # GenServer
@@ -265,7 +401,7 @@ defmodule Toolnexus.Acp do
     case Stdio.open(cfg) do
       {:ok, stdio} ->
         case handshake(stdio, opts, timeout) do
-          {:ok, session_id} ->
+          {:ok, session_id, prompt_caps} ->
             {:ok,
              %{
                stdio: stdio,
@@ -274,6 +410,9 @@ defmodule Toolnexus.Acp do
                buffer: "",
                next_id: 2,
                session_id: session_id,
+               prompt_caps: prompt_caps,
+               files: [],
+               message_parts: [],
                active_from: nil,
                active_id: nil,
                chunks: [],
@@ -321,7 +460,7 @@ defmodule Toolnexus.Acp do
 
     send_req(stdio, init_id, "initialize", %{"protocolVersion" => 1, "clientCapabilities" => caps})
 
-    with {:ok, _init_result} <-
+    with {:ok, init_result} <-
            tag(:initialize, await_handshake_reply(stdio, init_id, "", timeout, "initialize")) do
       new_id = "c-2"
       cwd = Keyword.get(opts, :cwd) || File.cwd!()
@@ -339,7 +478,8 @@ defmodule Toolnexus.Acp do
              tag(:session_new, await_handshake_reply(stdio, new_id, "", timeout, "session/new")),
            sid = result["sessionId"],
            :ok <- set_model(stdio, sid, Keyword.get(opts, :model), timeout) do
-        {:ok, sid}
+        caps = get_in(init_result, ["agentCapabilities", "promptCapabilities"])
+        {:ok, sid, if(is_map(caps), do: caps, else: %{})}
       end
     end
   end
@@ -464,7 +604,7 @@ defmodule Toolnexus.Acp do
     {:stop, :normal, :ok, state}
   end
 
-  defp start_prompt(state, {text, emit}, from) do
+  defp start_prompt(state, {{text, parts}, emit}, from) do
     id = "p-#{state.next_id}"
 
     Stdio.send_msg(state.stdio, %{
@@ -473,7 +613,7 @@ defmodule Toolnexus.Acp do
       "method" => "session/prompt",
       "params" => %{
         "sessionId" => state.session_id,
-        "prompt" => [%{"type" => "text", "text" => text}]
+        "prompt" => prompt_blocks(text, parts, state.prompt_caps)
       }
     })
 
@@ -483,6 +623,8 @@ defmodule Toolnexus.Acp do
         active_from: from,
         active_id: id,
         chunks: [],
+        files: [],
+        message_parts: [],
         emit: emit,
         tool_names: %{}
     }
@@ -562,7 +704,13 @@ defmodule Toolnexus.Acp do
   end
 
   defp route(%{"id" => id, "result" => _}, %{active_id: id} = state) do
-    finish_active(state, {:ok, join_chunks(state)})
+    text =
+      case join_chunks(state) do
+        "" when state.message_parts != [] -> describe_parts(Enum.reverse(state.message_parts))
+        t -> t
+      end
+
+    finish_active(state, {:ok, text, Enum.reverse(state.files)})
   end
 
   defp route(%{"id" => id, "error" => err}, %{active_id: id} = state) do
@@ -596,9 +744,18 @@ defmodule Toolnexus.Acp do
   defp route(_msg, state), do: state
 
   defp accumulate(state, %{"update" => %{"sessionUpdate" => "agent_message_chunk"} = update}) do
-    text = update_text(update)
-    if text != "", do: emit_event(state, %{type: "text", delta: text})
-    %{state | chunks: [text | state.chunks]}
+    case block_part(update["content"]) do
+      {:ok, p} ->
+        # An image/audio chunk is a part, never text (SPEC §8C ACP content parts).
+        %{
+          state
+          | message_parts: [p | state.message_parts],
+            files: [run_file(p, "acp", "") | state.files]
+        }
+
+      :error ->
+        accumulate_text(state, update)
+    end
   end
 
   # Reported, never part of the answer.
@@ -647,20 +804,32 @@ defmodule Toolnexus.Acp do
     end
 
     if u["status"] in ["completed", "failed"] do
+      {output, parts} = tool_content(u["content"])
+
       emit_event(state, %{
         type: "tool_result",
         id: id,
         name: name,
-        output: tool_content_text(u["content"]),
+        output: output,
+        parts: parts,
         is_error: u["status"] == "failed",
         via: "acp"
       })
-    end
 
-    state
+      files = Enum.reduce(parts, state.files, &[run_file(&1, name, id) | &2])
+      %{state | files: files}
+    else
+      state
+    end
   end
 
   defp accumulate(state, _params), do: state
+
+  defp accumulate_text(state, update) do
+    text = update_text(update)
+    if text != "", do: emit_event(state, %{type: "text", delta: text})
+    %{state | chunks: [text | state.chunks]}
+  end
 
   defp update_text(update) do
     case update["content"] do
@@ -669,14 +838,55 @@ defmodule Toolnexus.Acp do
     end
   end
 
-  defp tool_content_text(parts) when is_list(parts) do
-    Enum.map_join(parts, fn
-      %{"content" => %{"text" => t}} when is_binary(t) -> t
-      _ -> ""
-    end)
+  # A tool_call_update's content ([{type:"content", content:ContentBlock}, ...]):
+  # text joins into the output, image/audio blocks become parts. With no text,
+  # the output is the parts' §1B description.
+  defp tool_content(items) when is_list(items) do
+    {texts, parts} =
+      Enum.reduce(items, {[], []}, fn item, {ts, ps} ->
+        block = if is_map(item), do: item["content"]
+
+        case block_part(block) do
+          {:ok, p} -> {ts, [p | ps]}
+          :error -> {[block_text(block) | ts], ps}
+        end
+      end)
+
+    parts = Enum.reverse(parts)
+
+    case texts |> Enum.reverse() |> Enum.join("") do
+      "" when parts != [] -> {describe_parts(parts), parts}
+      out -> {out, parts}
+    end
   end
 
-  defp tool_content_text(_), do: ""
+  defp tool_content(_), do: {"", []}
+
+  defp block_text(%{"text" => t}) when is_binary(t), do: t
+  defp block_text(_), do: ""
+
+  # An ACP image/audio ContentBlock as a §1B part: data wins, a uri-only block
+  # becomes a URL part; anything else is not a part.
+  defp block_part(%{"type" => t} = b) when t in ["image", "audio"] do
+    cond do
+      is_binary(b["data"]) and b["data"] != "" ->
+        {:ok, %{"type" => t, "mimeType" => b["mimeType"], "data" => b["data"]}}
+
+      is_binary(b["uri"]) and b["uri"] != "" ->
+        {:ok, %{"type" => t, "mimeType" => b["mimeType"], "url" => b["uri"]}}
+
+      true ->
+        :error
+    end
+  end
+
+  defp block_part(_), do: :error
+
+  defp run_file(p, from, call_id) do
+    f = %{type: p["type"], mime_type: p["mimeType"], from: from, call_id: call_id}
+    f = if p["url"], do: Map.put(f, :url, p["url"]), else: f
+    if p["data"], do: Map.put(f, :data, p["data"]), else: f
+  end
 
   defp emit_event(%{emit: emit}, ev) when is_function(emit, 1) do
     emit.(ev)

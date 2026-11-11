@@ -24,6 +24,9 @@
 //   cancel     - a prompt containing "block" streams "working" and holds the turn until
 //                a session/cancel notification, then replies stopReason "cancelled";
 //                any later prompt answers "after-cancel-seen:<bool>".
+//   image      - like default, but initialize advertises promptCapabilities {image:true}.
+//   image_out  - a tool_call "screenshot" (t1) whose completed tool_call_update content is one
+//                image block, then a text chunk "here" and an image message chunk.
 //   serialize  - tracks a `busy` flag; if a second session/prompt arrives
 //                while busy, replies with an error instead of processing it
 //                normally, so a client that fails to serialise turns is
@@ -38,6 +41,13 @@ import fs from "node:fs"
 
 const scenario = process.env.ACP_SCENARIO || "default"
 const recordFile = process.env.ACP_RECORD_FILE
+// If set, every session/prompt appends its raw `prompt` block array as one JSON line.
+const promptFile = process.env.ACP_PROMPT_FILE
+// A 1x1 transparent PNG (67 bytes).
+const PNG_B64 = Buffer.from(
+  "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000d49444154789c63000100000500010d0a2db40000000049454e44ae426082",
+  "hex",
+).toString("base64")
 
 function send(msg) {
   process.stdout.write(JSON.stringify(msg) + "\n")
@@ -93,7 +103,10 @@ rl.on("line", (line) => {
 
   switch (msg.method) {
     case "initialize":
-      reply(msg.id, { protocolVersion: 1, agentCapabilities: { loadSession: false } })
+      reply(msg.id, {
+        protocolVersion: 1,
+        agentCapabilities: scenario === "image" ? { loadSession: false, promptCapabilities: { image: true } } : { loadSession: false },
+      })
       break
 
     case "session/new":
@@ -106,6 +119,7 @@ rl.on("line", (line) => {
       break
 
     case "session/prompt": {
+      if (promptFile) fs.appendFileSync(promptFile, JSON.stringify(msg.params?.prompt ?? []) + "\n")
       const parts = (msg.params?.prompt ?? []).map((p) => p.text ?? "")
       const userText = parts.join("")
       promptN += 1
@@ -165,6 +179,16 @@ function handlePrompt(id, sessionId, userText) {
     case "serialize":
       handleSerialize(id, sessionId, userText)
       return
+    case "image_out": {
+      const img = { type: "image", mimeType: "image/png", data: PNG_B64 }
+      const up = (update) => sendNotification("session/update", { sessionId, update })
+      up({ sessionUpdate: "tool_call", toolCallId: "t1", title: "screenshot", kind: "other", status: "pending" })
+      up({ sessionUpdate: "tool_call_update", toolCallId: "t1", status: "completed", content: [{ type: "content", content: img }] })
+      up({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "here" } })
+      up({ sessionUpdate: "agent_message_chunk", content: img })
+      reply(id, { stopReason: "end_turn" })
+      return
+    }
     default:
       sendNotification("session/update", {
         sessionId,

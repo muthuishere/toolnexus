@@ -1,5 +1,7 @@
 package io.github.muthuishere.toolnexus.acp;
 
+import io.github.muthuishere.toolnexus.ContentPart;
+import io.github.muthuishere.toolnexus.ContentParts;
 import io.github.muthuishere.toolnexus.InProcess;
 import io.github.muthuishere.toolnexus.Json;
 import io.github.muthuishere.toolnexus.LlmClient;
@@ -72,6 +74,9 @@ public final class AcpClient implements Closeable, Function<InProcess.Request, I
     private volatile java.util.function.Consumer<Map<String, Object>> updateSink;
     private volatile Options options = new Options();
     private final StringBuilder stderrTail = new StringBuilder();
+
+    /** initialize agentCapabilities.promptCapabilities: which non-text blocks session/prompt may carry. */
+    private volatile boolean capImage, capAudio, capEmbeddedContext;
 
     /** The agent's raw {@code initialize} result. */
     public volatile Map<String, Object> initializeResult = Map.of();
@@ -258,6 +263,12 @@ public final class AcpClient implements Closeable, Function<InProcess.Request, I
             throw new StartException("initialize", "toolnexus: acp: initialize: " + e.getMessage(), e);
         }
         initializeResult = init;
+        if (init.get("agentCapabilities") instanceof Map<?, ?> ac
+                && ac.get("promptCapabilities") instanceof Map<?, ?> pc) {
+            capImage = Boolean.TRUE.equals(pc.get("image"));
+            capAudio = Boolean.TRUE.equals(pc.get("audio"));
+            capEmbeddedContext = Boolean.TRUE.equals(pc.get("embeddedContext"));
+        }
         List<Object> servers = opts.mcpServers == null ? new ArrayList<>() : new ArrayList<>(opts.mcpServers);
 
         // Some agents reject session/new with -32602 unless cwd is ABSOLUTE and an mcpServers
@@ -369,11 +380,15 @@ public final class AcpClient implements Closeable, Function<InProcess.Request, I
      */
     public InProcess.Response generateStream(InProcess.Request request,
                                              java.util.function.Consumer<LlmClient.StreamEvent> emit) throws IOException {
-        String assembled = assemblePrompt(request);
+        List<ContentPart> parts = new ArrayList<>();
+        String assembled = assemblePrompt(request, parts);
         turnLock.lock();
         try {
-            String reply = prompt(assembled, emit);
-            return InProcess.Response.content(reply);
+            List<LlmClient.RunFile> files = new ArrayList<>();
+            String reply = prompt(assembled, parts, files, emit);
+            InProcess.Response resp = InProcess.Response.content(reply);
+            if (!files.isEmpty()) resp.files = files;
+            return resp;
         } finally {
             turnLock.unlock();
         }
@@ -387,14 +402,23 @@ public final class AcpClient implements Closeable, Function<InProcess.Request, I
      * ({@code stale} scenario).
      */
     static String assemblePrompt(InProcess.Request request) {
+        return assemblePrompt(request, null);
+    }
+
+    /**
+     * {@link #assemblePrompt(InProcess.Request)}, collecting every message's non-text parts into
+     * {@code parts} (in message order) so they can travel as native ACP blocks. In the text, each
+     * is named only by its §1B description {@code <type> (<mimeType>, <bytes> bytes)}.
+     */
+    static String assemblePrompt(InProcess.Request request, List<ContentPart> parts) {
         StringBuilder sb = new StringBuilder();
         String currentText = "";
         if (request != null && request.messages != null) {
             for (Object m : request.messages) {
                 if (sb.length() > 0) sb.append('\n');
-                sb.append(formatMessage(m));
+                sb.append(formatMessage(m, parts));
                 Object content = extractContent(m);
-                if (content != null) currentText = contentToText(content);
+                if (content != null) currentText = contentToText(content, null);
             }
         }
         if (sb.length() > 0) sb.append('\n');
@@ -403,11 +427,11 @@ public final class AcpClient implements Closeable, Function<InProcess.Request, I
     }
 
     @SuppressWarnings("unchecked")
-    private static String formatMessage(Object m) {
+    private static String formatMessage(Object m, List<ContentPart> parts) {
         if (!(m instanceof Map)) return String.valueOf(m);
         Map<String, Object> map = (Map<String, Object>) m;
         String role = String.valueOf(map.getOrDefault("role", "user"));
-        return role + ": " + contentToText(map.get("content"));
+        return role + ": " + contentToText(map.get("content"), parts);
     }
 
     @SuppressWarnings("unchecked")
@@ -416,19 +440,126 @@ public final class AcpClient implements Closeable, Function<InProcess.Request, I
         return ((Map<String, Object>) m).get("content");
     }
 
-    private static String contentToText(Object content) {
+    /**
+     * A message's content as text. A parts array (the OpenAI chat wire shape the in-process seam
+     * receives) renders text parts as their text and each media part as its §1B description,
+     * joined by {@code \n}; the media parts go to {@code parts} (when non-null) and their base64
+     * never enters the text. Anything else is JSON-encoded rather than silently dropped.
+     */
+    private static String contentToText(Object content, List<ContentPart> parts) {
         if (content == null) return "";
         if (content instanceof String s) return s;
+        if (content instanceof List<?> items) {
+            List<String> texts = new ArrayList<>();
+            for (Object item : items) {
+                ContentPart p = wirePart(item);
+                if (p == null) {
+                    texts.add(Json.stringify(item));
+                } else if (ContentPart.TEXT.equals(p.type())) {
+                    texts.add(p.text() == null ? "" : p.text());
+                } else {
+                    texts.add(ContentParts.describe(p));
+                    if (parts != null) parts.add(p);
+                }
+            }
+            return String.join("\n", texts);
+        }
         return Json.stringify(content);
     }
 
+    /** One OpenAI chat content block read back into a §1B part, or null when it is not one. */
+    private static ContentPart wirePart(Object item) {
+        if (!(item instanceof Map<?, ?> blk)) return null;
+        Object type = blk.get("type");
+        if ("text".equals(type)) return ContentPart.text(str(blk.get("text")));
+        if ("image_url".equals(type)) {
+            String u = blk.get("image_url") instanceof Map<?, ?> iu ? str(iu.get("url")) : "";
+            String[] d = parseDataUrl(u);
+            if (d != null) return new ContentPart(ContentPart.IMAGE, null, d[0], d[1], null, null);
+            // URL-only: EMPTY mimeType, never inferred from the URL (SPEC §8C).
+            if (!u.isEmpty()) return new ContentPart(ContentPart.IMAGE, null, "", null, u, null);
+            return null;
+        }
+        if ("input_audio".equals(type)) {
+            Map<?, ?> ia = blk.get("input_audio") instanceof Map<?, ?> m ? m : Map.of();
+            String mime = "audio/" + str(ia.get("format"));
+            if (mime.equals("audio/mp3")) mime = "audio/mpeg";
+            return new ContentPart(ContentPart.AUDIO, null, mime, str(ia.get("data")), null, null);
+        }
+        if ("file".equals(type)) {
+            Map<?, ?> f = blk.get("file") instanceof Map<?, ?> m ? m : Map.of();
+            String[] d = parseDataUrl(str(f.get("file_data")));
+            if (d != null) {
+                String name = str(f.get("filename"));
+                return new ContentPart(ContentPart.typeForMime(d[0]), null, d[0], d[1], null,
+                        name.isEmpty() ? null : name);
+            }
+        }
+        return null;
+    }
+
+    /** {@code data:<mime>;base64,<b64>} → {mime, b64}; null for anything else. */
+    private static String[] parseDataUrl(String u) {
+        if (u == null || !u.startsWith("data:")) return null;
+        int comma = u.indexOf(',');
+        if (comma < 0) return null;
+        String meta = u.substring("data:".length(), comma);
+        if (!meta.endsWith(";base64")) return null;
+        String mime = meta.substring(0, meta.length() - ";base64".length());
+        return mime.isEmpty() ? null : new String[]{mime, u.substring(comma + 1)};
+    }
+
+    private static String str(Object o) {
+        return o instanceof String s ? s : "";
+    }
+
+    /**
+     * The session/prompt ContentBlock array: the text block, then one native block per media part
+     * the agent advertised (promptCapabilities). A part it cannot take stays named only by its
+     * description in the text; a part without inline data never becomes a block.
+     */
+    private List<Map<String, Object>> promptBlocks(String text, List<ContentPart> parts) {
+        List<Map<String, Object>> blocks = new ArrayList<>();
+        Map<String, Object> tb = new LinkedHashMap<>();
+        tb.put("type", "text");
+        tb.put("text", text);
+        blocks.add(tb);
+        for (ContentPart p : parts) {
+            if (p.data() == null || p.data().isEmpty()) continue;
+            Map<String, Object> b = new LinkedHashMap<>();
+            if (ContentPart.IMAGE.equals(p.type()) && capImage) {
+                b.put("type", "image");
+                b.put("mimeType", p.mimeType());
+                b.put("data", p.data());
+            } else if (ContentPart.AUDIO.equals(p.type()) && capAudio) {
+                b.put("type", "audio");
+                b.put("mimeType", p.mimeType());
+                b.put("data", p.data());
+            } else if (ContentPart.FILE.equals(p.type()) && capEmbeddedContext) {
+                String name = p.name() == null || p.name().isEmpty() ? "attachment" : p.name();
+                Map<String, Object> res = new LinkedHashMap<>();
+                res.put("uri", "attachment:///" + name);
+                res.put("mimeType", p.mimeType());
+                res.put("blob", p.data());
+                b.put("type", "resource");
+                b.put("resource", res);
+            } else {
+                continue;
+            }
+            blocks.add(b);
+        }
+        return blocks;
+    }
+
     @SuppressWarnings("unchecked")
-    private String prompt(String text, java.util.function.Consumer<LlmClient.StreamEvent> emit) throws IOException {
+    private String prompt(String text, List<ContentPart> parts, List<LlmClient.RunFile> files,
+                          java.util.function.Consumer<LlmClient.StreamEvent> emit) throws IOException {
         String id = "c-" + nextId.incrementAndGet();
         CompletableFuture<Map<String, Object>> future = new CompletableFuture<>();
         pending.put(id, future);
 
         StringBuilder accumulated = new StringBuilder();
+        List<ContentPart> messageParts = new ArrayList<>(); // media the agent sent as message chunks
         Map<String, String> toolNames = new java.util.concurrent.ConcurrentHashMap<>();
         updateSink = params -> {
             Object update = params.get("update");
@@ -438,6 +569,15 @@ public final class AcpClient implements Closeable, Function<InProcess.Request, I
             if ("agent_message_chunk".equals(kind)) {
                 // Only agent_message_chunk forms the reply (ADR 0031 gate item #3).
                 Object content = upd.get("content");
+                ContentPart mp = blockPart(content);
+                if (mp != null) {
+                    // An image/audio chunk is a part, never text (SPEC §8C ACP content parts).
+                    synchronized (accumulated) {
+                        messageParts.add(mp);
+                        files.add(runFile(mp, "acp", ""));
+                    }
+                    return;
+                }
                 if (content instanceof Map<?, ?> c) {
                     Object t = c.get("text");
                     if (t != null) {
@@ -450,9 +590,24 @@ public final class AcpClient implements Closeable, Function<InProcess.Request, I
                 }
                 return;
             }
-            if (emit == null) return;
             String callId = upd.get("toolCallId") instanceof String sid ? sid : "";
             String title = upd.get("title") instanceof String st ? st : "";
+            if ("tool_call".equals(kind)) {
+                toolNames.put(callId, !title.isEmpty() ? title : upd.get("kind") instanceof String k ? k : "");
+            } else if ("tool_call_update".equals(kind) && !title.isEmpty()) {
+                toolNames.put(callId, title);
+            }
+            Object status = upd.get("status");
+            boolean fin = "tool_call_update".equals(kind) && ("completed".equals(status) || "failed".equals(status));
+            ToolContent tc = fin ? toolContent(upd.get("content")) : null;
+            if (tc != null) {
+                // Collected even with no emitter: a non-streaming run still gets the files.
+                String name = toolNames.getOrDefault(callId, "");
+                synchronized (accumulated) {
+                    for (ContentPart p : tc.parts) files.add(runFile(p, name, callId));
+                }
+            }
+            if (emit == null) return;
             if ("agent_thought_chunk".equals(kind)) {
                 // Reported, never part of the answer.
                 if (upd.get("content") instanceof Map<?, ?> c && c.get("text") != null) {
@@ -460,31 +615,26 @@ public final class AcpClient implements Closeable, Function<InProcess.Request, I
                     if (!d.isEmpty()) emit.accept(LlmClient.StreamEvent.thought(d, "acp"));
                 }
             } else if ("tool_call".equals(kind)) {
-                String name = !title.isEmpty() ? title : upd.get("kind") instanceof String k ? k : "";
-                toolNames.put(callId, name);
+                String name = toolNames.getOrDefault(callId, "");
                 Map<String, Object> args = upd.get("rawInput") instanceof Map<?, ?> ri ? (Map<String, Object>) ri : null;
                 emit.accept(LlmClient.StreamEvent.toolCall(callId, name, args).withVia("acp"));
             } else if ("tool_call_update".equals(kind)) {
                 // A title is remembered as the call's name for every later event of this id;
                 // a non-empty rawInput is the call's input arriving late (#188).
-                if (!title.isEmpty()) toolNames.put(callId, title);
                 String name = toolNames.getOrDefault(callId, "");
                 if (upd.get("rawInput") instanceof Map<?, ?> ri && !ri.isEmpty()) {
                     emit.accept(LlmClient.StreamEvent.toolCallArgs(callId, name, (Map<String, Object>) ri, "acp"));
                 }
-                Object status = upd.get("status");
-                if (!"completed".equals(status) && !"failed".equals(status)) return;
-                emit.accept(LlmClient.StreamEvent.toolResult(callId, name, toolContentText(upd.get("content")),
-                        "failed".equals(status)).withVia("acp"));
+                if (tc == null) return;
+                // SPEC §8C: the event's parts are full §1B parts, data included.
+                emit.accept(LlmClient.StreamEvent.toolResultWithData(callId, name, tc.output,
+                        "failed".equals(status), tc.parts).withVia("acp"));
             }
         };
 
-        Map<String, Object> part = new LinkedHashMap<>();
-        part.put("type", "text");
-        part.put("text", text);
         Map<String, Object> promptParams = new LinkedHashMap<>();
         promptParams.put("sessionId", sessionId);
-        promptParams.put("prompt", List.of(part));
+        promptParams.put("prompt", promptBlocks(text, parts));
         pendingMethod.put(id, "session/prompt");
 
         Map<String, Object> req = new LinkedHashMap<>();
@@ -536,20 +686,58 @@ public final class AcpClient implements Closeable, Function<InProcess.Request, I
             throw new IOException("toolnexus: ACP error " + errMap.get("code") + ": " + errMap.get("message"));
         }
         synchronized (accumulated) {
+            // The agent sent only media: the answer is its §1B description.
+            if (accumulated.length() == 0 && !messageParts.isEmpty()) {
+                return ContentParts.describeForOutput(messageParts);
+            }
             return accumulated.toString();
         }
     }
 
-    /** The text of a tool_call_update's {@code content} list ({@code [{content:{text}}]}). */
-    private static String toolContentText(Object raw) {
-        if (!(raw instanceof List<?> parts)) return "";
+    private record ToolContent(String output, List<ContentPart> parts) {}
+
+    /**
+     * A tool_call_update's {@code content} list ({@code [{type:"content", content:ContentBlock}]}):
+     * text blocks concatenate into the output, image/audio blocks become parts. With no text, the
+     * output is the parts' §1B description.
+     */
+    private static ToolContent toolContent(Object raw) {
         StringBuilder b = new StringBuilder();
-        for (Object p : parts) {
-            if (p instanceof Map<?, ?> m && m.get("content") instanceof Map<?, ?> c && c.get("text") instanceof String t) {
-                b.append(t);
+        List<ContentPart> parts = new ArrayList<>();
+        if (raw instanceof List<?> items) {
+            for (Object it : items) {
+                if (!(it instanceof Map<?, ?> m)) continue;
+                ContentPart p = blockPart(m.get("content"));
+                if (p != null) {
+                    parts.add(p);
+                } else if (m.get("content") instanceof Map<?, ?> c && c.get("text") instanceof String t) {
+                    b.append(t);
+                }
             }
         }
-        return b.toString();
+        String out = b.toString();
+        if (out.isEmpty() && !parts.isEmpty()) out = ContentParts.describeForOutput(parts);
+        return new ToolContent(out, parts);
+    }
+
+    /**
+     * An ACP image/audio ContentBlock ({@code {type, mimeType, data, uri?}}) as a §1B part: data
+     * wins, a uri-only block is a URL part; any other block is not a part (null).
+     */
+    private static ContentPart blockPart(Object raw) {
+        if (!(raw instanceof Map<?, ?> blk)) return null;
+        String type = str(blk.get("type"));
+        if (!ContentPart.IMAGE.equals(type) && !ContentPart.AUDIO.equals(type)) return null;
+        String mime = blk.get("mimeType") instanceof String s ? s : null;
+        String data = str(blk.get("data"));
+        if (!data.isEmpty()) return new ContentPart(type, null, mime, data, null, null);
+        String uri = str(blk.get("uri"));
+        if (!uri.isEmpty()) return new ContentPart(type, null, mime, null, uri, null);
+        return null;
+    }
+
+    private static LlmClient.RunFile runFile(ContentPart p, String from, String callId) {
+        return new LlmClient.RunFile(p.type(), p.mimeType(), p.url(), p.data(), from, callId);
     }
 
     // ---- transport: readLoop + call/reply/write -------------------------------------------

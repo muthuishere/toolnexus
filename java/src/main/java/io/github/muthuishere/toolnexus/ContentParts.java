@@ -151,7 +151,7 @@ public final class ContentParts {
     }
 
     /** Human-readable {@code output} for a result that carried only non-text parts (§2). */
-    static String describeForOutput(List<ContentPart> parts) {
+    public static String describeForOutput(List<ContentPart> parts) {
         StringBuilder sb = new StringBuilder();
         for (ContentPart p : parts) {
             if (sb.length() > 0) sb.append("\n");
@@ -164,7 +164,7 @@ public final class ContentParts {
      * A part described in text (SPEC §1B): {@code <type> (<mimeType>, <bytes> bytes)}, byte-
      * identical across all seven ports.
      */
-    static String describe(ContentPart p) {
+    public static String describe(ContentPart p) {
         return p.type() + " (" + p.mimeType() + ", " + p.bytes() + " bytes)";
     }
 }

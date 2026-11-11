@@ -129,8 +129,11 @@ func runACPFakeServer() {
 		switch msg.Method {
 		case "initialize":
 			caps := map[string]any{"loadSession": false}
-			if scenario == "image" {
+			switch scenario {
+			case "image":
 				caps["promptCapabilities"] = map[string]any{"image": true}
+			case "media":
+				caps["promptCapabilities"] = map[string]any{"image": true, "audio": true, "embeddedContext": true}
 			}
 			reply(msg.ID, map[string]any{
 				"protocolVersion":   1,

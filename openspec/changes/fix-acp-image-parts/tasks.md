@@ -6,15 +6,15 @@
 
 ## 2. Ports (outbound blocks + inbound parts + RunResult.files, with tests from the porting brief)
 
-- [ ] 2.1 js
-- [ ] 2.2 python
+- [x] 2.1 js
+- [x] 2.2 python
 - [x] 2.3 golang (`golang/acp.go`, `golang/inprocess.go`, `golang/client.go`; tests `golang/acp_image_test.go`)
-- [ ] 2.4 java
-- [ ] 2.5 csharp
-- [ ] 2.6 elixir
-- [ ] 2.7 clojure
-- [ ] 2.8 rust
+- [x] 2.4 java
+- [x] 2.5 csharp
+- [x] 2.6 elixir
+- [x] 2.7 clojure
+- [x] 2.8 rust
 
 ## 3. Verify
 
-- [ ] 3.1 Each port's narrowest suite green; cross-port behaviour matches the four test cases
+- [x] 3.1 Each port's narrowest suite green; cross-port behaviour matches the four test cases

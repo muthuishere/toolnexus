@@ -352,6 +352,9 @@ pub struct StreamEvent {
     pub args: Value,
     pub output: String,
     pub is_error: bool,
+    /// `tool_result` only: the result's non-text parts (§1B), e.g. an image an
+    /// ACP agent's own tool returned.
+    pub parts: Vec<ContentPart>,
     pub metadata: Option<Map<String, Value>>,
     pub usage: Option<Usage>,
     pub result: Option<Box<RunResult>>,
@@ -574,6 +577,9 @@ pub(crate) struct RawResponse {
     /// header's trimmed value is `true`/`false` (case-insensitive).
     pub should_retry: Option<bool>,
     pub body: RespBody,
+    /// In-process only: media the model's side produced this call (an ACP
+    /// agent's own tools), filled by the time the body ends (SPEC §8C).
+    pub agent_files: Option<Arc<Mutex<Vec<RunFile>>>>,
 }
 
 impl RawResponse {
@@ -1292,6 +1298,7 @@ impl Client {
                     status: resp.status().as_u16(),
                     retry_after,
                     should_retry,
+                    agent_files: None,
                     body: RespBody::Http(resp),
                 })
             }
@@ -1576,6 +1583,7 @@ impl Client {
             self.emit_llm(model, "error", t0, 0, 0);
             return Err(Self::provider_error(resp).await);
         }
+        let agent_files = resp.agent_files.clone();
         let parsed = if streaming {
             self.read_stream(st, resp, cancel, tx).await
         } else {
@@ -1588,6 +1596,9 @@ impl Client {
                 return Err(e);
             }
         };
+        if let Some(f) = agent_files {
+            st.files.append(&mut f.lock().unwrap());
+        }
         if streaming {
             self.emit_llm(
                 model,

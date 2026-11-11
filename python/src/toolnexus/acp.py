@@ -68,6 +68,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
+from .content import ContentPartError, _parse_data_url, describe_part
+
 __all__ = [
     "ACPOptions",
     "ACPClient",
@@ -180,44 +182,114 @@ def _safe_emit(emit: Optional[Callable[[dict[str, Any]], None]], ev: dict[str, A
         pass
 
 
-def _tool_content_text(content: Any) -> str:
-    """The text parts of a tool_call_update's content array
-    (``[{type: "content", content: {type: "text", text}}, ...]``), joined."""
+def _block_part(block: Any) -> Optional[dict[str, Any]]:
+    """An ACP image/audio ContentBlock (``{type, mimeType, data, uri?}``) as a §1B
+    part dict: ``data`` wins; a uri-only block becomes a URL part. Any other block
+    is not a part (SPEC §8C ACP content parts)."""
+    if not isinstance(block, dict) or block.get("type") not in ("image", "audio"):
+        return None
+    mime = block.get("mimeType") or ""
+    if block.get("data"):
+        return {"type": block["type"], "mimeType": mime, "data": block["data"]}
+    if block.get("uri"):
+        return {"type": block["type"], "mimeType": mime, "url": block["uri"]}
+    return None
+
+
+def _describe_parts(parts: list[dict[str, Any]]) -> str:
+    return "\n".join(describe_part(p) for p in parts)
+
+
+def _tool_content(content: Any) -> tuple[str, list[dict[str, Any]]]:
+    """A tool_call_update's content array (``[{type: "content", content:
+    ContentBlock}, ...]``): text blocks join into the output, image/audio blocks
+    become parts. With no text, the output is the parts' §1B description."""
     if not isinstance(content, list):
-        return ""
+        return "", []
     out: list[str] = []
-    for part in content:
-        inner = (part or {}).get("content") if isinstance(part, dict) else None
-        if isinstance(inner, dict) and isinstance(inner.get("text"), str):
+    parts: list[dict[str, Any]] = []
+    for item in content:
+        inner = (item or {}).get("content") if isinstance(item, dict) else None
+        part_ = _block_part(inner)
+        if part_ is not None:
+            parts.append(part_)
+        elif isinstance(inner, dict) and isinstance(inner.get("text"), str):
             out.append(inner["text"])
-    return "".join(out)
+    text = "".join(out)
+    if not text and parts:
+        text = _describe_parts(parts)
+    return text, parts
 
 
-def _content_to_text(content: Any) -> str:
-    """Flatten a message's ``content`` — a plain string, or a §1B content-part list
-    — to text. Non-text parts (image/audio/file) are silently skipped: ACP's prompt
-    turn is text-only in this client, matching the ``session/prompt`` shape used
-    throughout the spike and the ADR."""
+def _run_file(part_: dict[str, Any], source: str, call_id: str) -> dict[str, Any]:
+    return {**part_, "from": source, "callId": call_id}
+
+
+def _wire_part(item: dict[str, Any]) -> Optional[dict[str, Any]]:
+    """One OpenAI chat content block (or a §1B part dict) read back as a §1B part."""
+    kind = item.get("type")
+    if kind == "image_url":
+        url = (item.get("image_url") or {}).get("url") or ""
+        try:
+            mime, b64 = _parse_data_url(url) if url.startswith("data:") else ("", "")
+        except ContentPartError:
+            mime, b64 = "", ""
+        if b64:
+            return {"type": "image", "mimeType": mime, "data": b64}
+        return {"type": "image", "mimeType": "", "url": url} if url else None
+    if kind == "input_audio":
+        audio = item.get("input_audio") or {}
+        mime = "audio/" + (audio.get("format") or "")
+        if mime == "audio/mp3":
+            mime = "audio/mpeg"
+        return {"type": "audio", "mimeType": mime, "data": audio.get("data") or ""}
+    if kind == "file":
+        f = item.get("file") or {}
+        try:
+            mime, b64 = _parse_data_url(f.get("file_data") or "")
+        except ContentPartError:
+            return None
+        kind_ = "image" if mime.startswith("image/") else "audio" if mime.startswith("audio/") else "file"
+        out = {"type": kind_, "mimeType": mime, "data": b64}
+        if f.get("filename"):
+            out["name"] = f["filename"]
+        return out
+    if kind in ("image", "audio", "file") and (item.get("data") or item.get("url")):
+        return {k: item[k] for k in ("type", "mimeType", "data", "url", "name") if item.get(k)}
+    return None
+
+
+def _flatten_content(content: Any) -> tuple[str, list[dict[str, Any]]]:
+    """Flatten a message's ``content`` — a plain string, or a parts list — to text
+    plus its media parts. Each media part is named in the text by its §1B
+    description ``<type> (<mimeType>, <bytes> bytes)``; its base64 never enters the
+    text, and the part itself travels as a native ACP block (SPEC §8C)."""
     if content is None:
-        return ""
+        return "", []
     if isinstance(content, str):
-        return content
+        return content, []
     if isinstance(content, list):
-        parts: list[str] = []
+        texts: list[str] = []
+        parts: list[dict[str, Any]] = []
         for item in content:
             if isinstance(item, dict):
+                media = _wire_part(item)
+                if media is not None:
+                    texts.append(describe_part(media))
+                    parts.append(media)
+                    continue
                 text = item.get("text")
                 if text is None and item.get("type") == "text":
                     text = item.get("value")
                 if text is not None:
-                    parts.append(str(text))
+                    texts.append(str(text))
             elif isinstance(item, str):
-                parts.append(item)
-        return "".join(parts)
-    return str(content)
+                texts.append(item)
+        return "\n".join(texts), parts
+    return str(content), []
 
 
-def _render_prompt(request: dict[str, Any]) -> str:
+def _render_prompt(request: dict[str, Any]) -> tuple[str, list[dict[str, Any]]]:
     """Render the full accumulated transcript as one prompt string, per ADR 0031's
     chosen default (full request every turn, not a delta), and append the
     supersedes marker naming the latest user turn.
@@ -226,15 +298,20 @@ def _render_prompt(request: dict[str, Any]) -> str:
     leaving the marker to be bolted on by hand ("ship the supersedes marker as part
     of the default `Generate`'s prompt assembly (not left to the caller)",
     ``spikes/acp/SPIKE.md``).
+
+    Media parts are returned separately, in message order, to travel as native
+    ACP blocks.
     """
     messages = request.get("messages") or []
     lines: list[str] = []
+    media: list[dict[str, Any]] = []
     last_user_text = ""
     for message in messages:
         if not isinstance(message, dict):
             continue
         role = message.get("role", "")
-        text = _content_to_text(message.get("content"))
+        text, parts = _flatten_content(message.get("content"))
+        media.extend(parts)
         if text:
             lines.append(f"{role}: {text}")
             if role == "user":
@@ -242,7 +319,7 @@ def _render_prompt(request: dict[str, Any]) -> str:
     if not last_user_text and lines:
         last_user_text = lines[-1]
     lines.append(f"{_SUPERSEDES_MARKER}: {last_user_text}")
-    return "\n".join(lines)
+    return "\n".join(lines), media
 
 
 class ACPClient:
@@ -269,6 +346,8 @@ class ACPClient:
         self.initialize_result: dict[str, Any] = {}
 
         self._accum: list[str] = []
+        self._message_parts: list[dict[str, Any]] = []  # media the agent sent as message chunks
+        self._files: list[dict[str, Any]] = []  # inbound media, in arrival order (SPEC §8C)
         # The active turn's stream emitter (None outside a streaming turn) and the
         # tool-call titles seen this turn, keyed by toolCallId.
         self._emit: Optional[Callable[[dict[str, Any]], None]] = None
@@ -408,6 +487,13 @@ class ACPClient:
             # tool_call/tool_call_update narration never reach the content — mixing
             # them in is exactly the corruption ADR 0031 gate item 3 proves against
             # structured output. They are REPORTED to a streaming emitter instead.
+            media = _block_part(update.get("content"))
+            if media is not None:
+                # An image/audio chunk is a part, never text (SPEC §8C ACP content parts).
+                with self._state_lock:
+                    self._message_parts.append(media)
+                    self._files.append(_run_file(media, "acp", ""))
+                return
             text = (update.get("content") or {}).get("text")
             if text:
                 with self._state_lock:
@@ -434,13 +520,18 @@ class ACPClient:
                 if title:
                     self._tool_names[call_id] = title
                 name = self._tool_names.get(call_id, "")
+            status = update.get("status")
+            final = status in ("completed", "failed")
+            output, parts = _tool_content(update.get("content")) if final else ("", [])
+            if parts:
+                with self._state_lock:
+                    self._files.extend(_run_file(p, name, call_id) for p in parts)
             if emit is None:
                 return
             raw = update.get("rawInput")
             if isinstance(raw, dict) and raw:
                 _safe_emit(emit, {"type": "tool_call_args", "id": call_id, "name": name, "args": raw, "via": "acp"})
-            status = update.get("status")
-            if status not in ("completed", "failed"):
+            if not final:
                 return
             _safe_emit(
                 emit,
@@ -448,7 +539,8 @@ class ACPClient:
                     "type": "tool_result",
                     "id": call_id,
                     "name": name,
-                    "output": _tool_content_text(update.get("content")),
+                    "output": output,
+                    "parts": parts,
                     "is_error": status == "failed",
                     "via": "acp",
                 },
@@ -588,9 +680,11 @@ class ACPClient:
     ) -> dict[str, Any]:
         if cancel is not None and cancel.is_set():
             raise ACPCancelledError("acp: turn cancelled")
-        prompt_text = _render_prompt(request)
+        prompt_text, prompt_parts = _render_prompt(request)
         with self._state_lock:
             self._accum = []
+            self._message_parts = []
+            self._files = []
             self._tool_names = {}
             self._emit = emit
 
@@ -609,7 +703,7 @@ class ACPClient:
                 "method": "session/prompt",
                 "params": {
                     "sessionId": self._session_id,
-                    "prompt": [{"type": "text", "text": prompt_text}],
+                    "prompt": self._prompt_blocks(prompt_text, prompt_parts),
                 },
             }
         )
@@ -644,7 +738,30 @@ class ACPClient:
 
         with self._state_lock:
             content = "".join(self._accum)
-        return {"content": content}
+            if not content and self._message_parts:
+                content = _describe_parts(self._message_parts)
+            files = list(self._files)
+        return {"content": content, "files": files}
+
+    def _prompt_blocks(self, text: str, parts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """The session/prompt ContentBlocks: the text block, then one native block
+        per media part the agent advertised (initialize promptCapabilities). A part
+        the agent cannot take stays named only by its description in the text."""
+        caps = (self.initialize_result.get("agentCapabilities") or {}).get("promptCapabilities") or {}
+        blocks: list[dict[str, Any]] = [{"type": "text", "text": text}]
+        for p in parts:
+            data = p.get("data")
+            if not data:
+                continue  # ACP image/audio blocks require inline data
+            kind, mime = p.get("type"), p.get("mimeType")
+            if kind == "image" and caps.get("image"):
+                blocks.append({"type": "image", "mimeType": mime, "data": data})
+            elif kind == "audio" and caps.get("audio"):
+                blocks.append({"type": "audio", "mimeType": mime, "data": data})
+            elif kind == "file" and caps.get("embeddedContext"):
+                blocks.append({"type": "resource", "resource": {
+                    "uri": "attachment:///" + (p.get("name") or "attachment"), "mimeType": mime, "blob": data}})
+        return blocks
 
     def _await_reply(
         self, reply_q: "queue.Queue[dict[str, Any]]", cancel: Optional[threading.Event]

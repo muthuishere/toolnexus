@@ -4355,6 +4355,14 @@ Wire behaviour:
   supersedes marker). A text part renders as its text; each non-text part renders **in its place** as
   its §1B description `<type> (<mimeType>, <N> bytes)` (N = decoded byte count; e.g.
   `image (image/png, 67 bytes)`), parts joined by `\n`. **Base64 never appears inside a text block.**
+- Reading the OpenAI chat content array the seam receives: `text` ⇒ its text; `image_url` with a
+  base64 data URL ⇒ image part; `image_url` with any other URL (including a non-base64 `data:` URL)
+  ⇒ URL-only image part with an **empty** `mimeType` — never inferred from the URL — so its
+  description is `image (, 0 bytes)`; `input_audio` ⇒ audio part `audio/<format>` (`mp3` ⇒
+  `audio/mpeg`); `file` whose `file_data` is a base64 data URL ⇒ a part typed **by its mime**
+  (`image/*` ⇒ image, `audio/*` ⇒ audio, else file) with `name` = `filename`. Any other item renders
+  as its JSON. A data URL is accepted only as `data:<mime>;base64,<payload>` with a non-empty
+  `<mime>`; anything else is not a data URL.
 - `prompt` = `[ {type:"text", text}, …one block per non-text part, in message order… ]`:
   - image part with `data`, `image` advertised ⇒ `{type:"image", mimeType, data}`;
   - audio part with `data`, `audio` advertised ⇒ `{type:"audio", mimeType, data}`;
@@ -4369,10 +4377,14 @@ Wire behaviour:
   set ⇒ `{type, mimeType, data}`; else `uri` set ⇒ `{type, mimeType, url:uri}`; neither ⇒ ignored.
   Other block types are not parts.
 - **Completed/failed `tool_call_update`** — `content` is `[{type:"content", content:ContentBlock}, …]`.
-  Text blocks concatenate into `output`; image/audio blocks become the `tool_result` event's `parts`
+  Text blocks concatenate into `output` with **no separator** (unlike the outbound `\n` join);
+  image/audio blocks become the `tool_result` event's `parts`
   (in order). With no text, `output` = the parts' §1B descriptions joined by `\n` (the §0.4 MCP rule).
   Each part is also a `RunResult.files` entry with `from` = the tool call's current name (its
   `title`, else `kind`, renamed by a later non-empty `title`) and `callId` = the `toolCallId`.
+  The event's `parts` are full §1B parts **with `data`** (as in `RunResult.files`): a stream event
+  is a value handed to the host, not a log line, so the §8 "never render `data`" rule (logs,
+  observability events, error text) does not strip it.
 - **`agent_message_chunk`** carrying an image/audio block is never answer text: it becomes a
   `RunResult.files` entry with `from:"acp"`, `callId:""`. If the turn's answer text is empty and the
   agent sent such parts, the answer is their §1B descriptions joined by `\n`.

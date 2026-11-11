@@ -240,7 +240,7 @@ class AcpClientTest {
      * single-call unit test we drive the SAME wire shape those callers build (an OpenAI-style
      * {@code messages} array) through {@link InProcess.GenerateBackedHttpClient}, which is the
      * one public adapter that turns it into a real {@link InProcess.Request}. */
-    private static InProcess.Request request(List<Object> messages) {
+    static InProcess.Request request(List<Object> messages) {
         InProcess.Request[] captured = new InProcess.Request[1];
         InProcess.GenerateBackedHttpClient shim = new InProcess.GenerateBackedHttpClient(req -> {
             captured[0] = req;

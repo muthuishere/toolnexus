@@ -606,10 +606,12 @@ defmodule Toolnexus.Client do
       when is_binary(prompt) or is_list(prompt) do
     client = arm_deadline(client)
 
-    case client.style do
-      "anthropic" -> run_anthropic(client, prompt, toolkit, opts[:history])
-      _ -> run_openai(client, prompt, toolkit, opts[:history])
-    end
+    with_agent_files(fn ->
+      case client.style do
+        "anthropic" -> run_anthropic(client, prompt, toolkit, opts[:history])
+        _ -> run_openai(client, prompt, toolkit, opts[:history])
+      end
+    end)
   end
 
   @doc """
@@ -1007,11 +1009,38 @@ defmodule Toolnexus.Client do
                   "complete answer. Use run/4, supply `:generate_stream`, or a `:transport` that streams."
 
         generate ->
-          in_process_response(generate.(sem) || %{})
+          in_process_response(add_agent_files(generate.(sem) || %{}))
 
         true ->
-          in_process_response(generate_stream.(sem, fn _ -> :ok end) || %{})
+          in_process_response(add_agent_files(generate_stream.(sem, fn _ -> :ok end) || %{}))
       end
+    end
+  end
+
+  # Files an in-process model produced on its own side (an ACP agent's tool
+  # calls, SPEC §8C content parts) — not RunResult.tool_calls. The transport
+  # runs in the loop's process, so the per-run sink is a process-dictionary
+  # entry that finish_calls/1 drains after the client-tool files.
+  @agent_files :toolnexus_agent_files
+
+  defp add_agent_files(answer) do
+    case Map.get(answer, :files) || Map.get(answer, "files") do
+      [_ | _] = files -> Process.put(@agent_files, Process.get(@agent_files, []) ++ files)
+      _ -> :ok
+    end
+
+    answer
+  end
+
+  defp take_agent_files, do: Process.delete(@agent_files) || []
+
+  defp with_agent_files(fun) do
+    prev = Process.delete(@agent_files)
+
+    try do
+      fun.()
+    after
+      if prev, do: Process.put(@agent_files, prev), else: Process.delete(@agent_files)
     end
   end
 
@@ -1091,7 +1120,7 @@ defmodule Toolnexus.Client do
                 end
 
               {^ref, :ret, answer} ->
-                {stream_tail(answer, st.texted), %{st | done: true}}
+                {stream_tail(add_agent_files(answer), st.texted), %{st | done: true}}
 
               {^ref, :raise, e, stack} ->
                 reraise e, stack
@@ -2399,7 +2428,8 @@ defmodule Toolnexus.Client do
 
   # §8 RunResult: strip the internal call id and collect every non-text part, in call order.
   defp finish_calls(tool_calls) do
-    {Enum.map(tool_calls, &Map.drop(&1, [:__call_id, :__paths])), run_files(tool_calls)}
+    {Enum.map(tool_calls, &Map.drop(&1, [:__call_id, :__paths])),
+     run_files(tool_calls) ++ take_agent_files()}
   end
 
   @doc false
