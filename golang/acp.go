@@ -536,7 +536,7 @@ func (c *ACPClient) call(ctx context.Context, method string, params any) (json.R
 // sendPrompt: one session/prompt turn, accumulating only agent_message_chunk.
 // ---------------------------------------------------------------------------
 
-func (c *ACPClient) sendPrompt(ctx context.Context, text string, parts []ContentPart, emit func(StreamEvent)) (string, error) {
+func (c *ACPClient) sendPrompt(ctx context.Context, text string, parts []ContentPart, emit func(StreamEvent)) (string, []RunFile, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -549,6 +549,8 @@ func (c *ACPClient) sendPrompt(ctx context.Context, text string, parts []Content
 
 	var accMu sync.Mutex
 	var clean strings.Builder
+	var files []RunFile            // inbound media, in arrival order
+	var messageParts []ContentPart // media the agent sent as message chunks
 	toolNames := map[string]string{}
 	c.updateSink = func(raw json.RawMessage) {
 		var upd struct {
@@ -575,6 +577,14 @@ func (c *ACPClient) sendPrompt(ctx context.Context, text string, parts []Content
 				Text string `json:"text"`
 			}
 			_ = json.Unmarshal(u.Content, &part)
+			if mp, ok := acpBlockPart(u.Content); ok {
+				// An image/audio chunk is a part, never text (SPEC §8C ACP content parts).
+				accMu.Lock()
+				messageParts = append(messageParts, mp)
+				files = append(files, acpRunFile(mp, "acp", ""))
+				accMu.Unlock()
+				return
+			}
 			accMu.Lock()
 			clean.WriteString(part.Text)
 			accMu.Unlock()
@@ -610,6 +620,15 @@ func (c *ACPClient) sendPrompt(ctx context.Context, text string, parts []Content
 				toolNames[u.ToolCallID] = u.Title
 			}
 			name := toolNames[u.ToolCallID]
+			final := u.Status == "completed" || u.Status == "failed"
+			var output string
+			var tparts []ContentPart
+			if final {
+				output, tparts = acpToolContent(u.Content)
+				for _, p := range tparts {
+					files = append(files, acpRunFile(p, name, u.ToolCallID))
+				}
+			}
 			accMu.Unlock()
 			if emit == nil {
 				return
@@ -617,11 +636,11 @@ func (c *ACPClient) sendPrompt(ctx context.Context, text string, parts []Content
 			if len(u.RawInput) > 0 {
 				emit(StreamEvent{Type: "tool_call_args", ID: u.ToolCallID, Name: name, Args: u.RawInput, Via: "acp"})
 			}
-			if u.Status != "completed" && u.Status != "failed" {
+			if !final {
 				return
 			}
 			emit(StreamEvent{Type: "tool_result", ID: u.ToolCallID, Name: name, Via: "acp",
-				Output: acpToolContentText(u.Content), IsError: u.Status == "failed"})
+				Output: output, Parts: tparts, IsError: u.Status == "failed"})
 		}
 	}
 	c.mu.Unlock()
@@ -636,6 +655,18 @@ func (c *ACPClient) sendPrompt(ctx context.Context, text string, parts []Content
 	timer := time.NewTimer(c.permissionTimeout)
 	defer timer.Stop()
 
+	// answer: the clean message text — or, when the agent sent only media,
+	// its §1B description — plus every inbound media file.
+	answer := func() (string, []RunFile, error) {
+		accMu.Lock()
+		defer accMu.Unlock()
+		text := clean.String()
+		if text == "" && len(messageParts) > 0 {
+			text = describeParts(messageParts)
+		}
+		return text, files, nil
+	}
+
 	finish := func() {
 		c.mu.Lock()
 		delete(c.pending, id)
@@ -648,27 +679,23 @@ func (c *ACPClient) sendPrompt(ctx context.Context, text string, parts []Content
 	case msg := <-replyCh:
 		finish()
 		if msg.Error != nil {
-			return "", fmt.Errorf("acp error %d: %s", msg.Error.Code, msg.Error.Message)
+			return "", nil, fmt.Errorf("acp error %d: %s", msg.Error.Code, msg.Error.Message)
 		}
-		accMu.Lock()
-		defer accMu.Unlock()
-		return clean.String(), nil
+		return answer()
 	case <-c.exited:
 		finish()
 		select { // a reply delivered just before exit still counts
 		case msg := <-replyCh:
 			if msg.Error != nil {
-				return "", fmt.Errorf("acp error %d: %s", msg.Error.Code, msg.Error.Message)
+				return "", nil, fmt.Errorf("acp error %d: %s", msg.Error.Code, msg.Error.Message)
 			}
-			accMu.Lock()
-			defer accMu.Unlock()
-			return clean.String(), nil
+			return answer()
 		default:
 		}
-		return "", &ACPExitedError{Method: "session/prompt"}
+		return "", nil, &ACPExitedError{Method: "session/prompt"}
 	case <-timer.C:
 		finish()
-		return "", &ACPPermissionTimeoutError{Waited: c.permissionTimeout}
+		return "", nil, &ACPPermissionTimeoutError{Waited: c.permissionTimeout}
 	case <-ctx.Done():
 		// ACP: session/cancel is a notification; the agent then ends the
 		// turn with stopReason "cancelled". Wait (bounded) for that reply so
@@ -682,26 +709,70 @@ func (c *ACPClient) sendPrompt(ctx context.Context, text string, parts []Content
 		case <-wait.C:
 		}
 		finish()
-		return "", ctx.Err()
+		return "", nil, ctx.Err()
 	}
 }
 
-// acpToolContentText joins the text parts of a tool_call_update's content
-// array ([{type:"content", content:{type:"text", text}}, ...]).
-func acpToolContentText(raw json.RawMessage) string {
-	var parts []struct {
-		Content struct {
-			Text string `json:"text"`
-		} `json:"content"`
+// acpToolContent reads a tool_call_update's content array
+// ([{type:"content", content:ContentBlock}, ...]): text blocks join into the
+// output; image/audio blocks become parts. With no text, the output is the
+// parts' §1B description (as for an image-only MCP result, §0.4).
+func acpToolContent(raw json.RawMessage) (string, []ContentPart) {
+	var items []struct {
+		Type    string          `json:"type"`
+		Content json.RawMessage `json:"content"`
 	}
-	if json.Unmarshal(raw, &parts) != nil {
-		return ""
+	if json.Unmarshal(raw, &items) != nil {
+		return "", nil
 	}
 	var b strings.Builder
-	for _, p := range parts {
-		b.WriteString(p.Content.Text)
+	var parts []ContentPart
+	for _, it := range items {
+		if p, ok := acpBlockPart(it.Content); ok {
+			parts = append(parts, p)
+			continue
+		}
+		var t struct {
+			Text string `json:"text"`
+		}
+		_ = json.Unmarshal(it.Content, &t)
+		b.WriteString(t.Text)
 	}
-	return b.String()
+	out := b.String()
+	if out == "" && len(parts) > 0 {
+		out = describeParts(parts)
+	}
+	return out, parts
+}
+
+// acpBlockPart reads an ACP image/audio ContentBlock
+// ({type, mimeType, data, uri?}) as a §1B part. data wins; a uri-only block
+// becomes a URL part. Any other block type is not a part.
+func acpBlockPart(raw json.RawMessage) (ContentPart, bool) {
+	var blk struct {
+		Type     string `json:"type"`
+		MimeType string `json:"mimeType"`
+		Data     string `json:"data"`
+		URI      string `json:"uri"`
+	}
+	if len(raw) == 0 || json.Unmarshal(raw, &blk) != nil {
+		return ContentPart{}, false
+	}
+	if blk.Type != PartImage && blk.Type != PartAudio {
+		return ContentPart{}, false
+	}
+	if blk.Data != "" {
+		return ContentPart{Type: blk.Type, MimeType: blk.MimeType, Data: blk.Data}, true
+	}
+	if blk.URI != "" {
+		return ContentPart{Type: blk.Type, MimeType: blk.MimeType, URL: blk.URI}, true
+	}
+	return ContentPart{}, false
+}
+
+// acpRunFile is one inbound part as a RunResult.files entry.
+func acpRunFile(p ContentPart, from, callID string) RunFile {
+	return RunFile{Type: p.Type, MimeType: p.MimeType, URL: p.URL, Data: p.Data, From: from, CallID: callID}
 }
 
 // ---------------------------------------------------------------------------
@@ -738,11 +809,11 @@ func (c *ACPClient) GenerateStream(ctx context.Context, req InProcessRequest, em
 	c.promptMu.Lock()
 	defer c.promptMu.Unlock()
 
-	content, err := c.sendPrompt(ctx, prompt, parts, emit)
+	content, files, err := c.sendPrompt(ctx, prompt, parts, emit)
 	if err != nil {
 		return InProcessResponse{}, err
 	}
-	return InProcessResponse{Content: content}, nil
+	return InProcessResponse{Content: content, Files: files}, nil
 }
 
 // renderACPPrompt flattens req.Messages into "role: content" lines (the

@@ -230,6 +230,10 @@ func runACPFakeServer() {
 					reply(id, map[string]any{"stopReason": "end_turn"})
 					atomic.StoreInt32(&busy, 0)
 				}()
+			case "image_out":
+				// The agent's own tool returns an image, then the agent
+				// replies with text and an image of its own (inbound blocks).
+				acpHandleImageOutForTest(sendNotification, reply, id, sid)
 			default: // warm
 				sendNotification("session/update", map[string]any{
 					"sessionId": sid,
