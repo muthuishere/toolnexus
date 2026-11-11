@@ -128,9 +128,13 @@ func runACPFakeServer() {
 
 		switch msg.Method {
 		case "initialize":
+			caps := map[string]any{"loadSession": false}
+			if scenario == "image" {
+				caps["promptCapabilities"] = map[string]any{"image": true}
+			}
 			reply(msg.ID, map[string]any{
 				"protocolVersion":   1,
-				"agentCapabilities": map[string]any{"loadSession": false},
+				"agentCapabilities": caps,
 			})
 
 		case "session/new":
@@ -151,6 +155,11 @@ func runACPFakeServer() {
 				} `json:"prompt"`
 			}
 			_ = json.Unmarshal(msg.Params, &params)
+			var rawPrompt struct {
+				Prompt []any `json:"prompt"`
+			}
+			_ = json.Unmarshal(msg.Params, &rawPrompt)
+			emit(acpEvent{Type: "prompt_blocks", Data: map[string]any{"prompt": rawPrompt.Prompt}})
 			var text strings.Builder
 			for _, p := range params.Prompt {
 				text.WriteString(p.Text)

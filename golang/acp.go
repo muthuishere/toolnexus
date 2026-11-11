@@ -181,6 +181,10 @@ type ACPClient struct {
 
 	sessionID string
 
+	// promptCaps is the agent's initialize agentCapabilities.promptCapabilities:
+	// which non-text ContentBlocks session/prompt may carry. Text is always allowed.
+	promptCaps acpPromptCaps
+
 	// promptMu serialises turns: one ACP session is one conversation, and
 	// concurrent session/prompt calls would interleave into one transcript.
 	promptMu sync.Mutex
@@ -280,13 +284,21 @@ func LoadACP(ctx context.Context, opts ACPOptions) (*ACPClient, error) {
 	if opts.ClientCapsMeta != nil {
 		clientCaps["_meta"] = opts.ClientCapsMeta
 	}
-	if _, err := c.call(ctx, "initialize", map[string]any{
+	initRes, err := c.call(ctx, "initialize", map[string]any{
 		"protocolVersion":    protocolVersion,
 		"clientCapabilities": clientCaps,
-	}); err != nil {
+	})
+	if err != nil {
 		_ = c.Close()
 		return nil, fmt.Errorf("toolnexus: acp: initialize: %w", err)
 	}
+	var initBody struct {
+		AgentCapabilities struct {
+			PromptCapabilities acpPromptCaps `json:"promptCapabilities"`
+		} `json:"agentCapabilities"`
+	}
+	_ = json.Unmarshal(initRes, &initBody)
+	c.promptCaps = initBody.AgentCapabilities.PromptCapabilities
 
 	servers := make([]any, 0, len(opts.MCPServers))
 	for _, s := range opts.MCPServers {
@@ -524,7 +536,7 @@ func (c *ACPClient) call(ctx context.Context, method string, params any) (json.R
 // sendPrompt: one session/prompt turn, accumulating only agent_message_chunk.
 // ---------------------------------------------------------------------------
 
-func (c *ACPClient) sendPrompt(ctx context.Context, text string, emit func(StreamEvent)) (string, error) {
+func (c *ACPClient) sendPrompt(ctx context.Context, text string, parts []ContentPart, emit func(StreamEvent)) (string, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -617,7 +629,7 @@ func (c *ACPClient) sendPrompt(ctx context.Context, text string, emit func(Strea
 	idRaw, _ := json.Marshal(id)
 	p, _ := json.Marshal(map[string]any{
 		"sessionId": c.sessionID,
-		"prompt":    []map[string]any{{"type": "text", "text": text}},
+		"prompt":    c.promptBlocks(text, parts),
 	})
 	c.write(acpMsg{JSONRPC: "2.0", ID: idRaw, Method: "session/prompt", Params: p})
 
@@ -721,12 +733,12 @@ func (c *ACPClient) GenerateCtx(ctx context.Context, req InProcessRequest) (InPr
 // not the toolkit). emit may be nil. Its shape is
 // InProcessOptions.GenerateStream, so a Client built on it streams.
 func (c *ACPClient) GenerateStream(ctx context.Context, req InProcessRequest, emit func(StreamEvent)) (InProcessResponse, error) {
-	prompt := renderACPPrompt(req)
+	prompt, parts := renderACPPrompt(req)
 
 	c.promptMu.Lock()
 	defer c.promptMu.Unlock()
 
-	content, err := c.sendPrompt(ctx, prompt, emit)
+	content, err := c.sendPrompt(ctx, prompt, parts, emit)
 	if err != nil {
 		return InProcessResponse{}, err
 	}
@@ -739,11 +751,16 @@ func (c *ACPClient) GenerateStream(ctx context.Context, req InProcessRequest, em
 // and appends the supersedes marker naming the latest user turn, so a
 // stateful agent answers the current request rather than an earlier
 // near-duplicate already sitting in its own session history (ADR 0031).
-func renderACPPrompt(req InProcessRequest) string {
+//
+// Non-text parts are named in the text by their §1B one-liner (never their
+// bytes) and returned separately, to travel as native ACP blocks.
+func renderACPPrompt(req InProcessRequest) (string, []ContentPart) {
 	var b strings.Builder
+	var parts []ContentPart
 	lastUser := ""
 	for _, m := range req.Messages {
-		role, content := acpFlattenMessage(m)
+		role, content, mparts := acpFlattenMessage(m)
+		parts = append(parts, mparts...)
 		if role == "" && content == "" {
 			continue
 		}
@@ -753,20 +770,23 @@ func renderACPPrompt(req InProcessRequest) string {
 		}
 	}
 	if lastUser == "" && len(req.Messages) > 0 {
-		_, lastUser = acpFlattenMessage(req.Messages[len(req.Messages)-1])
+		_, lastUser, _ = acpFlattenMessage(req.Messages[len(req.Messages)-1])
 	}
 	fmt.Fprintf(&b, "\n%s %s", acpSupersedesMarker, lastUser)
-	return b.String()
+	return b.String(), parts
 }
 
 // acpFlattenMessage renders one message's role + content as plain text.
-// Content is usually a string; anything else (multimodal parts, etc.) is
-// JSON-encoded so it still renders as recognizable text rather than being
-// silently dropped.
-func acpFlattenMessage(m any) (role, content string) {
+// Content is usually a string. A parts array (the OpenAI chat wire shape the
+// in-process seam receives) renders its text parts as text and each media
+// part as its §1B description "<type> (<mimeType>, <bytes> bytes)" — the
+// media parts themselves are returned so they can travel as ACP blocks; their
+// base64 never enters the text. Anything else is JSON-encoded so it still
+// renders as recognizable text rather than being silently dropped.
+func acpFlattenMessage(m any) (role, content string, parts []ContentPart) {
 	mm, ok := m.(map[string]any)
 	if !ok {
-		return "", ""
+		return "", "", nil
 	}
 	role, _ = mm["role"].(string)
 	switch v := mm["content"].(type) {
@@ -774,12 +794,94 @@ func acpFlattenMessage(m any) (role, content string) {
 		content = v
 	case nil:
 		content = ""
+	case []any:
+		var texts []string
+		for _, item := range v {
+			if p, ok := acpWirePart(item); ok {
+				if p.Type == PartText {
+					texts = append(texts, p.Text)
+				} else {
+					texts = append(texts, describePart(p))
+					parts = append(parts, p)
+				}
+				continue
+			}
+			if b, err := json.Marshal(item); err == nil {
+				texts = append(texts, string(b))
+			}
+		}
+		content = strings.Join(texts, "\n")
 	default:
 		if b, err := json.Marshal(v); err == nil {
 			content = string(b)
 		}
 	}
-	return role, content
+	return role, content, parts
+}
+
+// acpWirePart reads one OpenAI chat content block back into a §1B part.
+func acpWirePart(item any) (ContentPart, bool) {
+	blk, ok := item.(map[string]any)
+	if !ok {
+		return ContentPart{}, false
+	}
+	str := func(path string) string { s, _ := dotGet(blk, path).(string); return s }
+	switch blk["type"] {
+	case "text":
+		return Text(str("text")), true
+	case "image_url":
+		u := str("image_url.url")
+		if mime, b64, err := parseDataURL(u); err == nil {
+			return ContentPart{Type: PartImage, MimeType: mime, Data: b64}, true
+		}
+		if u != "" {
+			return ContentPart{Type: PartImage, URL: u}, true
+		}
+	case "input_audio":
+		mime := "audio/" + str("input_audio.format")
+		if mime == "audio/mp3" {
+			mime = "audio/mpeg"
+		}
+		return ContentPart{Type: PartAudio, MimeType: mime, Data: str("input_audio.data")}, true
+	case "file":
+		if mime, b64, err := parseDataURL(str("file.file_data")); err == nil {
+			return ContentPart{Type: partTypeForMime(mime), MimeType: mime, Data: b64, Name: str("file.filename")}, true
+		}
+	}
+	return ContentPart{}, false
+}
+
+// acpPromptCaps mirrors ACP's promptCapabilities from the initialize reply.
+type acpPromptCaps struct {
+	Image           bool `json:"image"`
+	Audio           bool `json:"audio"`
+	EmbeddedContext bool `json:"embeddedContext"`
+}
+
+// promptBlocks builds the session/prompt ContentBlock array: the text block,
+// then one native block per media part the agent advertised support for. A
+// part the agent cannot take stays named only by its description in the text.
+func (c *ACPClient) promptBlocks(text string, parts []ContentPart) []map[string]any {
+	blocks := []map[string]any{{"type": "text", "text": text}}
+	for _, p := range parts {
+		if p.Data == "" {
+			continue // ACP image/audio blocks require inline data
+		}
+		switch {
+		case p.Type == PartImage && c.promptCaps.Image:
+			blocks = append(blocks, map[string]any{"type": "image", "mimeType": p.MimeType, "data": p.Data})
+		case p.Type == PartAudio && c.promptCaps.Audio:
+			blocks = append(blocks, map[string]any{"type": "audio", "mimeType": p.MimeType, "data": p.Data})
+		case p.Type == PartFile && c.promptCaps.EmbeddedContext:
+			name := p.Name
+			if name == "" {
+				name = "attachment"
+			}
+			blocks = append(blocks, map[string]any{"type": "resource", "resource": map[string]any{
+				"uri": "attachment:///" + name, "mimeType": p.MimeType, "blob": p.Data}})
+		}
+	}
+	return blocks
 }
 
 // ---------------------------------------------------------------------------
