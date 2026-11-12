@@ -488,6 +488,44 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 </Tabs>
 {/* /recipe */}
 
+## Images, audio and files
+
+Since 0.30.0 a part you attach reaches the ACP agent as a real content block, not as text.
+Build the part with your port's attach constructor ([Attachments → Use what you already have](/toolnexus/cookbook/attachments/#use-what-you-already-have)):
+a path, a file or stream object, raw bytes or a `data:` URL are all read into bytes straight away.
+
+| you pass | the agent receives |
+|---|---|
+| a path, a `File`/`Blob`/`FileInfo`/`io.Reader`/`InputStream`, bytes + mime | an `image` / `audio` block, or a `resource` (`attachment:///<name>`) for a file |
+| `data:<mime>;base64,…` | the same real block |
+| a bare `https://…` URL | text only: `image (, 0 bytes)`. ACP blocks carry data, and the library never downloads |
+
+A real block is sent only when the agent advertises it in `promptCapabilities` at `initialize`
+(`image`, `audio`, `embeddedContext`). Otherwise the prompt carries a one-line description such as
+`image (image/png, 67 bytes)`, never base64.
+
+```js
+const img = await attach("./shot.png")              // or attach(file), or attach(bytes, { mimeType: "image/png" })
+const res = await client.generate([{ type: "text", text: "what is broken here?" }, img])
+```
+
+**Holding only a URL?** Download it yourself and attach the bytes:
+
+```js
+const r = await fetch(url)
+const img = attach(new Uint8Array(await r.arrayBuffer()), { mimeType: r.headers.get("content-type") })
+```
+
+**Coming back:** image and audio blocks the agent returns, from its own tools or in its reply,
+land in `RunResult.files` (`from` is the tool name, or `"acp"` for reply chunks). The full rules
+are in `SPEC.md §8C`.
+
+<Aside type="caution" title="Hand-written data: URLs">
+Write `data:<mime>;base64,<b64>` with no extra parameters. A form like
+`data:image/png;charset=utf-8;base64,…` is not pinned by the spec and may parse differently
+between ports. Paths, file objects and bytes never hit this.
+</Aside>
+
 ## What was verified
 
 | | how |

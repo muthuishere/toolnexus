@@ -312,6 +312,14 @@ no OpenAI-shaped residue. Relocating on *every* style would have been simpler to
 worse to use: it discards the `tool_use_id` association, breaks cache breakpoints, and makes
 the model read tool output as user input.
 
+## Sending to a coding CLI over ACP
+
+The same parts work when the model is an ACP agent (`loadACP`): a part built from a path, a file
+object or bytes reaches the agent as a real image, audio or file block, if the agent advertises
+support for it. A bare `https://` URL is described in text only, because ACP blocks carry data and
+the library never downloads; fetch the bytes yourself and attach those. Details:
+[ACP agent → Images, audio and files](/toolnexus/in-process-client/acp-agent/#images-audio-and-files).
+
 ## When a provider can't take it
 
 Nothing is dropped quietly — silence is the bug this whole capability exists to remove. But
