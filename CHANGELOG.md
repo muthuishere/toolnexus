@@ -8,6 +8,14 @@ GitHub Releases `vX.Y.Z` via `release.yml` (see `PUBLISHING.md`).
 
 ## Unreleased
 
+**Docs: how to send an image to an ACP agent.** The ACP agent page has a new "Images, audio and
+files" section, and the Attachments cookbook links to it. It shows that a path, a file or stream
+object, bytes or a `data:` URL reaches the agent as a real block, while a bare `https://` URL is
+described in text only, since the library never downloads. If you only have a URL, fetch it and
+attach the bytes. It also warns that hand-written `data:` URLs with extra parameters
+(`;charset=…;base64`) are not pinned by the spec and may parse differently between ports. No code
+change.
+
 ## 0.30.0 — 2026-11-12
 
 **Fix: images now reach, and come back from, an ACP agent.** Before, a picture you sent through the
