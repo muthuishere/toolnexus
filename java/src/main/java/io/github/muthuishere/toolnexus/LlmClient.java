@@ -2767,10 +2767,18 @@ public final class LlmClient {
                 }
                 List<Object> content = (List<Object>) data.get("content");
                 if (content == null) content = new ArrayList<>();
+                // §8.x: Anthropic rejects empty text blocks in history; an all-empty reply is not stored
+                List<Object> kept = new ArrayList<>();
+                for (Object b : content) {
+                    Map<String, Object> block = (Map<String, Object>) b;
+                    if ("text".equals(block.get("type")) && "".equals(block.get("text"))) continue;
+                    kept.add(b);
+                }
+                boolean appended = !kept.isEmpty();
                 Map<String, Object> assistant = new LinkedHashMap<>();
                 assistant.put("role", "assistant");
-                assistant.put("content", content);
-                messages.add(assistant);
+                assistant.put("content", kept);
+                if (appended) messages.add(assistant);
 
                 List<Map<String, Object>> uses = new ArrayList<>();
                 boolean malformed = false;
@@ -2791,7 +2799,7 @@ public final class LlmClient {
                 String nudge = rec.decide(turn == maxTurns() - 1, !uses.isEmpty(), malformed,
                         "max_tokens".equals(data.get("stop_reason")), text.toString());
                 if (nudge != null) {
-                    if (rec.dropped) messages.remove(messages.size() - 1);
+                    if (rec.dropped && appended) messages.remove(messages.size() - 1);
                     messages.add(msg("user", nudge));
                     continue;
                 }
@@ -3265,17 +3273,18 @@ public final class LlmClient {
                         tu.put("input", Json.parseObjectLoose(json.isEmpty() ? "{}" : json));
                         content.add(tu);
                         uses.add(tu);
-                    } else {
+                    } else if (!b.get("text").toString().isEmpty()) { // §8.x: no empty text blocks in history
                         Map<String, Object> tx = new LinkedHashMap<>();
                         tx.put("type", "text");
                         tx.put("text", b.get("text").toString());
                         content.add(tx);
                     }
                 }
+                boolean appended = !content.isEmpty(); // §8.x: an all-empty reply is not stored
                 Map<String, Object> assistant = new LinkedHashMap<>();
                 assistant.put("role", "assistant");
                 assistant.put("content", content);
-                messages.add(assistant);
+                if (appended) messages.add(assistant);
 
                 StringBuilder text = new StringBuilder();
                 for (Object b : content) {
@@ -3285,7 +3294,7 @@ public final class LlmClient {
                 String nudge = rec.decide(turn == maxTurns() - 1, !uses.isEmpty(), malformed,
                         "max_tokens".equals(stopReason[0]), text.toString());
                 if (nudge != null) {
-                    if (rec.dropped) messages.remove(messages.size() - 1);
+                    if (rec.dropped && appended) messages.remove(messages.size() - 1);
                     messages.add(msg("user", nudge));
                     continue;
                 }

@@ -118,3 +118,45 @@ for (const style of ["openai", "anthropic"] as const) {
     }
   }
 }
+
+// Issue #235 / SPEC §8.x: an empty anthropic text block beside tool_use is never stored.
+for (const loop of ["run", "stream"] as const) {
+  test(`anthropic empty text block is not stored [${loop}]`, async () => {
+    const sent: any[] = []
+    const fetchImpl = async (_url: string, init: any) => {
+      const body = JSON.parse(init.body)
+      sent.push(body)
+      if (sent.length === 1) {
+        if (body.stream) {
+          return new Response(sse([
+            { type: "message_start", message: { usage: { input_tokens: 1, output_tokens: 0 } } },
+            { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } },
+            { type: "content_block_stop", index: 0 },
+            { type: "content_block_start", index: 1, content_block: { type: "tool_use", id: "toolu_0", name: "echo", input: {} } },
+            { type: "content_block_delta", index: 1, delta: { type: "input_json_delta", partial_json: "{}" } },
+            { type: "content_block_stop", index: 1 },
+            { type: "message_delta", delta: { stop_reason: "tool_use" }, usage: { output_tokens: 1 } },
+            { type: "message_stop" },
+          ]), { status: 200, headers: { "content-type": "text/event-stream" } })
+        }
+        return new Response(JSON.stringify({ content: [{ type: "text", text: "" }, { type: "tool_use", id: "toolu_0", name: "echo", input: {} }],
+          stop_reason: "tool_use", usage: { input_tokens: 1, output_tokens: 1 } }), { status: 200, headers: { "content-type": "application/json" } })
+      }
+      const r = { text: "done", stop: "end" }
+      if (body.stream) return new Response(anthropicSse(r), { status: 200, headers: { "content-type": "text/event-stream" } })
+      return new Response(JSON.stringify(anthropicJson(r)), { status: 200, headers: { "content-type": "application/json" } })
+    }
+    const echo = defineTool({ name: "echo", description: "echo", inputSchema: { type: "object", properties: {} }, run: () => "ok" })
+    const toolkit = await createToolkit({ builtins: false, extraTools: [echo] })
+    const client = createClient({ baseUrl: "http://scripted.invalid", style: "anthropic", model: "m", apiKey: "unused", fetch: fetchImpl as any, retries: 0 })
+    let result: any
+    if (loop === "run") result = await client.run("go", { toolkit })
+    else for await (const ev of client.stream("go", { toolkit }) as any) if (ev.type === "done") result = ev.result
+    assert.equal(result.text, "done")
+    assert.equal(sent.length, 2)
+    for (const m of sent[1].messages) {
+      if (!Array.isArray(m.content)) continue
+      for (const b of m.content) assert.ok(!(b.type === "text" && b.text === ""), `empty text block sent: ${JSON.stringify(m)}`)
+    }
+  })
+}

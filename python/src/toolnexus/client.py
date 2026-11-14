@@ -2839,7 +2839,11 @@ class Client:
                 if after is not None:
                     await _call_hook(after, {"response": data, "model": turn_model, "turn": turn})
                 content = data.get("content") or []
-                messages.append({"role": "assistant", "content": content})
+                # §8.x: Anthropic rejects empty text blocks in history; an all-empty reply is not stored
+                kept = [b for b in content if not (b.get("type") == "text" and b.get("text") == "")]
+                appended = bool(kept)
+                if appended:
+                    messages.append({"role": "assistant", "content": kept})
                 uses = [b for b in content if b.get("type") == "tool_use"]
                 text = "".join(b.get("text", "") for b in content if b.get("type") == "text")
                 fix = rec.decide(
@@ -2853,7 +2857,8 @@ class Client:
                     if fix == RECOVERY_CONTINUE:
                         rec.carry += text
                     else:
-                        messages.pop()
+                        if appended:
+                            messages.pop()
                     messages.append({"role": "user", "content": fix})
                     continue
                 if not uses:
@@ -3228,8 +3233,11 @@ class Client:
                     if b["type"] == "tool_use"
                     else {"type": "text", "text": b["text"]}
                     for b in (blocks[i] for i in sorted(blocks))
+                    if b["type"] == "tool_use" or b["text"] != ""  # §8.x: no empty text blocks in history
                 ]
-                messages.append({"role": "assistant", "content": content})
+                appended = bool(content)  # §8.x: an all-empty reply is not stored
+                if appended:
+                    messages.append({"role": "assistant", "content": content})
                 uses = [b for b in content if b["type"] == "tool_use"]
                 text = "".join(b["text"] for b in content if b["type"] == "text")
                 fix = rec.decide(
@@ -3243,7 +3251,8 @@ class Client:
                     if fix == RECOVERY_CONTINUE:
                         rec.carry += text
                     else:
-                        messages.pop()
+                        if appended:
+                            messages.pop()
                     messages.append({"role": "user", "content": fix})
                     continue
                 if stop_reason != "tool_use" or not uses:

@@ -235,3 +235,103 @@ async fn stop_recovery_conformance() {
         }
     }
 }
+
+/// Issue #235 / SPEC §8.x: an empty anthropic text block beside tool_use must never be
+/// stored in the assistant message, or the next request is rejected with a 400.
+#[tokio::test]
+async fn anthropic_empty_text_block_is_not_stored() {
+    for streaming in [false, true] {
+        let bodies: Arc<Mutex<Vec<Value>>> = Arc::default();
+        let b2 = bodies.clone();
+        let srv = serve(move |req| {
+            let bodies = b2.clone();
+            async move {
+                let i = {
+                    let mut b = bodies.lock().unwrap();
+                    b.push(req.body.clone());
+                    b.len() - 1
+                };
+                if i > 0 {
+                    let done = json!({"text": "done", "stop": "end"});
+                    return if streaming {
+                        Resp::sse(anthropic_sse(&done))
+                    } else {
+                        Resp::json(anthropic_full(&done))
+                    };
+                }
+                if !streaming {
+                    return Resp::json(json!({
+                        "content": [
+                            {"type": "text", "text": ""},
+                            {"type": "tool_use", "id": "toolu_0", "name": "echo", "input": {}}
+                        ],
+                        "stop_reason": "tool_use",
+                        "usage": {"input_tokens": 1, "output_tokens": 1}
+                    }));
+                }
+                let ev = [
+                    json!({"type": "message_start", "message": {"usage": {"input_tokens": 1}}}),
+                    json!({"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}}),
+                    json!({"type": "content_block_stop", "index": 0}),
+                    json!({"type": "content_block_start", "index": 1, "content_block": {"type": "tool_use", "id": "toolu_0", "name": "echo", "input": {}}}),
+                    json!({"type": "content_block_delta", "index": 1, "delta": {"type": "input_json_delta", "partial_json": "{}"}}),
+                    json!({"type": "content_block_stop", "index": 1}),
+                    json!({"type": "message_delta", "delta": {"stop_reason": "tool_use"}, "usage": {"output_tokens": 1}}),
+                    json!({"type": "message_stop"}),
+                ];
+                let mut out = String::new();
+                for e in ev {
+                    out.push_str(&format!("event: {}\ndata: {e}\n\n", s(&e, "type")));
+                }
+                Resp::sse(out)
+            }
+        })
+        .await;
+        let echo = define_tool(
+            "echo",
+            "echo",
+            Some(json!({"type": "object", "properties": {}})),
+            |_: Value, _| async { Ok::<_, String>("ok".to_string()) },
+        );
+        let tk = create_toolkit(toolnexus::ToolkitOptions {
+            builtins: Some(toolnexus::BuiltinsConfig::off()),
+            extra_tools: vec![echo],
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        let c = create_client(ClientOptions {
+            base_url: srv.url.clone(),
+            style: Style::Anthropic,
+            model: "m".into(),
+            api_key: "k".into(),
+            retry_base_ms: 1,
+            ..Default::default()
+        });
+        let res = if streaming {
+            let mut rx = c.stream("go", &tk).unwrap();
+            let mut res = None;
+            while let Some(ev) = rx.recv().await {
+                if ev.kind == "done" {
+                    res = ev.result;
+                }
+                assert_ne!(ev.kind, "error", "stream: {:?}", ev.error);
+            }
+            *res.expect("done")
+        } else {
+            c.run("go", &tk).await.unwrap()
+        };
+        let bodies = bodies.lock().unwrap().clone();
+        assert_eq!(res.text, "done", "stream={streaming}");
+        assert_eq!(bodies.len(), 2, "stream={streaming}");
+        let msgs = bodies[1]["messages"].as_array().unwrap();
+        for m in msgs {
+            for b in m["content"].as_array().into_iter().flatten() {
+                assert!(
+                    !(b["type"] == "text" && b["text"] == ""),
+                    "stream={streaming}: empty text block sent: {msgs:?}"
+                );
+            }
+        }
+    }
+}

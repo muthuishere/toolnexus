@@ -1782,6 +1782,9 @@ func (c *Client) runAnthropic(ctx context.Context, prompt any, tk *Toolkit, hist
 		for _, b := range data.Content {
 			switch b.Type {
 			case "text":
+				if b.Text == "" { // §8.x: Anthropic rejects empty text blocks in history
+					continue
+				}
 				content = append(content, map[string]any{"type": "text", "text": b.Text})
 				textParts = append(textParts, b.Text)
 			case "tool_use":
@@ -1800,10 +1803,13 @@ func (c *Client) runAnthropic(ctx context.Context, prompt any, tk *Toolkit, hist
 				}{b.ID, b.Name, input})
 			}
 		}
-		messages = append(messages, map[string]any{"role": "assistant", "content": content})
+		appended := len(content) > 0 // §8.x: an all-empty reply is not stored
+		if appended {
+			messages = append(messages, map[string]any{"role": "assistant", "content": content})
+		}
 
 		if nudge, drop := rec.decide(turn == c.maxTurns()-1, len(uses) > 0, malformed, data.StopReason == "max_tokens", strings.Join(textParts, "")); nudge != "" {
-			if drop {
+			if drop && appended {
 				messages = messages[:len(messages)-1]
 			}
 			messages = append(messages, map[string]any{"role": "user", "content": nudge})
@@ -2538,15 +2544,18 @@ func (c *Client) streamAnthropic(ctx context.Context, prompt any, tk *Toolkit, h
 				in := safeJSONArgs(b.json)
 				content = append(content, map[string]any{"type": "tool_use", "id": b.id, "name": b.name, "input": in})
 				uses = append(uses, useBlock{b.id, b.name, in})
-			} else {
+			} else if b.text != "" { // §8.x: Anthropic rejects empty text blocks in history
 				content = append(content, map[string]any{"type": "text", "text": b.text})
 				textParts = append(textParts, b.text)
 			}
 		}
-		messages = append(messages, map[string]any{"role": "assistant", "content": content})
+		appended := len(content) > 0 // §8.x: an all-empty reply is not stored
+		if appended {
+			messages = append(messages, map[string]any{"role": "assistant", "content": content})
+		}
 
 		if nudge, drop := rec.decide(turn == c.maxTurns()-1, len(uses) > 0, malformed, stopReason == "max_tokens", strings.Join(textParts, "")); nudge != "" {
-			if drop {
+			if drop && appended {
 				messages = messages[:len(messages)-1]
 			}
 			messages = append(messages, map[string]any{"role": "user", "content": nudge})

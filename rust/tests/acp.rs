@@ -1,7 +1,6 @@
 //! Phase 1: ACP client against the scripted fake agent (examples/fake_acp_agent.rs).
 //! Hermetic: no network, no real agent CLI.
 
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -10,22 +9,8 @@ use toolnexus::acp::{
     permission_handler, render_prompt,
 };
 
-fn fake() -> PathBuf {
-    // cargo test builds examples next to the test binary's deps dir
-    let mut p = std::env::current_exe().unwrap();
-    p.pop();
-    if p.ends_with("deps") {
-        p.pop();
-    }
-    p.push("examples");
-    p.push(if cfg!(windows) {
-        "fake_acp_agent.exe"
-    } else {
-        "fake_acp_agent"
-    });
-    assert!(p.exists(), "fake agent not built at {p:?}");
-    p
-}
+mod fake_agent;
+use fake_agent::fake;
 
 fn opts(scenario: &str) -> AcpOptions {
     AcpOptions::new(fake().to_string_lossy())

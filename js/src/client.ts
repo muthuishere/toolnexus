@@ -1364,13 +1364,13 @@ export class Client {
    * fires, remove (or keep) that assistant message, append the pinned user message, and return
    * true — the caller then takes another turn. Never on the last permitted turn.
    */
-  private recover(rs: Recovery | undefined, turn: number, messages: any[], hasCalls: boolean, malformed: boolean, truncated: boolean, text: string): boolean {
+  private recover(rs: Recovery | undefined, turn: number, messages: any[], hasCalls: boolean, malformed: boolean, truncated: boolean, text: string, appended = true): boolean {
     if (!rs || turn >= (this.opts.maxTurns ?? 10) - 1) return false
     let msg: string
     if (hasCalls) {
       if (!malformed || rs.corrected) return false
       rs.corrected = true
-      messages.pop()
+      if (appended) messages.pop()
       msg = CORRECTIVE
     } else if (truncated) {
       if (rs.continues >= 3) return false
@@ -1380,7 +1380,7 @@ export class Client {
     } else {
       if (text.trim() !== "" || rs.nudged) return false
       rs.nudged = true
-      messages.pop()
+      if (appended) messages.pop()
       msg = NUDGE
     }
     messages.push({ role: "user", content: msg })
@@ -1576,11 +1576,14 @@ export class Client {
         turnModel = lastModel = sent.value.model
         addUsage(usage, data.usage, "anthropic")
         if (this.opts.hooks?.afterLLM) await this.opts.hooks.afterLLM({ response: data, model: turnModel, turn })
-        messages.push({ role: "assistant", content: data.content })
+        // §8.x: Anthropic rejects empty text blocks in history; an all-empty reply is not stored
+        const kept = (data.content ?? []).filter((b: any) => !(b.type === "text" && b.text === ""))
+        const appended = kept.length > 0
+        if (appended) messages.push({ role: "assistant", content: kept })
         const uses = (data.content ?? []).filter((b: any) => b.type === "tool_use")
         const text = (data.content ?? []).filter((b: any) => b.type === "text").map((b: any) => b.text).join("")
         if (this.recover(rs, turn, messages, uses.length > 0, uses.some((u: any) => u.input !== undefined && !isObj(u.input)),
-          data.stop_reason === "max_tokens", text)) continue
+          data.stop_reason === "max_tokens", text, appended)) continue
         if (uses.length === 0) {
           const full = (rs?.carry ?? "") + text
           if (await this.roundEnd(messages, turn, true, full)) { if (rs) rs.carry = ""; continue }
@@ -1830,13 +1833,16 @@ export class Client {
         this.emit({ event: "llm", model: turnModel, status: "ok", ms: Date.now() - t0, promptTokens: usage.promptTokens - beforeP, completionTokens: usage.completionTokens - beforeC })
         if (this.opts.hooks?.afterLLM) await this.opts.hooks.afterLLM({ response: { streamed: true, usage }, model: turnModel, turn })
 
-        const content = [...blocks.values()].map((b) => b.type === "tool_use" ? { type: "tool_use", id: b.id, name: b.name, input: safeJson(b.json || "{}") } : { type: "text", text: b.text })
-        messages.push({ role: "assistant", content })
+        const content = [...blocks.values()]
+          .filter((b) => b.type === "tool_use" || b.text !== "") // §8.x: Anthropic rejects empty text blocks in history
+          .map((b) => b.type === "tool_use" ? { type: "tool_use", id: b.id, name: b.name, input: safeJson(b.json || "{}") } : { type: "text", text: b.text })
+        const appended = content.length > 0 // §8.x: an all-empty reply is not stored
+        if (appended) messages.push({ role: "assistant", content })
         const uses = content.filter((b: any) => b.type === "tool_use")
         const hasCalls = stopReason === "tool_use" && uses.length > 0
         const text = content.filter((b: any) => b.type === "text").map((b: any) => b.text).join("")
         if (this.recover(rs, turn, messages, hasCalls, [...blocks.values()].some((b) => b.type === "tool_use" && malformedArgs(b.json)),
-          stopReason === "max_tokens", text)) continue
+          stopReason === "max_tokens", text, appended)) continue
         if (!hasCalls) {
           if (await this.roundEnd(messages, turn, true, (rs?.carry ?? "") + text)) { if (rs) rs.carry = ""; continue }
           yield { type: "usage", usage }

@@ -3,7 +3,6 @@
 //! become §1B parts and reach `RunResult.files`. Hermetic: the fake agent is
 //! examples/fake_acp_agent.rs.
 
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use base64::Engine as _;
@@ -28,21 +27,8 @@ fn b64() -> String {
     base64::engine::general_purpose::STANDARD.encode(PNG)
 }
 
-fn fake() -> PathBuf {
-    let mut p = std::env::current_exe().unwrap();
-    p.pop();
-    if p.ends_with("deps") {
-        p.pop();
-    }
-    p.push("examples");
-    p.push(if cfg!(windows) {
-        "fake_acp_agent.exe"
-    } else {
-        "fake_acp_agent"
-    });
-    assert!(p.exists(), "fake agent not built at {p:?}");
-    p
-}
+mod fake_agent;
+use fake_agent::fake;
 
 fn opts(scenario: &str) -> AcpOptions {
     AcpOptions::new(fake().to_string_lossy())

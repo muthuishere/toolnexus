@@ -8,6 +8,15 @@ GitHub Releases `vX.Y.Z` via `release.yml` (see `PUBLISHING.md`).
 
 ## Unreleased
 
+**Fix: an Anthropic session no longer wedges after a tool call (issue #235).** Anthropic routinely
+sends an empty text block just before a `tool_use`. The `anthropic` loop stored it in the assistant
+message as `{"type":"text","text":""}`, so the next request, and every request after it in that
+conversation, failed with `400 messages: text content blocks must be non-empty`. Both the streaming
+and the non-streaming path now drop empty text blocks; if a reply had nothing else, the assistant
+message is not stored at all. Final text is unchanged. All eight ports; SPEC §8.x. A host scrubbing
+empty blocks in a `beforeLLM` hook can remove that workaround. Conversations already stored with an
+empty block are not repaired; the workaround is still needed for those.
+
 **Docs: how to send an image to an ACP agent.** The ACP agent page has a new "Images, audio and
 files" section, and the Attachments cookbook links to it. It shows that a path, a file or stream
 object, bytes or a `data:` URL reaches the agent as a real block, while a bare `https://` URL is

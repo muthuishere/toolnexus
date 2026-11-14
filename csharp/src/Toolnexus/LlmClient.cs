@@ -1695,7 +1695,11 @@ public sealed partial class LlmClient
                 _opts.Hooks?.AfterLLM?.Invoke(new AfterLLMEvent(data, turnModel, turn));
 
                 var content = data.Get("content") as List<object?> ?? new List<object?>();
-                messages.Add(new Dictionary<string, object?> { ["role"] = "assistant", ["content"] = content });
+                // §8.x: Anthropic rejects empty text blocks in history; an all-empty reply is not stored
+                var kept = content.Where(b => !(b is IDictionary<string, object?> d
+                    && (d.Get("type") as string) == "text" && d.Get("text") is string t && t.Length == 0)).ToList();
+                var appended = kept.Count > 0;
+                if (appended) messages.Add(new Dictionary<string, object?> { ["role"] = "assistant", ["content"] = kept });
 
                 var uses = content.OfType<IDictionary<string, object?>>()
                     .Where(b => (b.Get("type") as string) == "tool_use").ToList();
@@ -1709,7 +1713,7 @@ public sealed partial class LlmClient
                         data.Get("stop_reason") as string == "max_tokens", text.ToString());
                     if (nudge != null)
                     {
-                        if (drop) messages.RemoveAt(messages.Count - 1);
+                        if (drop && appended) messages.RemoveAt(messages.Count - 1);
                         messages.Add(Msg("user", nudge));
                         continue;
                     }
@@ -2168,12 +2172,13 @@ public sealed partial class LlmClient
                         contentBlocks.Add(tu);
                         uses.Add(tu);
                     }
-                    else
+                    else if (b["text"]!.ToString()!.Length > 0) // §8.x: no empty text blocks in history
                     {
                         contentBlocks.Add(new Dictionary<string, object?> { ["type"] = "text", ["text"] = b["text"]!.ToString() });
                     }
                 }
-                messages.Add(new Dictionary<string, object?> { ["role"] = "assistant", ["content"] = contentBlocks });
+                var appendedA = contentBlocks.Count > 0; // §8.x: an all-empty reply is not stored
+                if (appendedA) messages.Add(new Dictionary<string, object?> { ["role"] = "assistant", ["content"] = contentBlocks });
 
                 var textS = new StringBuilder();
                 foreach (var b in contentBlocks.OfType<IDictionary<string, object?>>())
@@ -2182,7 +2187,7 @@ public sealed partial class LlmClient
                 var (nudgeA, dropA) = rec.Decide(turn == MaxTurns() - 1, uses.Count > 0, malformedS, stopReason == "max_tokens", textS.ToString());
                 if (nudgeA != null)
                 {
-                    if (dropA) messages.RemoveAt(messages.Count - 1);
+                    if (dropA && appendedA) messages.RemoveAt(messages.Count - 1);
                     messages.Add(Msg("user", nudgeA));
                     continue;
                 }

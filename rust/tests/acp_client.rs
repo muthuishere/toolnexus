@@ -22,21 +22,8 @@ fn cases() -> Value {
     .unwrap()
 }
 
-fn fake() -> PathBuf {
-    let mut p = std::env::current_exe().unwrap();
-    p.pop();
-    if p.ends_with("deps") {
-        p.pop();
-    }
-    p.push("examples");
-    p.push(if cfg!(windows) {
-        "fake_acp_agent.exe"
-    } else {
-        "fake_acp_agent"
-    });
-    assert!(p.exists(), "fake agent not built at {p:?}");
-    p
-}
+mod fake_agent;
+use fake_agent::fake;
 
 fn opts(fake_env: &Value) -> AcpOptions {
     let mut o = AcpOptions::new(fake().to_string_lossy())
