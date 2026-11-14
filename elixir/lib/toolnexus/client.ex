@@ -2670,8 +2670,9 @@ defmodule Toolnexus.Client do
     st = %{st | usage: add_usage(st.usage, data["usage"], client.style)}
     after_llm(client, data, turn, tmodel)
     raw_content = data["content"] || []
-    content = Enum.map(raw_content, &normalize_use/1)
-    st = %{st | messages: st.messages ++ [%{"role" => "assistant", "content" => content}]}
+    # §8.x: Anthropic rejects empty text blocks in history — omit them.
+    content = raw_content |> Enum.map(&normalize_use/1) |> Enum.reject(&empty_text_block?/1)
+    {st, appended} = append_assistant(st, content)
     TurnGuard.checkpoint(st.messages)
     uses = Enum.filter(content, &(&1["type"] == "tool_use"))
     text = content |> Enum.filter(&(&1["type"] == "text")) |> Enum.map_join("", & &1["text"])
@@ -2681,7 +2682,7 @@ defmodule Toolnexus.Client do
 
     truncated = data["stop_reason"] == "max_tokens"
 
-    case recover(client, st, turn, uses != [], malformed, truncated, text) do
+    case recover(client, st, turn, uses != [], malformed, truncated, text, appended) do
       {:recover, st} ->
         loop_anthropic(client, toolkit, key, sys, run_start, st, turn + 1)
 
@@ -3200,15 +3201,17 @@ defmodule Toolnexus.Client do
           %{"type" => "text", "text" => b.text}
         end
       end)
+      # §8.x: Anthropic rejects empty text blocks in history — omit them.
+      |> Enum.reject(&empty_text_block?/1)
 
-    st = %{st | messages: st.messages ++ [%{"role" => "assistant", "content" => content}]}
+    {st, appended} = append_assistant(st, content)
     TurnGuard.checkpoint(st.messages)
     uses = Enum.filter(content, &(&1["type"] == "tool_use"))
     text = content |> Enum.filter(&(&1["type"] == "text")) |> Enum.map_join("", & &1["text"])
     malformed = Enum.any?(blocks, &(&1.type == "tool_use" and malformed_args?(&1.json)))
     truncated = stop_reason == "max_tokens"
 
-    case recover(client, st, turn, uses != [], malformed, truncated, text) do
+    case recover(client, st, turn, uses != [], malformed, truncated, text, appended) do
       {:recover, st} ->
         stream_loop_anthropic(client, toolkit, key, sys, run_start, st, turn + 1, emit)
 
@@ -3446,7 +3449,17 @@ defmodule Toolnexus.Client do
 
   # `st.messages` ends with the assembled assistant message. Returns `{:recover, st}` with the
   # pinned user message appended (assistant dropped for corrective/nudge), or `{:proceed, st}`.
-  defp recover(client, st, turn, has_calls, malformed, truncated, text) do
+  # §8.x: an anthropic text block whose text is "" is never stored in history.
+  defp empty_text_block?(%{"type" => "text"} = b), do: (b["text"] || "") == ""
+  defp empty_text_block?(_), do: false
+
+  # §8.x: an assistant reply with no remaining block is not appended at all.
+  defp append_assistant(st, []), do: {st, false}
+
+  defp append_assistant(st, content),
+    do: {%{st | messages: st.messages ++ [%{"role" => "assistant", "content" => content}]}, true}
+
+  defp recover(client, st, turn, has_calls, malformed, truncated, text, appended \\ true) do
     rec = st.rec
 
     decision =
@@ -3472,7 +3485,7 @@ defmodule Toolnexus.Client do
         {:proceed, st}
 
       {msg, drop, rec} ->
-        messages = if drop, do: Enum.drop(st.messages, -1), else: st.messages
+        messages = if drop and appended, do: Enum.drop(st.messages, -1), else: st.messages
 
         {:recover,
          %{st | rec: rec, messages: messages ++ [%{"role" => "user", "content" => msg}]}}

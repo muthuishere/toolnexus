@@ -1355,10 +1355,14 @@
 
 (defn- assistant-message
   "The assistant turn, appended to the transcript verbatim in the provider's own
-  shape (its keys came off the wire, so they go back onto it unchanged)."
+  shape (its keys came off the wire, so they go back onto it unchanged).
+  SPEC §8.x: an anthropic text block whose text is \"\" is omitted (the API rejects
+  it in history); when no block remains the result is nil and nothing is appended."
   [client body]
   (if (= "anthropic" (:style client))
-    {:role "assistant" :content (:content body)}
+    (let [blocks (vec (remove #(and (= "text" (:type %)) (= "" (str (:text %))))
+                              (:content body)))]
+      (when (seq blocks) {:role "assistant" :content blocks}))
     (get-in body [:choices 0 :message])))
 
 ;; SPEC §8 "Stop-reason recovery" — the three pinned user messages, byte-exact
@@ -2180,7 +2184,7 @@
                   msg     (assistant-message client body)
                   calls   (tool-calls-of client body)
                   before  messages
-                  messages (conj messages msg)
+                  messages (if msg (conj messages msg) messages)
                   recover (when recovery
                             (stop-recovery recovery (>= turn (dec max-turns)) (boolean (seq calls))
                                            (malformed-calls? client body) (truncated? client body)

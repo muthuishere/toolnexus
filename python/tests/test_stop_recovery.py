@@ -158,3 +158,53 @@ def test_messages_are_pinned():
     from toolnexus.client import RECOVERY_CONTINUE, RECOVERY_CORRECTIVE, RECOVERY_NUDGE
 
     assert MESSAGES == {"NUDGE": RECOVERY_NUDGE, "CONTINUE": RECOVERY_CONTINUE, "CORRECTIVE": RECOVERY_CORRECTIVE}
+
+
+class _EmptyTextFirst(_Scripted):
+    """Issue #235: turn 1 = empty text block + tool_use, turn 2 = text "done"."""
+
+    def post(self, url, headers, payload, timeout):
+        r, n = self._next(payload)
+        if n == 0:
+            return {"content": [{"type": "text", "text": ""}, {"type": "tool_use", "id": "toolu_0", "name": "echo", "input": {}}],
+                    "stop_reason": "tool_use", "usage": {"input_tokens": 1, "output_tokens": 1}}
+        return _anthropic_body(r, n)
+
+    def open(self, url, headers, payload, timeout):  # noqa: A003
+        r, n = self._next(payload)
+        if n == 0:
+            return io.BytesIO(_sse([
+                {"type": "message_start", "message": {"usage": {"input_tokens": 1}}},
+                {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}},
+                {"type": "content_block_stop", "index": 0},
+                {"type": "content_block_start", "index": 1, "content_block": {"type": "tool_use", "id": "toolu_0", "name": "echo", "input": {}}},
+                {"type": "content_block_delta", "index": 1, "delta": {"type": "input_json_delta", "partial_json": "{}"}},
+                {"type": "content_block_stop", "index": 1},
+                {"type": "message_delta", "delta": {"stop_reason": "tool_use"}, "usage": {"output_tokens": 1}},
+                {"type": "message_stop"},
+            ]))
+        return io.BytesIO(_anthropic_sse(r, n))
+
+
+@pytest.mark.parametrize("loop", ["run", "stream"])
+async def test_anthropic_empty_text_block_is_not_stored(loop):
+    async def _echo(args=None, ctx=None):
+        return ToolResult(output="ok", is_error=False)
+
+    echo = Tool(name="echo", description="echo", input_schema={"type": "object", "properties": {}}, source="native", execute=_echo)
+    toolkit = await create_toolkit(builtins=False, extra_tools=[echo])
+    transport = _EmptyTextFirst("anthropic", [None, {"text": "done", "stop": "end"}])
+    client = create_client(base_url="http://mock.local", style="anthropic", model="m", api_key="unused", http_transport=transport, retries=0)
+    if loop == "run":
+        result = await client.run("go", toolkit)
+    else:
+        result = None
+        async for ev in client.stream("go", toolkit):
+            if ev["type"] == "done":
+                result = ev["result"]
+    assert result.text == "done"
+    assert len(transport.bodies) == 2
+    for m in transport.bodies[1]["messages"]:
+        if isinstance(m.get("content"), list):
+            for b in m["content"]:
+                assert not (b.get("type") == "text" and b.get("text") == ""), m

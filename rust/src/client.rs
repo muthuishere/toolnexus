@@ -1724,8 +1724,11 @@ impl Client {
             match b.get("type").and_then(Value::as_str) {
                 Some("text") => {
                     let t = b.get("text").and_then(Value::as_str).unwrap_or("");
-                    content.push(json!({"type": "text", "text": t}));
-                    text.push_str(t);
+                    // §8.x: Anthropic rejects empty text blocks in history.
+                    if !t.is_empty() {
+                        content.push(json!({"type": "text", "text": t}));
+                        text.push_str(t);
+                    }
                 }
                 Some("tool_use") => {
                     let id = b.get("id").and_then(Value::as_str).unwrap_or("");
@@ -1743,11 +1746,12 @@ impl Client {
                 _ => {}
             }
         }
-        let asst = json!({"role": "assistant", "content": content});
+        // §8.x: an all-empty reply is not stored.
+        let asst = (!content.is_empty()).then(|| json!({"role": "assistant", "content": content}));
         if calls.is_empty() {
-            return Ok((Some(asst), TurnEnd::Final(text), data));
+            return Ok((asst, TurnEnd::Final(text), data));
         }
-        Ok((Some(asst), TurnEnd::Calls(calls), data))
+        Ok((asst, TurnEnd::Calls(calls), data))
     }
 
     async fn read_stream(
@@ -2017,16 +2021,19 @@ impl Client {
                     name: b.name,
                     args: input,
                 });
-            } else {
+            } else if !b.text.is_empty() {
+                // §8.x: Anthropic rejects empty text blocks in history.
                 content_blocks.push(json!({"type": "text", "text": b.text}));
                 text.push_str(&b.text);
             }
         }
-        let asst = json!({"role": "assistant", "content": content_blocks});
+        // §8.x: an all-empty reply is not stored.
+        let asst = (!content_blocks.is_empty())
+            .then(|| json!({"role": "assistant", "content": content_blocks}));
         if stop_reason != "tool_use" || calls.is_empty() {
-            return Ok((Some(asst), TurnEnd::Final(text), streamed));
+            return Ok((asst, TurnEnd::Final(text), streamed));
         }
-        Ok((Some(asst), TurnEnd::Calls(calls), streamed))
+        Ok((asst, TurnEnd::Calls(calls), streamed))
     }
 
     // -- tools ------------------------------------------------------------------

@@ -86,3 +86,36 @@
     (is (= 11 (count cases)))
     (doseq [style ["openai" "anthropic"] kase cases]
       (replay style messages kase))))
+
+;; Issue #235 / SPEC §8.x — an empty anthropic text block beside tool_use must
+;; never be stored in the assistant message, or the next request is rejected
+;; with a 400 ("text content blocks must be non-empty"). Run loop only (this
+;; port has no SSE streaming path).
+(deftest anthropic-empty-text-block-is-not-stored
+  (let [bodies (atom [])
+        echo   (tool/tool {:name "echo" :description "echo tool"
+                           :input-schema {:type "object" :properties {}}
+                           :execute (fn [_] (tool/success "ok"))})
+        turn1  {:id "msg_0" :type "message" :role "assistant" :stop_reason "tool_use"
+                :content [{:type "text" :text ""}
+                          {:type "tool_use" :id "toolu_0" :name "echo" :input {}}]
+                :usage {:input_tokens 1 :output_tokens 1}}
+        turn2  {:id "msg_1" :type "message" :role "assistant" :stop_reason "end_turn"
+                :content [{:type "text" :text "done"}]
+                :usage {:input_tokens 1 :output_tokens 1}}
+        c      (client/create-client
+                {:base-url "http://127.0.0.1:1" :style "anthropic" :model "m" :api-key "k"
+                 :retries 0
+                 :http-client (fn [_u _h body]
+                                (let [i (count @bodies)]
+                                  (swap! bodies conj (if (string? body) (json/read-str body) body))
+                                  {:status 200 :body (json/write-str (if (zero? i) turn1 turn2))}))})
+        r      (client/run c "go" {:toolkit (tool/toolkit [echo])})
+        msgs   (:messages (second @bodies))]
+    (is (= "done" (:text r)))
+    (is (= 2 (count @bodies)))
+    (is (not-any? (fn [m]
+                    (and (sequential? (:content m))
+                         (some #(and (= "text" (:type %)) (= "" (:text %))) (:content m))))
+                  msgs)
+        (str "empty text block sent: " (pr-str msgs)))))

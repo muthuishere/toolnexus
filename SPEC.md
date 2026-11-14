@@ -3701,6 +3701,15 @@ byte-identical to today.
   (the instance passed in, else the default in-memory one) so a host can read/rewind the transcript
   and share state with the stateful `ask` — no shadow copy needed.
 
+### 8.x Empty assistant text blocks (issue #235)
+
+Anthropic rejects a request whose history holds a text block with `""` ("text content blocks must
+be non-empty"), and it routinely streams an empty text block before a `tool_use`. So when the
+`anthropic` loop rebuilds the assistant message from a response, **streaming and non-streaming
+alike**, it SHALL omit every text block whose text is `""`. If no block remains, the assistant
+message is **not appended** (no placeholder). The run's final text is unchanged: empty blocks
+contributed nothing to it. The `openai` style is unaffected (its assistant `content` is a string).
+
 ---
 
 ## 8A. Content-part emission and the tool-result relocation rule
