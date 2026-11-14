@@ -250,6 +250,8 @@ fn shell_candidates() -> Vec<Vec<String>> {
     }
 }
 
+// The cfg(windows) block makes the clippy suggestion wrong on Windows.
+#[allow(clippy::needless_bool)]
 fn look_path(cmd: &str) -> bool {
     let p = Path::new(cmd);
     if p.is_absolute() || cmd.contains('/') || cmd.contains('\\') {
