@@ -3353,6 +3353,25 @@ delta until the consumer has received it, so a buffering implementation deadlock
 The injectable transport (Gap 2) is unchanged and remains the answer for proxy, mTLS and
 record-replay — this is a second constructor over it, not a second seam.
 
+### Local models (change `add-local-functiongemma-provider`; Go only so far, other ports pending)
+
+`createLocalClient({ baseUrl, model?, format?, apiKey?, prefill?, maxTokens?, …client options })`
+targets a model served on the host's own machine.
+
+- `format: "openai"` (default) — an ordinary client against the OpenAI-compatible `baseUrl`
+  (llama-server, vLLM, Ollama `/v1`). It never fails with `no API key`: with no `apiKey` it sends a
+  placeholder.
+- `format: "functiongemma"` — an in-process client (above) whose generate calls
+  `<baseUrl>/chat/completions` with FunctionGemma's conventions: the first message is a `developer`
+  message whose first line is exactly `You are a model that can do function calling with the
+  following functions` (system prompt text follows on later lines), `temperature: 0`,
+  `stop: ["<end_function_call>"]`, the toolkit's tools, and with `prefill` an assistant message
+  `<start_function_call>call:` last. The reply text is parsed with `parseFunctionGemmaCalls`: every
+  `call:NAME{k:<escape>v<escape>,n:3}` becomes one tool call in order (escaped values are strings;
+  bare values are integers, floats, `true`/`false`/`null`, else strings); text with no call is the
+  answer. A continuation without the prefix (servers that return only what follows the prefill) is
+  parsed as if the prefix were present.
+
 #### ACP model source — host hooks (onPermission/onUpdate/streaming: all eight ports; cancellation: all but elixir and clojure, `openspec/changes/add-go-host-asks` 2.6e)
 
 An ACP source (one warm `session/prompt` per turn over a child agent; ADR 0031) MAY take three
