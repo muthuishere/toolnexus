@@ -8,6 +8,14 @@ GitHub Releases `vX.Y.Z` via `release.yml` (see `PUBLISHING.md`).
 
 ## Unreleased
 
+**New (Go only; other ports pending): local models, including FunctionGemma.** `CreateLocalClient`
+targets a model on the host's own machine. Format `openai` (default) is a normal client for any
+OpenAI-compatible local server and no longer needs an invented API key. Format `functiongemma` lets
+tiny models that print their own call text drive the tool loop: it pins FunctionGemma's developer
+line, stops at `<end_function_call>`, can prefill `<start_function_call>call:`, and parses
+`call:name{k:<escape>v<escape>,n:3}` into tool calls (`ParseFunctionGemmaCalls`). SPEC.md §8 "Local
+models"; change `openspec/changes/add-local-functiongemma-provider`.
+
 **Fix: an Anthropic session no longer wedges after a tool call (issue #235).** Anthropic routinely
 sends an empty text block just before a `tool_use`. The `anthropic` loop stored it in the assistant
 message as `{"type":"text","text":""}`, so the next request, and every request after it in that
